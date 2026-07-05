@@ -10,6 +10,10 @@ dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.34",
     "pydantic-settings>=2.6",
+    "fastembed>=0.8.0",
+    "sqlite-vec>=0.1.9",
+    "langgraph-checkpoint-sqlite>=3.1.0",
+    "pyyaml>=6.0.3",
 ]
 
 [dependency-groups]

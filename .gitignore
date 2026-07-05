@@ -11,5 +11,9 @@ __pycache__/
 # Environment
 .env
 
+# Runtime memory store (notes + vector/checkpointer DB) — repo root only,
+# so the source package src/assistant/memory/ is still tracked.
+/memory/
+
 # OS / editor
 .DS_Store

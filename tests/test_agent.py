@@ -19,10 +19,10 @@ def test_health() -> None:
     assert resp.json() == {"status": "ok"}
 
 
-def test_agent_graph_compiles() -> None:
+def test_agent_graph_compiles(tmp_path) -> None:
     from assistant.agent import build_agent
 
-    graph = build_agent()
+    graph = build_agent(Settings(memory_dir=str(tmp_path / "memory")))
     # A compiled graph exposes invoke; we don't call it (that would hit Codex).
     assert hasattr(graph, "invoke")
 
