@@ -75,7 +75,9 @@ def save_memory(
 
     A near-duplicate (embedding cosine ≥ ``settings.dedup_threshold``) of the same
     kind updates the existing note in place — keeping its name, creation date, and
-    reinforcement counters — instead of creating a second copy.
+    reinforcement counters — instead of creating a second copy. A durable save may
+    also absorb a durable note of the *other* kind at the stricter
+    ``dedup_cross_kind_threshold``; episodic traces never merge across kinds.
     """
     body = body.strip()
     desc = (description or body).strip()
@@ -91,25 +93,43 @@ def save_memory(
     )
 
     vector = embed_one(note.index_text, settings)
-    # Dedup only within the same kind: an episodic trace must never swallow a
+
+    def _absorb(existing: Note) -> Note:
+        """Take over an existing note's identity (name/created/counters)."""
+        note.name = existing.name
+        note.created = existing.created
+        stats = index.get_stats(settings, existing.name)
+        note.recall_count, note.last_recalled = stats or (
+            existing.recall_count,
+            existing.last_recalled,
+        )
+        return _write_and_index(settings, note, vector)
+
+    hits = index.search_ranked(settings, vector, k=settings.dedup_candidates)
+
+    # Dedup pass 1 — same kind only: an episodic trace must never swallow a
     # distilled semantic/procedural fact just because they read alike.
-    for name, _path, _desc, hit_kind, _sal, _rc, _lr, sim in index.search_ranked(
-        settings, vector, k=5
-    ):
+    for name, _path, _desc, hit_kind, _sal, _rc, _lr, sim in hits:
         if sim < settings.dedup_threshold:
             break  # results are sorted best-first; nothing else will qualify
         if hit_kind != note.kind:
             continue
         existing = store.find_note(settings, name)
         if existing is not None:
-            note.name = existing.name
-            note.created = existing.created
-            stats = index.get_stats(settings, existing.name)
-            note.recall_count, note.last_recalled = stats or (
-                existing.recall_count,
-                existing.last_recalled,
-            )
-            return _write_and_index(settings, note, vector)
+            return _absorb(existing)
+
+    # Dedup pass 2 — across the durable kinds (semantic <-> procedural) at a
+    # stricter threshold, so a rephrased fact that arrives labelled as the other
+    # kind updates the original instead of duplicating it. Episodic never merges.
+    if note.kind != "episodic":
+        for name, _path, _desc, hit_kind, _sal, _rc, _lr, sim in hits:
+            if sim < settings.dedup_cross_kind_threshold:
+                break
+            if hit_kind == note.kind or hit_kind == "episodic":
+                continue
+            existing = store.find_note(settings, name)
+            if existing is not None:
+                return _absorb(existing)
 
     note.name = store.unique_name(settings, note.name)
     return _write_and_index(settings, note, vector)
@@ -168,26 +188,48 @@ def forget_memory(settings: Settings, query: str) -> Note | None:
 
     # Fuzzy fallback — never fuzzy-delete an episodic trace (those are a log,
     # pruned by consolidation, not by a loose text match).
-    for name, _path, _desc, kind, _sal, _rc, _lr, sim in index.search_ranked(
-        settings, embed_query(query, settings), k=5
+    candidates = [
+        (name, sim)
+        for name, _path, _desc, kind, _sal, _rc, _lr, sim in index.search_ranked(
+            settings, embed_query(query, settings), k=5
+        )
+        if kind != "episodic" and sim >= settings.forget_threshold
+    ]
+    if not candidates:
+        return None
+    # Ambiguity guard: when two notes match about equally well, deleting nothing
+    # beats deleting the wrong memory — the caller can retry by exact name.
+    if (
+        len(candidates) > 1
+        and candidates[0][1] - candidates[1][1] < settings.forget_ambiguity_margin
     ):
-        if sim < settings.forget_threshold:
-            break
-        if kind == "episodic":
-            continue
-        deleted = store.delete_note(settings, name)
-        index.remove(settings, name)
-        store.regenerate_index(settings)
-        return deleted
-    return None
+        logger.warning(
+            "fuzzy forget %r is ambiguous between %r (%.3f) and %r (%.3f); skipping",
+            query, candidates[0][0], candidates[0][1],
+            candidates[1][0], candidates[1][1],
+        )
+        return None
+    name = candidates[0][0]
+    deleted = store.delete_note(settings, name)
+    index.remove(settings, name)
+    store.regenerate_index(settings)
+    return deleted
 
 
 def record_episode(
     settings: Settings, user_msg: str, assistant_msg: str, source: str = ""
-) -> Note:
-    """Write a compact episodic trace of one turn (no LLM, low salience)."""
+) -> Note | None:
+    """Write a compact episodic trace of one turn (no LLM, low salience).
+
+    Gated so the log stays signal, not noise: returns ``None`` (no trace) when
+    the user message is too short to matter (greetings, "ok") or when the trace
+    would near-duplicate an existing episode.
+    """
     user_msg = user_msg.strip()
     assistant_msg = assistant_msg.strip()
+    min_chars = settings.episodic_min_chars
+    if min_chars > 0 and len(user_msg) < min_chars:
+        return None
     desc = f"{_today()}: " + (user_msg[:80] + ("…" if len(user_msg) > 80 else ""))
     body = f"User: {user_msg[:600]}\nAssistant: {assistant_msg[:600]}".strip()
     note = Note(
@@ -200,7 +242,15 @@ def record_episode(
         source=source,
         updated=_today(),
     )
-    return _write_and_index(settings, note, embed_one(note.index_text, settings))
+    vector = embed_one(note.index_text, settings)
+    for _name, _path, _desc, hit_kind, _sal, _rc, _lr, sim in index.search_ranked(
+        settings, vector, k=3
+    ):
+        if sim < settings.episodic_dedup_threshold:
+            break
+        if hit_kind == "episodic":
+            return None  # a repeat of an exchange the log already covers
+    return _write_and_index(settings, note, vector)
 
 
 # --------------------------------------------------------------------------- #
@@ -231,6 +281,8 @@ Return a JSON array of operations, each one of:
   {{"op": "save", "kind": "semantic|procedural", "description": "<short summary>", "body": "<one clear sentence>", "salience": <0..1>}}
   {{"op": "update", "name": "<existing memory name>", "description": "<short summary>", "body": "<the corrected sentence>"}}
   {{"op": "forget", "name": "<existing memory name>"}}   (or {{"op": "forget", "query": "<what to drop>"}})
+For "forget", always use the exact name when the memory appears in the known
+list; only use "query" for memories not shown.
 Return [] if nothing should change. Output JSON only — no prose, no code fences.
 
 Known relevant memories:
@@ -293,9 +345,10 @@ def update_memory(
 
     applied: list[str] = []
 
-    # 1. Episodic trace — always, cheaply.
+    # 1. Episodic trace — cheap, gated (skips small talk and repeats).
     try:
-        record_episode(settings, user_msg, assistant_msg, source=source)
+        if record_episode(settings, user_msg, assistant_msg, source=source) is None:
+            logger.debug("episodic trace skipped (too short or near-duplicate)")
     except Exception:
         logger.exception("failed to record episodic trace")
 

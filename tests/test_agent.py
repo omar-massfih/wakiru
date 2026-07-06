@@ -5,6 +5,8 @@ from __future__ import annotations
 from fastapi.testclient import TestClient
 
 import pytest
+from langchain_core.language_models.fake_chat_models import FakeListChatModel
+from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage
 
 from assistant.api import app
 from assistant.codex_runner import build_command
@@ -57,3 +59,82 @@ def test_stub_providers_raise_not_implemented() -> None:
     for provider in ("openai", "anthropic"):
         with pytest.raises(NotImplementedError):
             build_model(Settings(llm_provider=provider))
+
+
+# --- background working-memory summarization -------------------------------- #
+
+
+def _wm_settings(tmp_path, **overrides) -> Settings:
+    return Settings(
+        memory_dir=str(tmp_path / "memory"),
+        enable_calendar=False,
+        working_memory_max_messages=4,
+        working_memory_keep_recent=2,
+        **overrides,
+    )
+
+
+def _history(n: int) -> list:
+    return [
+        (HumanMessage if i % 2 == 0 else AIMessage)(content=f"m{i}", id=str(i))
+        for i in range(n)
+    ]
+
+
+def test_summarize_fold_below_threshold_returns_none(tmp_path) -> None:
+    from assistant.agent import summarize_fold
+
+    settings = _wm_settings(tmp_path)
+    model = FakeListChatModel(responses=["unused"])
+    assert summarize_fold(settings, model, _history(4), "") is None
+
+
+def test_summarize_fold_folds_older_messages(tmp_path) -> None:
+    from assistant.agent import summarize_fold
+
+    settings = _wm_settings(tmp_path)
+    model = FakeListChatModel(responses=["folded summary"])
+    update = summarize_fold(settings, model, _history(6), "old summary")
+    assert update is not None
+    assert update["summary"] == "folded summary"
+    assert all(isinstance(m, RemoveMessage) for m in update["messages"])
+    # Everything but the keep_recent tail is folded, by id.
+    assert {m.id for m in update["messages"]} == {"0", "1", "2", "3"}
+
+
+def test_summarize_fold_model_failure_returns_none(tmp_path) -> None:
+    from assistant.agent import summarize_fold
+
+    class BoomModel:
+        def invoke(self, *_args, **_kwargs):
+            raise RuntimeError("model down")
+
+    settings = _wm_settings(tmp_path)
+    assert summarize_fold(settings, BoomModel(), _history(6), "") is None
+
+
+def test_maybe_summarize_trims_thread_in_background(tmp_path, monkeypatch) -> None:
+    from assistant.agent import build_agent, maybe_summarize
+
+    # Offline: fake both the chat model and the embedder.
+    monkeypatch.setattr(
+        "assistant.agent.build_model",
+        lambda s=None: FakeListChatModel(responses=["ok"]),
+    )
+    monkeypatch.setattr(
+        "assistant.memory.embeddings._embed",
+        lambda texts, prefix="", settings=None: [[1.0] + [0.0] * 63 for _ in texts],
+    )
+    settings = _wm_settings(tmp_path)
+    graph = build_agent(settings)
+    config = {"configurable": {"thread_id": "t1"}}
+    for i in range(3):
+        graph.invoke({"messages": [HumanMessage(content=f"message {i}")]}, config=config)
+
+    # The reply path no longer trims: 6 messages sit above the threshold of 4.
+    assert len(graph.get_state(config).values["messages"]) == 6
+
+    maybe_summarize(graph, settings, "t1")
+    state = graph.get_state(config)
+    assert len(state.values["messages"]) == 2  # keep_recent tail, fully folded
+    assert state.values["summary"]

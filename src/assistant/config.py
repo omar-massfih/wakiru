@@ -49,6 +49,16 @@ class Settings(BaseSettings):
     # Master switch for long-term memory upkeep. When True, an LLM extraction
     # runs after each turn (in the background) to save/update/forget notes.
     enable_auto_memory: bool = True
+    # Cap per kind on how many index entries are injected into the prompt each
+    # turn (-1 = unlimited, 0 = omit the kind entirely). Bounds the per-turn
+    # context as notes accumulate; MEMORY.md on disk is never trimmed. Episodic
+    # defaults to 0: raw traces are recalled semantically when relevant, and a
+    # listing of them is noise.
+    context_index_max_per_kind: dict[str, int] = {
+        "semantic": 20,
+        "procedural": 10,
+        "episodic": 0,
+    }
 
     # --- Dedup / forget thresholds (cosine; model-dependent!) ---
     # A new save whose nearest same-kind note scores >= this is treated as a
@@ -56,8 +66,19 @@ class Settings(BaseSettings):
     # similarities cluster high (restatements ~0.97, distinct facts ~0.85). Lower
     # this for models with a wider similarity spread (e.g. ~0.85 for MiniLM).
     dedup_threshold: float = 0.90
-    # Floor for deleting a note by a fuzzy (non-exact-name) forget query.
-    forget_threshold: float = 0.80
+    # How many nearest notes a save is deduped against.
+    dedup_candidates: int = 10
+    # A durable save matching a durable note of the OTHER kind at/above this
+    # updates it in place (semantic <-> procedural only; episodic never merges).
+    # Deliberately above dedup_threshold: crossing kinds needs near-certainty.
+    dedup_cross_kind_threshold: float = 0.95
+    # Floor for deleting a note by a fuzzy (non-exact-name) forget query. With
+    # e5-large, distinct facts sit ~0.85 and restatements ~0.97, so 0.88 clears
+    # unrelated facts while still catching paraphrased targets.
+    forget_threshold: float = 0.88
+    # Fuzzy forget is skipped (no-op) when the two best matches are this close —
+    # deleting nothing beats deleting the wrong memory.
+    forget_ambiguity_margin: float = 0.03
 
     # --- Retrieval ranking (blended re-rank on top of cosine) ---
     # Candidate pool size = recall_top_k * this, re-ranked then trimmed to top_k.
@@ -86,6 +107,20 @@ class Settings(BaseSettings):
     episodic_initial_salience: float = 0.25
     salience_prune_floor: float = 0.05
     episodic_max_age_days: int = 30
+    # Skip the per-turn episodic trace for very short user messages (0 disables).
+    episodic_min_chars: int = 12
+    # Skip the trace when it near-duplicates an existing episode (cosine).
+    episodic_dedup_threshold: float = 0.97
+    # Hard per-kind note caps enforced during consolidation (0 = uncapped).
+    # Lowest retention-score notes are evicted first.
+    max_notes_per_kind: dict[str, int] = {
+        "semantic": 200,
+        "procedural": 100,
+        "episodic": 200,
+    }
+    # Half-life (days) for the effective-salience decay of durable notes that
+    # have never been recalled (0 disables). Decay never deletes a note.
+    durable_decay_half_life_days: float = 180.0
 
     # --- Working memory (conversation history) ---
     # Summarize + trim history once it exceeds this many messages (0 disables).

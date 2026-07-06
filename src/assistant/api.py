@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import itertools
 import logging
 import uuid
 from contextlib import asynccontextmanager
@@ -14,17 +13,14 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException
 from langchain_core.messages import HumanMessage
 from pydantic import BaseModel
 
-from .agent import build_agent
+from .agent import build_agent, maybe_summarize
 from .calendar import run_reminders, update_calendar
 from .calendar.context import resolve_tz, upcoming_events
 from .codex_runner import CodexError
 from .config import get_settings
-from .memory import consolidate_memory, store, update_memory
+from .memory import consolidate_memory, index, store, update_memory
 
 logger = logging.getLogger(__name__)
-
-# Simple in-process turn counter driving periodic consolidation.
-_turn_counter = itertools.count(1)
 
 
 async def _reminder_tick_loop() -> None:
@@ -99,15 +95,20 @@ def chat(req: ChatRequest, background: BackgroundTasks) -> ChatResponse:
     # episodic trace plus a reconciling LLM extraction (save/update/forget).
     background.add_task(update_memory, None, req.message, reply, thread_id)
 
+    # Working-memory upkeep, also off the request path: fold older turns into
+    # the rolling summary once this thread's history grows past the threshold.
+    settings = get_settings()
+    background.add_task(maybe_summarize, _agent(), settings, thread_id)
+
     # Calendar upkeep, also off the request path: a reconciling LLM extraction
     # that creates/reschedules/cancels events from the turn.
-    settings = get_settings()
     if settings.enable_calendar and settings.enable_auto_schedule:
         background.add_task(update_calendar, None, req.message, reply)
 
-    # Periodic consolidation ("sleep"), also in the background.
+    # Periodic consolidation ("sleep"), also in the background. The counter is
+    # persisted in the index DB so the cadence survives server restarts.
     every = settings.consolidate_every_n_turns
-    if every > 0 and next(_turn_counter) % every == 0:
+    if every > 0 and index.bump_turn_counter(settings) % every == 0:
         background.add_task(consolidate_memory, None)
 
     return ChatResponse(reply=reply, thread_id=thread_id)

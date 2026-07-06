@@ -38,8 +38,9 @@ across conversations.
 
 How your memory works:
 - Memories relevant to the current message are provided to you below under
-  "Relevant memories", and everything you know is listed by title under "Memory
-  index". Rely on these; never invent memories you were not given.
+  "Relevant memories", and a selection of what you know is listed by title under
+  "Memory index" (it may be partial; relevant memories are always retrieved for
+  you). Rely on these; never invent memories you were not given.
 - Your memory has three kinds: semantic (durable facts and preferences),
   procedural (learned how-to knowledge), and episodic (things that happened).
 - Your memory is maintained for you automatically. After each turn the system
@@ -80,6 +81,32 @@ def _recency(stamp: str, half_life_days: float) -> float:
     return math.exp(-math.log(2) * days / max(half_life_days, 1e-6))
 
 
+def retention_score(
+    settings: Settings,
+    kind: str,
+    salience: float,
+    recall_count: int,
+    last_recalled: str,
+    updated: str,
+) -> float:
+    """How valuable a note is independent of any query.
+
+    The non-similarity part of the recall blend (recency + reuse + salience +
+    kind bias). Also ranks the bounded index view and drives eviction when
+    consolidation enforces the per-kind note caps.
+    """
+    recency = max(_recency(last_recalled, settings.recall_recency_half_life_days),
+                  _recency(updated, settings.recall_recency_half_life_days))
+    reuse = math.log1p(max(recall_count, 0)) / math.log(2 + settings.recall_reuse_cap)
+    reuse = min(reuse, 1.0)
+    return (
+        settings.recall_w_recency * recency
+        + settings.recall_w_reuse * reuse
+        + settings.recall_w_salience * salience
+        + settings.recall_kind_bias.get(kind, 0.0)
+    )
+
+
 def _blended_score(
     settings: Settings,
     similarity: float,
@@ -89,16 +116,8 @@ def _blended_score(
     last_recalled: str,
     updated: str,
 ) -> float:
-    recency = max(_recency(last_recalled, settings.recall_recency_half_life_days),
-                  _recency(updated, settings.recall_recency_half_life_days))
-    reuse = math.log1p(max(recall_count, 0)) / math.log(2 + settings.recall_reuse_cap)
-    reuse = min(reuse, 1.0)
-    return (
-        settings.recall_w_similarity * similarity
-        + settings.recall_w_recency * recency
-        + settings.recall_w_reuse * reuse
-        + settings.recall_w_salience * salience
-        + settings.recall_kind_bias.get(kind, 0.0)
+    return settings.recall_w_similarity * similarity + retention_score(
+        settings, kind, salience, recall_count, last_recalled, updated
     )
 
 
@@ -142,18 +161,57 @@ def _load(settings: Settings, name: str, path: str) -> Note | None:
     return store.find_note(settings, name)  # file moved/renamed — fall back to name
 
 
+def build_index_view(settings: Settings) -> str:
+    """A bounded, per-kind view of the memory index for prompt injection.
+
+    ``MEMORY.md`` on disk stays complete (the human-readable artifact); this
+    view trims each kind to its ``context_index_max_per_kind`` most valuable
+    entries by :func:`retention_score`, so the injected index cannot grow
+    without bound as notes accumulate. Built entirely from the index DB — no
+    file reads.
+    """
+    by_kind: dict[str, list[tuple[float, str, str]]] = {}
+    for name, desc, kind, salience, rc, lr, updated in index.list_entries(settings):
+        score = retention_score(settings, kind, salience, rc, lr, updated)
+        by_kind.setdefault(kind, []).append((score, name, desc))
+    if not by_kind:
+        return "_(empty)_"
+
+    order = [k for k in store._KIND_ORDER if k in by_kind]
+    order += [k for k in sorted(by_kind) if k not in store._KIND_ORDER]
+
+    counts = ", ".join(f"{len(by_kind[k])} {k}" for k in order)
+    caps = settings.context_index_max_per_kind
+    trimmed = False
+    lines = [f"Memory: {counts}."]
+    for kind in order:
+        cap = caps.get(kind, -1)
+        if cap == 0:
+            trimmed = True
+            continue
+        group = sorted(by_kind[kind], reverse=True)
+        if cap > 0 and len(group) > cap:
+            group = group[:cap]
+            trimmed = True
+        lines.append(f"\n### {kind.capitalize()}")
+        lines.extend(f"- **{name}** — {desc}" for _score, name, desc in group)
+    if trimmed:
+        lines[0] += " Showing the most valuable entries."
+    return "\n".join(lines)
+
+
 def build_context_message(
     settings: Settings, results: list[tuple[Note, float]]
 ) -> SystemMessage:
     """Compose the system message injected ahead of the user's turn.
 
-    Always includes the base :data:`SYSTEM_PROMPT` and the compact ``MEMORY.md``
-    index (so the model knows what it knows), plus the full text of any relevant
-    recalled notes, labelled by kind.
+    Always includes the base :data:`SYSTEM_PROMPT` and a bounded view of the
+    memory index (so the model knows what it knows), plus the full text of any
+    relevant recalled notes, labelled by kind.
     """
     parts = [
         SYSTEM_PROMPT,
-        "\n## Memory index\n" + store.read_index(settings),
+        "\n## Memory index\n" + build_index_view(settings),
     ]
     if results:
         recalled = "\n\n".join(

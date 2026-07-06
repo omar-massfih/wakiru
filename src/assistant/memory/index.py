@@ -178,6 +178,46 @@ def search_ranked(
         conn.close()
 
 
+def list_entries(
+    settings: Settings,
+) -> list[tuple[str, str, str, float, int, str, str]]:
+    """All index rows as ``(name, description, kind, salience, recall_count,
+    last_recalled, updated)`` — enough to rank the injected index view and the
+    consolidation eviction pass without opening any files. ``salience`` is the
+    *effective* value (consolidation may have decayed it below the file's copy).
+    """
+    conn = _connect(settings)
+    try:
+        return conn.execute(
+            "SELECT name, description, kind, salience, recall_count,"
+            " last_recalled, updated FROM notes"
+        ).fetchall()
+    finally:
+        conn.close()
+
+
+def bump_turn_counter(settings: Settings) -> int:
+    """Increment and return the persistent chat-turn counter.
+
+    Drives the periodic-consolidation cadence; lives in the ``meta`` table so it
+    survives server restarts (an in-process counter would reset and could starve
+    consolidation under frequent restarts).
+    """
+    conn = _connect(settings)
+    try:
+        conn.execute(
+            "INSERT INTO meta(key, value) VALUES ('turn_count', '1') "
+            "ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + 1"
+        )
+        row = conn.execute(
+            "SELECT value FROM meta WHERE key = 'turn_count'"
+        ).fetchone()
+        conn.commit()
+        return int(row[0])
+    finally:
+        conn.close()
+
+
 def bump_recall(settings: Settings, names: list[str]) -> None:
     """Reinforce: increment ``recall_count`` and stamp ``last_recalled`` = today.
 

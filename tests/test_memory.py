@@ -41,6 +41,7 @@ def settings(tmp_path) -> Settings:
         enable_auto_memory=False,
         dedup_threshold=0.8,
         forget_threshold=0.4,
+        forget_ambiguity_margin=0.1,
     )
 
 
@@ -234,7 +235,12 @@ def test_reindex_on_model_change_preserves_counters(settings, tmp_path) -> None:
 
 
 def test_update_memory_applies_save_update_forget(tmp_path, monkeypatch) -> None:
-    settings = Settings(memory_dir=str(tmp_path / "memory"), enable_auto_memory=True)
+    # episodic_min_chars=0: the short "user text" message must still leave a trace.
+    settings = Settings(
+        memory_dir=str(tmp_path / "memory"),
+        enable_auto_memory=True,
+        episodic_min_chars=0,
+    )
     learn.save_memory(settings, body="The user's favorite color is teal.", description="favorite color")
     home = learn.save_memory(settings, body="The user lives in Oslo.", description="Where the user lives")
 
@@ -264,6 +270,103 @@ def test_update_memory_disabled_is_noop(tmp_path, monkeypatch) -> None:
         lambda *a, **k: pytest.fail("run_codex must not be called when disabled"),
     )
     assert learn.update_memory(settings, "hi", "hello") == []
+
+
+# --- bounded index view ----------------------------------------------------- #
+
+
+def test_index_view_caps_per_kind(settings) -> None:
+    settings.context_index_max_per_kind = {"semantic": 2, "procedural": -1, "episodic": 0}
+    for body, sal in [("alpha", 0.9), ("bravo", 0.8), ("charlie", 0.2), ("delta", 0.1)]:
+        learn.save_memory(settings, body=body, salience=sal)
+    view = recall.build_index_view(settings)
+    assert "Memory: 4 semantic." in view  # stats line reports the true total
+    assert "**alpha**" in view and "**bravo**" in view
+    assert "charlie" not in view and "delta" not in view
+    assert "Showing the most valuable" in view
+
+
+def test_index_view_omits_episodic_but_recall_still_finds_them(settings) -> None:
+    learn.record_episode(settings, "went hiking with Torvald in the hills", "Nice!")
+    view = recall.build_index_view(settings)
+    assert "1 episodic" in view  # counted in the stats line…
+    assert "hiking" not in view.lower()  # …but never listed
+    assert recall.search_memory(settings, "hiking Torvald hills")
+
+
+def test_index_view_unlimited_lists_everything(settings) -> None:
+    settings.context_index_max_per_kind = {"semantic": -1, "procedural": -1, "episodic": -1}
+    for body in ["alpha", "bravo", "charlie"]:
+        learn.save_memory(settings, body=body)
+    view = recall.build_index_view(settings)
+    assert all(f"**{name}**" in view for name in ["alpha", "bravo", "charlie"])
+    assert "Showing the most valuable" not in view
+
+
+# --- episodic gating -------------------------------------------------------- #
+
+
+def test_short_message_records_no_episode(settings) -> None:
+    assert learn.record_episode(settings, "hi", "Hello!") is None
+    assert store.list_notes(settings) == []
+
+
+def test_duplicate_exchange_records_one_episode(settings) -> None:
+    msg = "I always deploy my projects with uv"
+    assert learn.record_episode(settings, msg, "Noted.") is not None
+    assert learn.record_episode(settings, msg, "Noted.") is None
+    assert len(store.list_notes(settings)) == 1
+
+
+def test_distinct_exchanges_record_two_episodes(settings) -> None:
+    learn.record_episode(settings, "went hiking in the mountains today", "Nice!")
+    learn.record_episode(settings, "planning a chess tournament for friday", "Good luck!")
+    assert len(store.list_notes(settings)) == 2
+
+
+# --- cross-kind dedup + safer forget ---------------------------------------- #
+
+
+def test_cross_kind_dedup_updates_durable_note(settings) -> None:
+    learn.save_memory(settings, body="The user deploys projects with uv.", kind="semantic")
+    learn.save_memory(settings, body="The user deploys projects with uv.", kind="procedural")
+    notes = store.list_notes(settings)
+    assert len(notes) == 1  # absorbed, and no stale semantic/ file left behind
+    assert notes[0].kind == "procedural"
+
+
+def test_cross_kind_distinct_notes_stay_separate(settings) -> None:
+    learn.save_memory(settings, body="The user lives in Oslo.", kind="semantic")
+    learn.save_memory(settings, body="Deploy the website with uv run.", kind="procedural")
+    assert len(store.list_notes(settings)) == 2
+
+
+def test_fuzzy_forget_ambiguous_is_noop(settings) -> None:
+    # Both notes match "favorite color" equally well — deleting nothing beats
+    # deleting the wrong one.
+    learn.save_memory(settings, body="The user's favorite color is teal.", description="color teal")
+    learn.save_memory(settings, body="The user's favorite color is red.", description="color red")
+    assert learn.forget_memory(settings, "favorite color") is None
+    assert len(store.list_notes(settings)) == 2
+
+
+def test_fuzzy_forget_clear_winner_deletes(settings) -> None:
+    learn.save_memory(settings, body="The user's favorite color is teal.", description="color teal")
+    learn.save_memory(settings, body="The user plays chess on sundays.", description="chess habit")
+    deleted = learn.forget_memory(settings, "favorite color teal")
+    assert deleted is not None and "teal" in deleted.body
+    assert {n.name for n in store.list_notes(settings)} == {"chess-habit"}
+
+
+# --- persistent turn counter ------------------------------------------------ #
+
+
+def test_turn_counter_persists_across_connections(settings) -> None:
+    # Each call opens a fresh SQLite connection — surviving across calls is the
+    # same property as surviving a server restart.
+    assert index.bump_turn_counter(settings) == 1
+    assert index.bump_turn_counter(settings) == 2
+    assert index.bump_turn_counter(settings) == 3
 
 
 # --- consolidation -------------------------------------------------------- #
@@ -304,3 +407,51 @@ def test_consolidate_prunes_and_promotes(tmp_path, monkeypatch) -> None:
     names = {n.name for n in store.list_notes(settings)}
     assert "old-ep" not in names
     assert any(n.kind == "procedural" for n in store.list_notes(settings))
+
+
+def test_consolidate_evicts_beyond_kind_cap(settings) -> None:
+    settings.max_notes_per_kind = {"semantic": 3, "procedural": 0, "episodic": 0}
+    for body, sal in [("alpha", 0.9), ("bravo", 0.8), ("charlie", 0.7), ("delta", 0.2), ("echo", 0.1)]:
+        learn.save_memory(settings, body=body, salience=sal)
+    summary = consolidate.consolidate_memory(settings)
+    assert summary["evicted"] == 2
+    assert {n.name for n in store.list_notes(settings)} == {"alpha", "bravo", "charlie"}
+    assert not recall.search_memory(settings, "delta")  # gone from the index too
+
+
+def test_eviction_keeps_recalled_note_over_equal_salience(settings) -> None:
+    settings.max_notes_per_kind = {"semantic": 1, "procedural": 0, "episodic": 0}
+    learn.save_memory(settings, body="alpha", salience=0.5)
+    learn.save_memory(settings, body="bravo", salience=0.5)
+    index.bump_recall(settings, ["bravo"])  # proving useful protects a memory
+    consolidate.consolidate_memory(settings)
+    assert {n.name for n in store.list_notes(settings)} == {"bravo"}
+
+
+def test_consolidate_decays_unrecalled_durable(settings) -> None:
+    stale = Note(
+        name="stale-fact",
+        description="an old fact",
+        body="Old fact body.",
+        kind="semantic",
+        salience=0.5,
+        created="2000-01-01",
+        updated="2000-01-01",
+    )
+    store.write_note(settings, stale)
+    index.upsert(
+        settings, stale.name, str(store.note_path(settings, stale)), stale.description,
+        embeddings.embed_one(stale.index_text, settings),
+        kind="semantic", salience=0.5, updated="2000-01-01",
+    )
+    fresh = learn.save_memory(settings, body="a fresh recalled fact", salience=0.5)
+    index.bump_recall(settings, [fresh.name])
+
+    summary = consolidate.consolidate_memory(settings)
+    assert summary["durable_decayed"] == 1
+
+    effective = {row[0]: row[3] for row in index.list_entries(settings)}
+    assert effective["stale-fact"] < 0.5  # decayed in the index (ranking/eviction)
+    assert effective[fresh.name] == 0.5  # recall history exempts a note
+    on_disk = store.find_note(settings, "stale-fact")
+    assert on_disk is not None and on_disk.salience == 0.5  # file keeps the base

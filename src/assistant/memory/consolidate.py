@@ -13,6 +13,10 @@ slow, whole-store work that the per-turn learner can't:
   existing semantic/procedural memory and emits ``save`` / ``update`` / ``forget``
   ops to lift recurring, important patterns into durable memory, merge duplicates,
   and resolve contradictions store-wide.
+* **Decay + cap durable memory** — the effective salience of durable notes that
+  never get recalled fades gently, and each kind is held under a hard note cap
+  (lowest retention value evicted first), so long-term memory — and with it the
+  injected prompt context — cannot grow without bound.
 """
 
 from __future__ import annotations
@@ -23,7 +27,7 @@ from datetime import date
 
 from ..codex_runner import run_codex
 from ..config import Settings, get_settings
-from . import index, learn, store
+from . import index, learn, recall, store
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +60,60 @@ def _decay_and_prune(settings: Settings) -> int:
             store.write_note(settings, note)
             index.set_salience(settings, note.name, note.salience)
     return pruned
+
+
+def _decay_durable(settings: Settings) -> int:
+    """Gently decay the *effective* salience of durable notes never recalled.
+
+    Index-only: the file keeps the note's original salience — the fixed base the
+    decay is computed from, so repeated passes never compound — while the index
+    carries the decayed value that recall ranking and cap eviction actually use.
+    Never deletes: a faded note just loses priority until something recalls it
+    (any recall history exempts a note entirely — proving useful is what protects
+    a memory from fading).
+    """
+    half_life = settings.durable_decay_half_life_days
+    if half_life <= 0:
+        return 0
+    decayed = 0
+    for note in store.list_notes(settings):
+        if note.kind == "episodic":
+            continue
+        stats = index.get_stats(settings, note.name)
+        if stats is not None and stats[0] > 0:
+            continue
+        age = _age_days(note.updated or note.created)
+        target = note.salience * math.exp(-math.log(2) * age / half_life)
+        target = round(max(target, settings.salience_prune_floor), 3)
+        if target < note.salience - 1e-3:
+            index.set_salience(settings, note.name, target)
+            decayed += 1
+    return decayed
+
+
+def _enforce_kind_caps(settings: Settings) -> int:
+    """Hard safety net: evict the lowest-value notes beyond each kind's cap.
+
+    Ranks by :func:`recall.retention_score` over the index's effective salience
+    and reinforcement counters, so recalled/recent/salient notes survive. The LLM
+    passes shrink memory *judiciously*; this bound guarantees it stays finite.
+    """
+    by_kind: dict[str, list[tuple[float, str]]] = {}
+    for name, _desc, kind, salience, rc, lr, updated in index.list_entries(settings):
+        score = recall.retention_score(settings, kind, salience, rc, lr, updated)
+        by_kind.setdefault(kind, []).append((score, name))
+
+    evicted = 0
+    for kind, ranked in by_kind.items():
+        cap = settings.max_notes_per_kind.get(kind, 0)
+        if cap <= 0 or len(ranked) <= cap:
+            continue
+        ranked.sort(reverse=True)
+        for _score, name in ranked[cap:]:
+            store.delete_note(settings, name)
+            index.remove(settings, name)
+            evicted += 1
+    return evicted
 
 
 def _flush_counters(settings: Settings) -> int:
@@ -165,7 +223,15 @@ def consolidate_memory(settings: Settings | None = None) -> dict:
     pruned = _decay_and_prune(settings)
     changes = _llm_consolidate(settings) if settings.enable_auto_memory else []
     flushed = _flush_counters(settings)
+    durable_decayed = _decay_durable(settings)  # before caps: eviction sees decay
+    evicted = _enforce_kind_caps(settings)
     store.regenerate_index(settings)
-    summary = {"pruned_episodes": pruned, "changes": changes, "counters_flushed": flushed}
+    summary = {
+        "pruned_episodes": pruned,
+        "changes": changes,
+        "counters_flushed": flushed,
+        "durable_decayed": durable_decayed,
+        "evicted": evicted,
+    }
     logger.info("consolidation: %s", summary)
     return summary

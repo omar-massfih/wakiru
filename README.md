@@ -32,7 +32,7 @@ Memory lives in `memory/` and has two layers:
 
 - **Working memory** — the conversation, persisted per `thread_id` by the LangGraph
   SQLite checkpointer. Once it grows past a threshold, older turns are folded into a
-  rolling summary so context stays bounded.
+  rolling summary (in the background, after the reply) so context stays bounded.
 - **Long-term memory** — durable markdown notes on disk (the source of truth), in three
   cognitive kinds:
   - `semantic/` — durable facts, preferences, goals ("the user prefers Norwegian").
@@ -49,14 +49,18 @@ How it learns (`src/assistant/memory/`):
   re-ranks it by blending similarity + recency + reuse + salience. Recalling a note
   *reinforces* it, so useful memories rise over time.
 - **Online learning** (`learn.py`) — after each turn (in the background), it writes an
-  episodic trace and runs a **reconciling** extraction: Codex sees the exchange *and the
-  memories already relevant to it*, then emits `save` / `update` / `forget` ops. Seeing
-  current memory lets it fix contradictions in place ("moved from Oslo to Bergen") instead
-  of piling up duplicates.
+  episodic trace (skipping small talk and repeated exchanges) and runs a **reconciling**
+  extraction: Codex sees the exchange *and the memories already relevant to it*, then
+  emits `save` / `update` / `forget` ops. Seeing current memory lets it fix
+  contradictions in place ("moved from Oslo to Bergen") instead of piling up duplicates.
 - **Consolidation** (`consolidate.py`) — periodically (or via `POST /memory/consolidate`)
   it decays and prunes old episodes, promotes recurring patterns into semantic/procedural
   memory, merges duplicates, resolves contradictions store-wide, and flushes reinforcement
-  counters back into the files.
+  counters back into the files. It also keeps long-term memory *finite*: durable notes
+  that never get recalled fade in ranking priority, and each kind is held under a hard
+  note cap (lowest retention value evicted first). Only the most valuable note titles are
+  injected into the prompt each turn, so context stays bounded no matter how much the
+  assistant has learned.
 
 ## Proactive reminders
 
