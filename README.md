@@ -17,11 +17,45 @@ HTTP (/chat)  ->  LangGraph StateGraph  ->  CodexChatModel  ->  `codex exec` sub
 - **`llm.py`** — the **provider abstraction**. `build_model()` selects a LangChain `BaseChatModel`
   by `LLM_PROVIDER`. `codex` is wired (`CodexChatModel` over the runner); `openai` and `anthropic`
   are ready-to-fill stubs (each stub documents the exact steps to enable it).
-- **`agent.py`** — a single-node LangGraph graph; the extension point for more nodes/routing/memory.
-- **`api.py`** — FastAPI app: `GET /health`, `POST /chat`.
+- **`agent.py`** — the LangGraph graph: `recall -> codex -> summarize`, with a SQLite
+  checkpointer for conversation history.
+- **`api.py`** — FastAPI app: `GET /health`, `POST /chat`, plus `GET /memory` and
+  `POST /memory/consolidate` for inspecting and consolidating the brain.
 
 Codex is itself an autonomous agent (its own model, tools, and sandbox), so tool-use happens
 inside Codex rather than as LangChain tools.
+
+## The brain (memory)
+
+Memory lives in `memory/` and has two layers:
+
+- **Working memory** — the conversation, persisted per `thread_id` by the LangGraph
+  SQLite checkpointer. Once it grows past a threshold, older turns are folded into a
+  rolling summary so context stays bounded.
+- **Long-term memory** — durable markdown notes on disk (the source of truth), in three
+  cognitive kinds:
+  - `semantic/` — durable facts, preferences, goals ("the user prefers Norwegian").
+  - `procedural/` — learned how-to knowledge ("deploy with uv").
+  - `episodic/` — timestamped traces of what happened (decays and is pruned over time).
+
+  A local, offline vector index (`sqlite-vec` + fastembed, multilingual by default)
+  is *derived* from the files and rebuilt from them on startup (`reindex`), so hand-edits
+  never drift.
+
+How it learns (`src/assistant/memory/`):
+
+- **Recall** (`recall.py`) — embeds the incoming message, pulls a candidate pool, and
+  re-ranks it by blending similarity + recency + reuse + salience. Recalling a note
+  *reinforces* it, so useful memories rise over time.
+- **Online learning** (`learn.py`) — after each turn (in the background), it writes an
+  episodic trace and runs a **reconciling** extraction: Codex sees the exchange *and the
+  memories already relevant to it*, then emits `save` / `update` / `forget` ops. Seeing
+  current memory lets it fix contradictions in place ("moved from Oslo to Bergen") instead
+  of piling up duplicates.
+- **Consolidation** (`consolidate.py`) — periodically (or via `POST /memory/consolidate`)
+  it decays and prunes old episodes, promotes recurring patterns into semantic/procedural
+  memory, merges duplicates, resolves contradictions store-wide, and flushes reinforcement
+  counters back into the files.
 
 ## Prerequisites
 
@@ -103,5 +137,9 @@ integration package, add config fields, return the chat model). No other file ch
 ## Roadmap / not yet wired
 
 - OpenAI / Claude providers at the `llm.py` stubs.
-- Conversation memory / persistence (a LangGraph checkpointer).
 - Additional tools, routing nodes, streaming, and API auth.
+
+> **Note on the embedding model:** the default `EMBEDDING_MODEL` is
+> `intfloat/multilingual-e5-large` (1024-dim, strong Norwegian recall). Its first use
+> downloads ~2GB into the HuggingFace cache; set a smaller model (e.g.
+> `sentence-transformers/all-MiniLM-L6-v2`) if you don't need multilingual recall.

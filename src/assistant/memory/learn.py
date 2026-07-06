@@ -1,101 +1,265 @@
 """Memory formation — the "learning" side of the brain.
 
-A single LLM-driven path handles everything. After each turn, Codex reads the
-exchange and returns a list of memory *operations*:
+Learning happens in two phases:
 
-* ``save``   — a durable fact/preference/learning worth keeping (whether the user
-  said "remember …" or just mentioned it in passing).
-* ``forget`` — something the user asked to drop.
+**Online (per turn, in the background).** After each exchange we:
 
-This runs in the background (it makes a second Codex call), so it never adds
-latency to the reply. Every save goes through :func:`save_memory`, which dedupes
-by embedding similarity — a near-duplicate updates the existing note instead of
-piling up a second copy.
+1. write a compact **episodic** trace of the turn (cheap, no LLM), and
+2. run a **reconciling extractor**: Codex reads the exchange *together with the
+   memories already relevant to it* and returns operations —
+
+   * ``save``   — a new durable fact/preference/learning,
+   * ``update`` — supersede an existing note in place (fixes contradictions like
+     "moved from Oslo to Bergen" that dedup-by-similarity would miss),
+   * ``forget`` — drop something by name or description.
+
+Because the extractor sees current memory, it stops piling up near-duplicate or
+contradictory notes. Every ``save`` still dedups by embedding similarity as a
+backstop.
+
+**Consolidation ("sleep").** Periodically :mod:`.consolidate` reviews recent
+episodes against long-term memory to promote, merge, decay, and prune. That lives
+in its own module; this one handles the per-turn path.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import re
+from datetime import date
 
 from ..codex_runner import run_codex
 from ..config import Settings, get_settings
 from . import index, store
-from .embeddings import embed_one
+from .embeddings import embed_one, embed_query
 from .store import Note, slugify
 
-# Cosine-similarity floor above which a new memory is treated as a duplicate of
-# an existing one (update in place rather than create).
-DEDUP_THRESHOLD = 0.85
-# Lower bar for a "forget" query: it's fuzzy, so accept a looser match.
-FORGET_THRESHOLD = 0.45
+logger = logging.getLogger(__name__)
+
+
+def _today() -> str:
+    return date.today().isoformat()
+
+
+def _write_and_index(settings: Settings, note: Note, vector: list[float]) -> Note:
+    """Persist a note (file + vector index + MEMORY.md) with all its metadata."""
+    store.purge_stale_files(settings, note.name, note.kind)  # drop any other-kind copy
+    path = store.write_note(settings, note)
+    index.upsert(
+        settings,
+        note.name,
+        str(path),
+        note.description,
+        vector,
+        kind=note.kind,
+        salience=note.salience,
+        updated=note.updated,
+        last_recalled=note.last_recalled,
+        recall_count=note.recall_count,
+    )
+    store.regenerate_index(settings)
+    return note
 
 
 def save_memory(
     settings: Settings,
     body: str,
     description: str | None = None,
-    type: str | None = None,
+    kind: str | None = None,
+    salience: float | None = None,
+    confidence: float | None = None,
+    source: str = "",
 ) -> Note:
-    """Persist a memory (file + index), deduping against existing notes."""
+    """Persist a memory, deduping against existing notes.
+
+    A near-duplicate (embedding cosine ≥ ``settings.dedup_threshold``) of the same
+    kind updates the existing note in place — keeping its name, creation date, and
+    reinforcement counters — instead of creating a second copy.
+    """
     body = body.strip()
+    desc = (description or body).strip()
     note = Note(
-        name=slugify(description or body),
-        description=(description or body).strip(),
+        name=slugify(desc),
+        description=desc,
         body=body,
-        type=type or "fact",
+        kind=kind or "semantic",
+        salience=0.5 if salience is None else float(salience),
+        confidence=0.8 if confidence is None else float(confidence),
+        source=source,
+        updated=_today(),
     )
 
-    # Dedup: if a very similar note already exists, update it in place.
     vector = embed_one(note.index_text, settings)
-    hits = index.search(settings, vector, k=1)
-    if hits and hits[0][3] >= DEDUP_THRESHOLD:
-        existing = store.find_note(settings, hits[0][0])
+    # Dedup only within the same kind: an episodic trace must never swallow a
+    # distilled semantic/procedural fact just because they read alike.
+    for name, _path, _desc, hit_kind, _sal, _rc, _lr, sim in index.search_ranked(
+        settings, vector, k=5
+    ):
+        if sim < settings.dedup_threshold:
+            break  # results are sorted best-first; nothing else will qualify
+        if hit_kind != note.kind:
+            continue
+        existing = store.find_note(settings, name)
         if existing is not None:
             note.name = existing.name
             note.created = existing.created
+            stats = index.get_stats(settings, existing.name)
+            note.recall_count, note.last_recalled = stats or (
+                existing.recall_count,
+                existing.last_recalled,
+            )
+            return _write_and_index(settings, note, vector)
 
-    path = store.write_note(settings, note)
-    index.upsert(settings, note.name, str(path), note.description, vector)
-    store.regenerate_index(settings)
-    return note
+    note.name = store.unique_name(settings, note.name)
+    return _write_and_index(settings, note, vector)
+
+
+def revise_memory(
+    settings: Settings,
+    name: str,
+    body: str | None = None,
+    description: str | None = None,
+    kind: str | None = None,
+    salience: float | None = None,
+) -> Note | None:
+    """Supersede an existing note in place, keeping its identity and counters.
+
+    Returns the revised note, or ``None`` if no note named ``name`` exists (the
+    caller may then fall back to :func:`save_memory`).
+    """
+    existing = store.find_note(settings, name)
+    if existing is None:
+        return None
+
+    old_path = store.note_path(settings, existing)
+    if body is not None:
+        existing.body = body.strip()
+    if description is not None:
+        existing.description = description.strip()
+    if kind is not None:
+        existing.kind = kind
+    if salience is not None:
+        existing.salience = float(salience)
+    existing.updated = _today()
+
+    new_path = store.note_path(settings, existing)
+    if old_path != new_path:  # kind changed -> file moves directories
+        old_path.unlink(missing_ok=True)
+
+    # Preserve reinforcement counters from the authoritative index (the file's
+    # copy lags until consolidation flushes it) so an update never wipes them.
+    stats = index.get_stats(settings, name)
+    if stats is not None:
+        existing.recall_count, existing.last_recalled = stats
+
+    vector = embed_one(existing.index_text, settings)
+    return _write_and_index(settings, existing, vector)
 
 
 def forget_memory(settings: Settings, query: str) -> Note | None:
-    """Delete the memory best matching ``query`` (file + index)."""
-    hits = index.search(settings, embed_one(query, settings), k=1)
-    if not hits or hits[0][3] < FORGET_THRESHOLD:
-        return None
-    name = hits[0][0]
-    deleted = store.delete_note(settings, name)
-    index.remove(settings, name)
-    store.regenerate_index(settings)
-    return deleted
+    """Delete the memory best matching ``query`` (by name, else by similarity)."""
+    by_name = store.find_note(settings, query)
+    if by_name is not None:
+        deleted = store.delete_note(settings, query)
+        index.remove(settings, query)
+        store.regenerate_index(settings)
+        return deleted
+
+    # Fuzzy fallback — never fuzzy-delete an episodic trace (those are a log,
+    # pruned by consolidation, not by a loose text match).
+    for name, _path, _desc, kind, _sal, _rc, _lr, sim in index.search_ranked(
+        settings, embed_query(query, settings), k=5
+    ):
+        if sim < settings.forget_threshold:
+            break
+        if kind == "episodic":
+            continue
+        deleted = store.delete_note(settings, name)
+        index.remove(settings, name)
+        store.regenerate_index(settings)
+        return deleted
+    return None
+
+
+def record_episode(
+    settings: Settings, user_msg: str, assistant_msg: str, source: str = ""
+) -> Note:
+    """Write a compact episodic trace of one turn (no LLM, low salience)."""
+    user_msg = user_msg.strip()
+    assistant_msg = assistant_msg.strip()
+    desc = f"{_today()}: " + (user_msg[:80] + ("…" if len(user_msg) > 80 else ""))
+    body = f"User: {user_msg[:600]}\nAssistant: {assistant_msg[:600]}".strip()
+    note = Note(
+        name=store.unique_name(settings, slugify(f"{_today()} {user_msg}")),
+        description=desc,
+        body=body,
+        kind="episodic",
+        salience=settings.episodic_initial_salience,
+        confidence=1.0,
+        source=source,
+        updated=_today(),
+    )
+    return _write_and_index(settings, note, embed_one(note.index_text, settings))
 
 
 # --------------------------------------------------------------------------- #
-# LLM-driven extraction (background)
+# LLM-driven extraction (background, reconciling)
 # --------------------------------------------------------------------------- #
 
 _EXTRACT_PROMPT = """\
-You maintain the long-term memory of a personal assistant. Read the exchange
-below and decide what should change in long-term memory.
+You maintain the long-term memory of a personal assistant. Read the exchange and
+the memories already known to be relevant, then decide what should change.
 
 Honor explicit instructions: if the user asks you to remember something, save it;
-if they ask you to forget something, mark it for deletion. Also proactively
-capture DURABLE, user-specific facts, preferences, goals, or learnings worth
-recalling in future conversations. Ignore greetings, small talk, and anything
-ephemeral. Split compound statements into separate atomic memories, and phrase
-each saved memory as a clear third-person sentence (e.g. "The user's name is …").
+if they ask you to forget something, forget it. Also proactively capture DURABLE,
+user-specific facts, preferences, goals, or learnings worth recalling later.
+Ignore greetings, small talk, and anything ephemeral. Split compound statements
+into separate atomic memories. Phrase each memory as a clear third-person
+sentence (e.g. "The user's name is …").
+
+CRITICAL — reconcile against what is already known:
+- If a known memory is now WRONG, OUTDATED, or REFINED by this exchange, emit an
+  "update" for it (use its exact name) instead of saving a near-duplicate.
+- Only "save" genuinely new information not already covered below.
+
+Choose a kind for each saved/updated memory:
+- "semantic"   — durable facts, preferences, goals about the user or world.
+- "procedural" — how-to knowledge, methods, the way the user likes things done.
 
 Return a JSON array of operations, each one of:
-  {{"op": "save", "type": "fact" | "learning", "description": "<short one-line summary>", "body": "<the memory as one clear sentence>"}}
-  {{"op": "forget", "query": "<what the user wants forgotten>"}}
+  {{"op": "save", "kind": "semantic|procedural", "description": "<short summary>", "body": "<one clear sentence>", "salience": <0..1>}}
+  {{"op": "update", "name": "<existing memory name>", "description": "<short summary>", "body": "<the corrected sentence>"}}
+  {{"op": "forget", "name": "<existing memory name>"}}   (or {{"op": "forget", "query": "<what to drop>"}})
 Return [] if nothing should change. Output JSON only — no prose, no code fences.
+
+Known relevant memories:
+{memories}
 
 User: {user}
 Assistant: {assistant}
 """
+
+
+def _format_memories(settings: Settings, query: str) -> str:
+    """Durable memories relevant to ``query``, for the extractor to reconcile.
+
+    Episodic traces are deliberately excluded: they are a raw log managed by
+    consolidation, not something the per-turn extractor should edit or forget.
+    """
+    from .recall import search_memory
+
+    durable = [
+        (note, score)
+        for note, score in search_memory(settings, query)
+        if note.kind != "episodic"
+    ]
+    if not durable:
+        return "(none)"
+    return "\n".join(
+        f"- name: {note.name} [{note.kind}] — {note.description}\n  {note.body}"
+        for note, _ in durable
+    )
 
 
 def _parse_ops(text: str) -> list[dict]:
@@ -109,13 +273,16 @@ def _parse_ops(text: str) -> list[dict]:
         data = json.loads(text[start : end + 1])
     except json.JSONDecodeError:
         return []
-    return [d for d in data if isinstance(d, dict) and d.get("op") in {"save", "forget"}]
+    return [
+        d for d in data
+        if isinstance(d, dict) and d.get("op") in {"save", "update", "forget"}
+    ]
 
 
 def update_memory(
-    settings: Settings | None, user_msg: str, assistant_msg: str
+    settings: Settings | None, user_msg: str, assistant_msg: str, source: str = ""
 ) -> list[str]:
-    """Extract and apply memory operations for one turn (save + forget).
+    """Extract and apply memory operations for one turn (episode + save/update/forget).
 
     Intended to run in the background — it makes a second Codex call. Returns a
     short log of what changed. No-ops when ``enable_auto_memory`` is false.
@@ -123,24 +290,68 @@ def update_memory(
     settings = settings or get_settings()
     if not settings.enable_auto_memory:
         return []
-    prompt = _EXTRACT_PROMPT.format(user=user_msg, assistant=assistant_msg)
+
+    applied: list[str] = []
+
+    # 1. Episodic trace — always, cheaply.
+    try:
+        record_episode(settings, user_msg, assistant_msg, source=source)
+    except Exception:
+        logger.exception("failed to record episodic trace")
+
+    # 2. Reconciling extraction.
+    prompt = _EXTRACT_PROMPT.format(
+        memories=_format_memories(settings, user_msg),
+        user=user_msg,
+        assistant=assistant_msg,
+    )
     try:
         raw = run_codex(prompt, settings=settings)
     except Exception:
-        return []  # memory upkeep is best-effort; never break the main flow
+        logger.exception("memory extraction (run_codex) failed; skipping this turn")
+        return applied  # memory upkeep is best-effort; never break the main flow
 
-    applied: list[str] = []
     for op in _parse_ops(raw):
-        if op["op"] == "save" and op.get("body"):
-            note = save_memory(
-                settings,
-                body=str(op["body"]),
-                description=op.get("description"),
-                type=op.get("type"),
-            )
-            applied.append(f"saved: {note.description}")
-        elif op["op"] == "forget" and op.get("query"):
-            deleted = forget_memory(settings, str(op["query"]))
-            if deleted is not None:
-                applied.append(f"forgot: {deleted.description}")
+        try:
+            if op["op"] == "save" and op.get("body"):
+                note = save_memory(
+                    settings,
+                    body=str(op["body"]),
+                    description=op.get("description"),
+                    kind=op.get("kind"),
+                    salience=op.get("salience"),
+                    source=source,
+                )
+                applied.append(f"saved: {note.description}")
+            elif op["op"] == "update" and op.get("name"):
+                revised = revise_memory(
+                    settings,
+                    name=str(op["name"]),
+                    body=op.get("body"),
+                    description=op.get("description"),
+                    kind=op.get("kind"),
+                )
+                if revised is None:  # name didn't exist — treat as a save
+                    if op.get("body"):
+                        note = save_memory(
+                            settings,
+                            body=str(op["body"]),
+                            description=op.get("description"),
+                            kind=op.get("kind"),
+                            source=source,
+                        )
+                        applied.append(f"saved: {note.description}")
+                else:
+                    applied.append(f"updated: {revised.description}")
+            elif op["op"] == "forget":
+                target = op.get("name") or op.get("query")
+                if target:
+                    deleted = forget_memory(settings, str(target))
+                    if deleted is not None:
+                        applied.append(f"forgot: {deleted.description}")
+        except Exception:
+            logger.exception("failed to apply memory op: %s", op)
+
+    if applied:
+        logger.info("memory updated: %s", "; ".join(applied))
     return applied

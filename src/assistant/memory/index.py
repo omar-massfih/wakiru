@@ -1,19 +1,30 @@
 """Vector index over the memory notes, stored in SQLite via sqlite-vec.
 
 Python owns this index so it can never drift from the markdown files: every write
-to :mod:`.store` is mirrored here. A fresh connection is opened per operation so
-the index is safe to touch from FastAPI request handlers and background tasks
-alike.
+to :mod:`.store` is mirrored here, and :func:`reindex` rebuilds the whole thing
+from disk (the files are the source of truth). A fresh connection is opened per
+operation so the index is safe to touch from FastAPI request handlers and
+background tasks alike; WAL mode keeps readers and the background writer from
+blocking each other.
 
 The ``vec_notes`` virtual table is created lazily on the first ``upsert`` (its
 vector dimension is taken from that first vector), so an empty store needs no
-schema and ``search`` simply returns nothing.
+schema and ``search`` simply returns nothing. The ``meta`` table records the
+embedding model + dimension so :func:`reindex` can detect a model swap and
+rebuild from scratch.
+
+Alongside each vector the ``notes`` table keeps cheap re-ranking columns
+(``kind``, ``salience``, ``updated``, and the reinforcement counters
+``recall_count`` / ``last_recalled``) so recall can blend signals without opening
+every file. The counters are authoritative here and mirrored back to the markdown
+frontmatter on consolidation.
 """
 
 from __future__ import annotations
 
-import sqlite3
 import struct
+import sqlite3
+from datetime import date
 
 import sqlite_vec
 
@@ -30,47 +41,76 @@ def _connect(settings: Settings) -> sqlite3.Connection:
     settings.memory_path.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(settings.memory_db_path)
     conn.execute("PRAGMA busy_timeout = 5000")
+    conn.execute("PRAGMA journal_mode = WAL")
     conn.enable_load_extension(True)
     sqlite_vec.load(conn)
     conn.enable_load_extension(False)
     conn.execute(
         "CREATE TABLE IF NOT EXISTS notes ("
         " id INTEGER PRIMARY KEY AUTOINCREMENT,"
-        " name TEXT UNIQUE, path TEXT, description TEXT)"
+        " name TEXT UNIQUE, path TEXT, description TEXT,"
+        " kind TEXT DEFAULT 'semantic', salience REAL DEFAULT 0.5,"
+        " updated TEXT DEFAULT '', last_recalled TEXT DEFAULT '',"
+        " recall_count INTEGER DEFAULT 0)"
     )
     conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
     return conn
 
 
+def _meta_get(conn: sqlite3.Connection, key: str) -> str | None:
+    row = conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+    return row[0] if row else None
+
+
+def _meta_set(conn: sqlite3.Connection, key: str, value: str) -> None:
+    conn.execute(
+        "INSERT INTO meta(key, value) VALUES (?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (key, value),
+    )
+
+
 def _vec_dim(conn: sqlite3.Connection) -> int | None:
-    row = conn.execute("SELECT value FROM meta WHERE key = 'dim'").fetchone()
-    return int(row[0]) if row else None
+    value = _meta_get(conn, "dim")
+    return int(value) if value else None
 
 
-def _ensure_vec_table(conn: sqlite3.Connection, dim: int) -> None:
+def _ensure_vec_table(conn: sqlite3.Connection, dim: int, settings: Settings) -> None:
     if _vec_dim(conn) is not None:
         return
     conn.execute(
         f"CREATE VIRTUAL TABLE {VEC_TABLE} USING "
         f"vec0(embedding float[{dim}] distance_metric=cosine)"
     )
-    conn.execute("INSERT INTO meta(key, value) VALUES ('dim', ?)", (str(dim),))
+    _meta_set(conn, "dim", str(dim))
+    _meta_set(conn, "embedding_model", settings.embedding_model)
 
 
 def upsert(
-    settings: Settings, name: str, path: str, description: str, vector: list[float]
+    settings: Settings,
+    name: str,
+    path: str,
+    description: str,
+    vector: list[float],
+    *,
+    kind: str = "semantic",
+    salience: float = 0.5,
+    updated: str = "",
+    last_recalled: str = "",
+    recall_count: int = 0,
 ) -> None:
-    """Insert or replace the index entry for ``name``."""
+    """Insert or replace the index entry for ``name`` (preserving its rowid data)."""
     conn = _connect(settings)
     try:
-        _ensure_vec_table(conn, len(vector))
+        _ensure_vec_table(conn, len(vector), settings)
         row = conn.execute("SELECT id FROM notes WHERE name = ?", (name,)).fetchone()
         if row is not None:
             conn.execute(f"DELETE FROM {VEC_TABLE} WHERE rowid = ?", (row[0],))
             conn.execute("DELETE FROM notes WHERE id = ?", (row[0],))
         cur = conn.execute(
-            "INSERT INTO notes(name, path, description) VALUES (?, ?, ?)",
-            (name, path, description),
+            "INSERT INTO notes(name, path, description, kind, salience, updated,"
+            " last_recalled, recall_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (name, path, description, kind, salience, updated, last_recalled, recall_count),
         )
         conn.execute(
             f"INSERT INTO {VEC_TABLE}(rowid, embedding) VALUES (?, ?)",
@@ -102,18 +142,158 @@ def search(
 ) -> list[tuple[str, str, str, float]]:
     """Top-k nearest notes as ``(name, path, description, similarity)``.
 
-    ``similarity`` is cosine similarity in ``[-1, 1]`` (``1 - distance``).
+    ``similarity`` is cosine similarity in ``[-1, 1]`` (``1 - distance``). This is
+    the raw vector layer; :mod:`.recall` blends in recency/reuse/salience on top.
+    """
+    return [
+        (name, path, desc, sim)
+        for name, path, desc, _kind, _sal, _rc, _lr, sim in search_ranked(
+            settings, query_vector, k
+        )
+    ]
+
+
+def search_ranked(
+    settings: Settings, query_vector: list[float], k: int
+) -> list[tuple[str, str, str, str, float, int, str, float]]:
+    """Top-k as ``(name, path, description, kind, salience, recall_count,
+    last_recalled, similarity)`` — everything recall needs to re-rank cheaply.
     """
     conn = _connect(settings)
     try:
         if _vec_dim(conn) is None:
             return []
         rows = conn.execute(
-            f"SELECT n.name, n.path, n.description, v.distance "
+            f"SELECT n.name, n.path, n.description, n.kind, n.salience,"
+            f" n.recall_count, n.last_recalled, v.distance "
             f"FROM {VEC_TABLE} v JOIN notes n ON n.id = v.rowid "
             f"WHERE v.embedding MATCH ? AND k = ? ORDER BY v.distance",
             (_serialize(query_vector), k),
         ).fetchall()
-        return [(name, path, desc, 1.0 - dist) for name, path, desc, dist in rows]
+        return [
+            (name, path, desc, kind, sal, rc, lr, 1.0 - dist)
+            for name, path, desc, kind, sal, rc, lr, dist in rows
+        ]
     finally:
         conn.close()
+
+
+def bump_recall(settings: Settings, names: list[str]) -> None:
+    """Reinforce: increment ``recall_count`` and stamp ``last_recalled`` = today.
+
+    Cheap, index-only — the authoritative counters. Consolidation later mirrors
+    them into the markdown frontmatter. No-op for unknown names.
+    """
+    if not names:
+        return
+    today = date.today().isoformat()
+    conn = _connect(settings)
+    try:
+        conn.executemany(
+            "UPDATE notes SET recall_count = recall_count + 1, last_recalled = ? "
+            "WHERE name = ?",
+            [(today, name) for name in names],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def set_salience(settings: Settings, name: str, salience: float) -> None:
+    """Update the cached salience used for re-ranking (index-only)."""
+    conn = _connect(settings)
+    try:
+        conn.execute(
+            "UPDATE notes SET salience = ? WHERE name = ?", (float(salience), name)
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_stats(settings: Settings, name: str) -> tuple[int, str] | None:
+    """Return ``(recall_count, last_recalled)`` for ``name``, or ``None``."""
+    conn = _connect(settings)
+    try:
+        row = conn.execute(
+            "SELECT recall_count, last_recalled FROM notes WHERE name = ?", (name,)
+        ).fetchone()
+        return (int(row[0]), str(row[1] or "")) if row else None
+    finally:
+        conn.close()
+
+
+def reindex(settings: Settings) -> int:
+    """Rebuild the vector index from the markdown files (the source of truth).
+
+    Self-heals drift from hand-edits and migrates on an embedding-model change:
+
+    * If the recorded model/dim differs from ``settings.embedding_model`` the vec
+      table is dropped and rebuilt from scratch.
+    * Files present on disk are (re-)embedded and upserted; index rows whose files
+      have vanished are removed.
+    * Reinforcement counters (``recall_count`` / ``last_recalled``) are preserved
+      by name across the rebuild, falling back to the file's own frontmatter when
+      the index had no prior value.
+
+    Returns the number of notes indexed.
+    """
+    from . import store
+    from .embeddings import embed_passages
+
+    notes = store.list_notes(settings)
+
+    conn = _connect(settings)
+    try:
+        # Snapshot existing counters so a full rebuild doesn't lose reinforcement.
+        prior: dict[str, tuple[int, str]] = {
+            name: (int(rc), str(lr or ""))
+            for name, rc, lr in conn.execute(
+                "SELECT name, recall_count, last_recalled FROM notes"
+            ).fetchall()
+        }
+        model_changed = _meta_get(conn, "embedding_model") not in (
+            None,
+            settings.embedding_model,
+        )
+        if model_changed and _vec_dim(conn) is not None:
+            conn.execute(f"DROP TABLE IF EXISTS {VEC_TABLE}")
+            conn.execute("DELETE FROM notes")
+            conn.execute("DELETE FROM meta WHERE key IN ('dim', 'embedding_model')")
+            conn.commit()
+    finally:
+        conn.close()
+
+    # Re-embed and upsert every note, carrying counters forward.
+    vectors = embed_passages([n.index_text for n in notes], settings) if notes else []
+    live_names: set[str] = set()
+    for note, vector in zip(notes, vectors):
+        rc, lr = prior.get(note.name, (note.recall_count, note.last_recalled))
+        upsert(
+            settings,
+            note.name,
+            str(store.note_path(settings, note)),
+            note.description,
+            vector,
+            kind=note.kind,
+            salience=note.salience,
+            updated=note.updated,
+            last_recalled=lr,
+            recall_count=rc,
+        )
+        live_names.add(note.name)
+
+    # Drop index rows whose files disappeared.
+    conn = _connect(settings)
+    try:
+        stale = [
+            row[0]
+            for row in conn.execute("SELECT name FROM notes").fetchall()
+            if row[0] not in live_names
+        ]
+    finally:
+        conn.close()
+    for name in stale:
+        remove(settings, name)
+
+    return len(live_names)

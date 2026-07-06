@@ -38,16 +38,60 @@ class Settings(BaseSettings):
     # Root directory for long-term memory notes + the SQLite index. Relative
     # paths resolve against the server's working directory.
     memory_dir: str = "memory"
-    # Local, offline embedding model (fastembed / ONNX — no API key). 384-dim.
-    embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
+    # Local, offline embedding model (fastembed / ONNX — no API key). The default
+    # is multilingual (strong Norwegian recall), 1024-dim. It is an *asymmetric*
+    # e5 model — embeddings.py adds the required query:/passage: prefixes.
+    embedding_model: str = "intfloat/multilingual-e5-large"
     # How many notes to recall and inject per turn.
     recall_top_k: int = 5
-    # Cosine-similarity floor for a recalled note to be considered relevant.
+    # Cosine-similarity floor for a candidate note to be considered at all.
     recall_min_similarity: float = 0.35
     # Master switch for long-term memory upkeep. When True, an LLM extraction
-    # runs after each turn (in the background) to save/forget notes — covering
-    # both explicit "remember/forget …" and proactively captured facts.
+    # runs after each turn (in the background) to save/update/forget notes.
     enable_auto_memory: bool = True
+
+    # --- Dedup / forget thresholds (cosine; model-dependent!) ---
+    # A new save whose nearest same-kind note scores >= this is treated as a
+    # restatement and updates in place. Calibrated for e5-large, whose sentence
+    # similarities cluster high (restatements ~0.97, distinct facts ~0.85). Lower
+    # this for models with a wider similarity spread (e.g. ~0.85 for MiniLM).
+    dedup_threshold: float = 0.90
+    # Floor for deleting a note by a fuzzy (non-exact-name) forget query.
+    forget_threshold: float = 0.80
+
+    # --- Retrieval ranking (blended re-rank on top of cosine) ---
+    # Candidate pool size = recall_top_k * this, re-ranked then trimmed to top_k.
+    recall_candidate_multiplier: int = 3
+    recall_w_similarity: float = 1.0
+    recall_w_recency: float = 0.15
+    recall_w_reuse: float = 0.15
+    recall_w_salience: float = 0.1
+    # Half-life (days) for the recency signal.
+    recall_recency_half_life_days: float = 30.0
+    # Saturation point for the reuse (recall_count) signal.
+    recall_reuse_cap: int = 20
+    # Small additive bias per kind (favor durable memory over raw episodes).
+    recall_kind_bias: dict[str, float] = {
+        "semantic": 0.05,
+        "procedural": 0.05,
+        "episodic": -0.05,
+    }
+
+    # --- Consolidation ("sleep") ---
+    # Run a consolidation pass every N chat turns (0 disables the auto-trigger).
+    consolidate_every_n_turns: int = 20
+    # Max episodic traces fed to the consolidation LLM in one pass.
+    consolidate_max_episodes: int = 40
+    # Episodic salience at creation, and the pruning floor / age horizon.
+    episodic_initial_salience: float = 0.25
+    salience_prune_floor: float = 0.05
+    episodic_max_age_days: int = 30
+
+    # --- Working memory (conversation history) ---
+    # Summarize + trim history once it exceeds this many messages (0 disables).
+    working_memory_max_messages: int = 40
+    # How many of the most recent messages to keep verbatim after summarizing.
+    working_memory_keep_recent: int = 12
 
     # --- HTTP server ---
     host: str = "127.0.0.1"
@@ -60,8 +104,18 @@ class Settings(BaseSettings):
 
     @property
     def memory_db_path(self) -> Path:
-        """SQLite file holding the vector index and the LangGraph checkpointer."""
+        """SQLite file holding the vector index + reinforcement counters."""
         return self.memory_path / "index.db"
+
+    @property
+    def checkpoints_db_path(self) -> Path:
+        """SQLite file holding the LangGraph conversation checkpoints.
+
+        Kept separate from the vector index so background index writes never
+        contend with the long-lived checkpointer connection, and a reindex can
+        rebuild vectors without touching conversation history.
+        """
+        return self.memory_path / "checkpoints.db"
 
 
 @lru_cache
