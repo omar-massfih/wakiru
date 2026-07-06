@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import itertools
 import logging
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime
 from functools import lru_cache
 
@@ -13,7 +15,7 @@ from langchain_core.messages import HumanMessage
 from pydantic import BaseModel
 
 from .agent import build_agent
-from .calendar import update_calendar
+from .calendar import run_reminders, update_calendar
 from .calendar.context import resolve_tz, upcoming_events
 from .codex_runner import CodexError
 from .config import get_settings
@@ -21,10 +23,40 @@ from .memory import consolidate_memory, store, update_memory
 
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Agentic assistant", version="0.1.0")
-
 # Simple in-process turn counter driving periodic consolidation.
 _turn_counter = itertools.count(1)
+
+
+async def _reminder_tick_loop() -> None:
+    """Fire due reminders on a wall-clock cadence, independent of chat traffic.
+
+    ``run_reminders`` is synchronous (SQLite + a urllib POST), so it runs in a
+    worker thread to keep the event loop free. Best-effort: any error is logged and
+    the loop keeps ticking. The dedupe ledger makes each pass idempotent.
+    """
+    while True:
+        try:
+            await asyncio.to_thread(run_reminders, get_settings())
+        except Exception:
+            logger.exception("reminder tick failed")
+        await asyncio.sleep(get_settings().reminder_tick_seconds)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    settings = get_settings()
+    task = None
+    if settings.enable_reminders and settings.reminder_tick_seconds > 0:
+        task = asyncio.create_task(_reminder_tick_loop())
+        logger.info("reminder ticker started (every %ss)", settings.reminder_tick_seconds)
+    try:
+        yield
+    finally:
+        if task is not None:
+            task.cancel()
+
+
+app = FastAPI(title="Agentic assistant", version="0.1.0", lifespan=lifespan)
 
 
 @lru_cache
@@ -110,6 +142,17 @@ def memory_stats() -> dict:
 def memory_consolidate() -> dict:
     """Trigger a consolidation pass on demand and return what changed."""
     return consolidate_memory(get_settings())
+
+
+@app.post("/reminders/run")
+def reminders_run() -> dict:
+    """Fire any reminders now due and return what was sent.
+
+    The in-process ticker calls this same logic on a cadence; this endpoint lets it
+    also be driven manually or from external cron. Idempotent via the dedupe ledger.
+    """
+    fired = run_reminders(get_settings())
+    return {"count": len(fired), "fired": fired}
 
 
 @app.get("/calendar")

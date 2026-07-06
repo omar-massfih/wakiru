@@ -108,6 +108,20 @@ class Settings(BaseSettings):
     # Cap on how many upcoming events are injected per turn.
     calendar_max_events: int = 20
 
+    # --- Proactive reminders ---
+    # Master switch: fire proactive reminders ahead of upcoming events.
+    enable_reminders: bool = True
+    # Fire a reminder this many minutes before an event. A list, so several leads
+    # per event work (e.g. [1440, 60] = a day before and an hour before). The
+    # default single lead means at most one push per event.
+    reminder_lead_minutes: list[int] = [60]
+    # ntfy topic URL / generic webhook the reminder is POSTed to. None => reminders
+    # are still computed and returned by the endpoint, just not pushed anywhere.
+    reminder_webhook_url: str | None = None
+    # How often the in-process ticker fires run_reminders (seconds). 0 disables the
+    # built-in ticker; POST /reminders/run still works for manual/external triggering.
+    reminder_tick_seconds: int = 60
+
     # --- HTTP server ---
     host: str = "127.0.0.1"
     port: int = 8000

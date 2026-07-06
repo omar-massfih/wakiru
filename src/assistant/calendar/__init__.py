@@ -18,6 +18,7 @@ from __future__ import annotations
 from . import store
 from .context import agenda_context, now, resolve_tz, upcoming_events
 from .ops import update_calendar
+from .reminders import due_reminders, run_reminders
 from .store import Event
 
 __all__ = [
@@ -28,4 +29,6 @@ __all__ = [
     "resolve_tz",
     "upcoming_events",
     "update_calendar",
+    "due_reminders",
+    "run_reminders",
 ]

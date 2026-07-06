@@ -19,8 +19,9 @@ HTTP (/chat)  ->  LangGraph StateGraph  ->  CodexChatModel  ->  `codex exec` sub
   are ready-to-fill stubs (each stub documents the exact steps to enable it).
 - **`agent.py`** — the LangGraph graph: `recall -> codex -> summarize`, with a SQLite
   checkpointer for conversation history.
-- **`api.py`** — FastAPI app: `GET /health`, `POST /chat`, plus `GET /memory` and
-  `POST /memory/consolidate` for inspecting and consolidating the brain.
+- **`api.py`** — FastAPI app: `GET /health`, `POST /chat`, `GET /memory` and
+  `POST /memory/consolidate` for inspecting and consolidating the brain, `GET /calendar`,
+  and `POST /reminders/run` for firing due reminders.
 
 Codex is itself an autonomous agent (its own model, tools, and sandbox), so tool-use happens
 inside Codex rather than as LangChain tools.
@@ -56,6 +57,28 @@ How it learns (`src/assistant/memory/`):
   it decays and prunes old episodes, promotes recurring patterns into semantic/procedural
   memory, merges duplicates, resolves contradictions store-wide, and flushes reinforcement
   counters back into the files.
+
+## Proactive reminders
+
+The calendar can nudge you *before* an event, unprompted — "Dentist in 1 hour" —
+instead of only answering when you ask. A ticker inside the server (no cron needed)
+checks the calendar every `REMINDER_TICK_SECONDS` and, for each event entering the
+`REMINDER_LEAD_MINUTES` window, pushes one message to `REMINDER_WEBHOOK_URL`. A small
+SQLite ledger guarantees each reminder fires exactly once (a rescheduled event nudges
+again for its new time).
+
+```sh
+# Point it at an ntfy topic (install the ntfy app and subscribe to the same topic):
+REMINDER_WEBHOOK_URL=https://ntfy.sh/your-private-topic
+```
+
+Delivery is any endpoint that accepts a plain POST (ntfy, a Discord/Slack webhook, …) —
+the message is the body, the event title the `Title` header. Leave the URL unset and
+reminders are still computed, just not pushed.
+
+`POST /reminders/run` runs one pass on demand (handy for testing, and idempotent thanks
+to the ledger). Prefer external cron? Set `REMINDER_TICK_SECONDS=0` to disable the
+built-in ticker and curl that endpoint on a schedule instead.
 
 ## Prerequisites
 
