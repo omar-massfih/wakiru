@@ -23,8 +23,8 @@ import re
 
 from ..codex_runner import run_codex
 from ..config import Settings, get_settings
-from . import store
-from .context import now, render_events, upcoming_events
+from . import recurrence, store
+from .context import now, render_events, writer_view
 
 logger = logging.getLogger(__name__)
 
@@ -40,8 +40,14 @@ at 3pm") against the CURRENT TIME below and always emit absolute ISO-8601
 datetimes that include the timezone offset. To move or cancel an existing event,
 reference it by its exact id from the list below.
 
+For a repeating event ("every Monday", "daily standup", "weekly 1:1"), set "rrule"
+to an RFC 5545 recurrence rule and use "start" as the first occurrence — e.g. every
+Monday → "FREQ=WEEKLY;BYDAY=MO", every weekday → "FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR",
+daily → "FREQ=DAILY". A series shows its rule in the list below; reschedule and
+cancel act on the whole series by its id (per-occurrence changes are not supported).
+
 Return a JSON array of operations, each one of:
-  {{"op": "create", "title": "<short title>", "start": "<ISO-8601 with offset>", "end": "<ISO-8601 or omit>", "location": "<or omit>", "notes": "<or omit>"}}
+  {{"op": "create", "title": "<short title>", "start": "<ISO-8601 with offset>", "end": "<ISO-8601 or omit>", "location": "<or omit>", "notes": "<or omit>", "rrule": "<RFC 5545 RRULE or omit>"}}
   {{"op": "reschedule", "id": "<existing event id>", "start": "<new ISO-8601 or omit>", "title": "<or omit>", "location": "<or omit>"}}
   {{"op": "cancel", "id": "<existing event id>"}}
 Return [] if nothing should change. Output JSON only — no prose, no code fences.
@@ -86,6 +92,9 @@ def apply_op(settings: Settings, op: dict) -> str | None:
     """Apply a single parsed operation; return a short log line, or ``None``."""
     kind = op["op"]
     if kind == "create" and op.get("title") and op.get("start"):
+        rrule = str(op.get("rrule", "") or "")
+        if rrule and not recurrence.validate_rrule(rrule):
+            rrule = ""  # keep the event, drop an unparseable rule
         event = store.create_event(
             settings,
             title=str(op["title"]),
@@ -93,8 +102,10 @@ def apply_op(settings: Settings, op: dict) -> str | None:
             end=str(op.get("end", "") or ""),
             location=str(op.get("location", "") or ""),
             notes=str(op.get("notes", "") or ""),
+            rrule=rrule,
         )
-        return f"created: {event.title} @ {event.start}"
+        suffix = f" ({recurrence.humanize_rrule(event.rrule)})" if event.rrule else ""
+        return f"created: {event.title} @ {event.start}{suffix}"
 
     if kind == "reschedule":
         target = _target_id(settings, op)
@@ -134,7 +145,7 @@ def update_calendar(
 
     prompt = _SCHEDULE_PROMPT.format(
         now=now(settings).isoformat(timespec="minutes"),
-        events=render_events(settings, upcoming_events(settings), with_ids=True),
+        events=render_events(settings, writer_view(settings), with_ids=True),
         user=user_msg,
         assistant=assistant_msg,
     )

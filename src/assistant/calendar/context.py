@@ -14,7 +14,7 @@ from datetime import datetime, timedelta, tzinfo
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from ..config import Settings, get_settings
-from . import store
+from . import recurrence, store
 from .store import Event
 
 
@@ -43,17 +43,45 @@ def _render_event(event: Event, tz: tzinfo, with_id: bool) -> str:
     end = store.parse_dt(event.end)
     if end:
         line += f" (until {end.astimezone(tz).strftime('%H:%M')})"
+    if event.rrule:  # a series master (occurrences carry no rrule)
+        line += f" ({recurrence.humanize_rrule(event.rrule)})"
     if with_id:
         line += f"  [id: {event.id}]"
     return line
 
 
 def upcoming_events(settings: Settings) -> list[Event]:
-    """Events from now through ``calendar_upcoming_days``, capped, soonest first."""
+    """Occurrences from now through ``calendar_upcoming_days``, capped, soonest first.
+
+    Recurring series are expanded into concrete occurrences within the horizon (see
+    :mod:`.recurrence`), so a weekly standup shows up as its next few dates.
+    """
     current = now(settings)
     horizon = current + timedelta(days=settings.calendar_upcoming_days)
-    events = store.list_events(settings, start_from=current, start_to=horizon)
+    events = recurrence.occurrences_in(settings, current, horizon)
     return events[: settings.calendar_max_events]
+
+
+def writer_view(settings: Settings) -> list[Event]:
+    """The schedule shown to the write-path extractor: one-shots + series masters.
+
+    Unlike :func:`upcoming_events`, recurring events appear once as their master row
+    (rrule intact) rather than as expanded occurrences, so the extractor sees a
+    single line with a stable id to reschedule or cancel the whole series. One-shot
+    events are limited to the upcoming horizon; series are always included so an old
+    but still-active series stays targetable.
+    """
+    current = now(settings)
+    horizon = current + timedelta(days=settings.calendar_upcoming_days)
+    events: list[Event] = []
+    for master in store.list_events(settings):
+        if master.rrule:
+            events.append(master)
+        else:
+            dt = store.parse_dt(master.start)
+            if dt is not None and current <= dt <= horizon:
+                events.append(master)
+    return sorted(events, key=store._sort_key)[: settings.calendar_max_events]
 
 
 def render_events(settings: Settings, events: list[Event], with_ids: bool = False) -> str:

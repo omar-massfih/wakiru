@@ -21,12 +21,18 @@ from datetime import datetime
 from ..config import Settings
 
 # Columns a caller may set on create/update (id + timestamps are managed here).
-_FIELDS = ("title", "start", "end", "location", "notes")
+_FIELDS = ("title", "start", "end", "location", "notes", "rrule")
 
 
 @dataclass
 class Event:
-    """A single calendar event. ``start``/``end`` are tz-aware ISO-8601 strings."""
+    """A single calendar event. ``start``/``end`` are tz-aware ISO-8601 strings.
+
+    ``rrule`` is an optional RFC 5545 recurrence rule (e.g. ``FREQ=WEEKLY;BYDAY=MO``)
+    with ``start`` as its DTSTART. Empty for a one-shot event; when set, this row is
+    the series *master* and concrete occurrences are expanded on read
+    (see :mod:`assistant.calendar.recurrence`).
+    """
 
     id: str
     title: str
@@ -34,6 +40,7 @@ class Event:
     end: str = ""
     location: str = ""
     notes: str = ""
+    rrule: str = ""
     created: str = ""
     updated: str = ""
 
@@ -48,9 +55,22 @@ def _connect(settings: Settings) -> sqlite3.Connection:
         "CREATE TABLE IF NOT EXISTS events ("
         " id TEXT PRIMARY KEY, title TEXT NOT NULL, start TEXT NOT NULL,"
         " end TEXT DEFAULT '', location TEXT DEFAULT '', notes TEXT DEFAULT '',"
+        " rrule TEXT DEFAULT '',"
         " created TEXT DEFAULT '', updated TEXT DEFAULT '')"
     )
+    _ensure_columns(conn)
     return conn
+
+
+def _ensure_columns(conn: sqlite3.Connection) -> None:
+    """Add columns introduced after the table's first creation (cheap migration).
+
+    ``CREATE TABLE IF NOT EXISTS`` never alters an existing table, so a DB created
+    before ``rrule`` existed would lack the column. Add it in place when missing.
+    """
+    have = {row["name"] for row in conn.execute("PRAGMA table_info(events)")}
+    if "rrule" not in have:
+        conn.execute("ALTER TABLE events ADD COLUMN rrule TEXT DEFAULT ''")
 
 
 def _row_to_event(row: sqlite3.Row) -> Event:
@@ -61,6 +81,7 @@ def _row_to_event(row: sqlite3.Row) -> Event:
         end=row["end"] or "",
         location=row["location"] or "",
         notes=row["notes"] or "",
+        rrule=row["rrule"] or "",
         created=row["created"] or "",
         updated=row["updated"] or "",
     )
@@ -91,6 +112,7 @@ def create_event(
     end: str = "",
     location: str = "",
     notes: str = "",
+    rrule: str = "",
 ) -> Event:
     """Insert a new event and return it (with a generated id and timestamps)."""
     now = datetime.now().astimezone().isoformat(timespec="seconds")
@@ -101,16 +123,18 @@ def create_event(
         end=end.strip(),
         location=location.strip(),
         notes=notes.strip(),
+        rrule=rrule.strip(),
         created=now,
         updated=now,
     )
     with _connect(settings) as conn:
         conn.execute(
-            "INSERT INTO events (id, title, start, end, location, notes, created, updated)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO events"
+            " (id, title, start, end, location, notes, rrule, created, updated)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 event.id, event.title, event.start, event.end,
-                event.location, event.notes, event.created, event.updated,
+                event.location, event.notes, event.rrule, event.created, event.updated,
             ),
         )
     return event

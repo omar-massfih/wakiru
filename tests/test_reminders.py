@@ -76,6 +76,23 @@ def test_dedupe_second_run_is_silent(settings) -> None:
     assert len(_ledger_rows(settings)) == 1
 
 
+def test_recurring_event_fires_per_occurrence(settings) -> None:
+    # A daily series whose today-occurrence is 30 min out (DTSTART a few days back).
+    occ_time = context.now(settings) + timedelta(minutes=30)
+    dtstart = (occ_time - timedelta(days=3)).isoformat(timespec="seconds")
+    store.create_event(settings, title="Standup", start=dtstart, rrule="FREQ=DAILY")
+
+    fired = reminders.run_reminders(settings)
+    assert len(fired) == 1 and fired[0]["title"] == "Standup"
+    assert reminders.run_reminders(settings) == []  # this occurrence already fired
+
+    # Tomorrow's occurrence has a distinct start, so it is an unclaimed ledger key.
+    upcoming = reminders.due_reminders(settings, current=context.now(settings) + timedelta(days=1))
+    assert len(upcoming) == 1
+    fired_starts = {r["event_start"] for r in _ledger_rows(settings)}
+    assert upcoming[0]["start"] not in fired_starts
+
+
 def test_reschedule_fires_again(settings) -> None:
     event = _event_in(settings, "Call", minutes=20)
     assert len(reminders.run_reminders(settings)) == 1

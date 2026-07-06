@@ -14,6 +14,7 @@ dependencies = [
     "sqlite-vec>=0.1.9",
     "langgraph-checkpoint-sqlite>=3.1.0",
     "pyyaml>=6.0.3",
+    "python-dateutil>=2.9",
 ]
 
 [dependency-groups]

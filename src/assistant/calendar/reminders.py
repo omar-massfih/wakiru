@@ -19,7 +19,7 @@ from datetime import datetime, timedelta
 
 from ..config import Settings, get_settings
 from ..notify import deliver_webhook
-from . import store
+from . import recurrence, store
 from .context import now
 
 logger = logging.getLogger(__name__)
@@ -77,7 +77,9 @@ def due_reminders(settings: Settings, current: datetime | None = None) -> list[d
 
     current = current or now(settings)
     horizon = current + timedelta(minutes=max(leads))
-    events = store.list_events(settings, start_from=current, start_to=horizon)
+    # Expand recurring series so each occurrence is nudged on its own; the ledger
+    # keys on the occurrence start, so a weekly standup fires once per week.
+    events = recurrence.occurrences_in(settings, current, horizon)
 
     reminders: list[dict] = []
     for event in events:

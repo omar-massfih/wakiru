@@ -6,11 +6,12 @@ Codex call in the write path is faked, so these stay fast and offline.
 
 from __future__ import annotations
 
+import sqlite3
 from datetime import timedelta
 
 import pytest
 
-from assistant.calendar import context, ops, store
+from assistant.calendar import context, ops, recurrence, store
 from assistant.config import Settings
 
 
@@ -26,6 +27,13 @@ def settings(tmp_path) -> Settings:
 def _iso_in(settings: Settings, **delta) -> str:
     """A tz-aware ISO-8601 datetime `delta` from the assistant's current time."""
     return (context.now(settings) + timedelta(**delta)).isoformat(timespec="minutes")
+
+
+def _past_monday(settings: Settings, weeks_ago: int = 3, hour: int = 9):
+    """A Monday `weeks_ago` weeks back at `hour`:00 — a DTSTART already in the past."""
+    current = context.now(settings)
+    monday = current - timedelta(days=current.weekday(), weeks=weeks_ago)
+    return monday.replace(hour=hour, minute=0, second=0, microsecond=0)
 
 
 # --- store ---------------------------------------------------------------- #
@@ -158,3 +166,107 @@ def test_update_calendar_disabled_is_noop(tmp_path, monkeypatch) -> None:
         lambda *a, **k: pytest.fail("run_codex must not be called when disabled"),
     )
     assert ops.update_calendar(settings, "book something", "ok") == []
+
+
+def test_update_calendar_creates_recurring_series(settings, monkeypatch) -> None:
+    start = _iso_in(settings, days=1)
+    canned = (
+        f'[{{"op": "create", "title": "Standup", "start": "{start}",'
+        ' "rrule": "FREQ=WEEKLY;BYDAY=MO"}]'
+    )
+    monkeypatch.setattr("assistant.calendar.ops.run_codex", lambda *a, **k: canned)
+
+    applied = ops.update_calendar(settings, "standup every monday", "Set up.")
+    assert any("every Monday" in s for s in applied)
+    events = store.list_events(settings)
+    assert len(events) == 1 and events[0].rrule == "FREQ=WEEKLY;BYDAY=MO"
+
+
+def test_create_drops_invalid_rrule_but_keeps_event(settings, monkeypatch) -> None:
+    start = _iso_in(settings, days=1)
+    canned = f'[{{"op": "create", "title": "Thing", "start": "{start}", "rrule": "FREQ=NEVER"}}]'
+    monkeypatch.setattr("assistant.calendar.ops.run_codex", lambda *a, **k: canned)
+
+    ops.update_calendar(settings, "schedule thing", "Done.")
+    events = store.list_events(settings)
+    assert len(events) == 1 and events[0].rrule == ""  # rule dropped, event kept
+
+
+# --- recurrence (expansion & migration) ----------------------------------- #
+
+
+def test_event_persists_rrule(settings) -> None:
+    event = store.create_event(
+        settings, title="1:1", start=_iso_in(settings, days=1), rrule="FREQ=WEEKLY;BYDAY=MO"
+    )
+    assert store.get_event(settings, event.id).rrule == "FREQ=WEEKLY;BYDAY=MO"
+
+
+def test_migration_adds_rrule_to_legacy_db(settings) -> None:
+    settings.memory_path.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(settings.calendar_db_path) as conn:  # pre-rrule schema
+        conn.execute(
+            "CREATE TABLE events (id TEXT PRIMARY KEY, title TEXT NOT NULL,"
+            " start TEXT NOT NULL, end TEXT DEFAULT '', location TEXT DEFAULT '',"
+            " notes TEXT DEFAULT '', created TEXT DEFAULT '', updated TEXT DEFAULT '')"
+        )
+        conn.execute(
+            "INSERT INTO events (id, title, start) VALUES"
+            " ('legacy1', 'Old', '2020-01-01T09:00:00+01:00')"
+        )
+
+    back = store.get_event(settings, "legacy1")  # _connect adds the column
+    assert back is not None and back.rrule == ""
+    new = store.create_event(
+        settings, title="New", start="2030-01-01T09:00:00+01:00", rrule="FREQ=DAILY"
+    )
+    assert store.get_event(settings, new.id).rrule == "FREQ=DAILY"
+
+
+def test_occurrences_expand_weekly_past_dtstart(settings) -> None:
+    start_dt = _past_monday(settings)
+    store.create_event(
+        settings,
+        title="Standup",
+        start=start_dt.isoformat(timespec="minutes"),
+        end=(start_dt + timedelta(minutes=30)).isoformat(timespec="minutes"),
+        rrule="FREQ=WEEKLY;BYDAY=MO",
+    )
+
+    current = context.now(settings)
+    occ = recurrence.occurrences_in(settings, current, current + timedelta(days=14))
+    assert occ  # a past-DTSTART series still yields upcoming occurrences
+    for e in occ:
+        dt = store.parse_dt(e.start)
+        assert dt.weekday() == 0 and dt >= current  # upcoming Mondays only
+        assert e.rrule == ""  # an occurrence, not the series master
+        assert store.parse_dt(e.end) - dt == timedelta(minutes=30)  # duration kept
+
+
+def test_upcoming_events_expands_series(settings) -> None:
+    store.create_event(
+        settings,
+        title="Weekly",
+        start=_past_monday(settings).isoformat(timespec="minutes"),
+        rrule="FREQ=WEEKLY;BYDAY=MO",
+    )
+    assert any(e.title == "Weekly" for e in context.upcoming_events(settings))
+
+
+def test_writer_view_shows_series_with_summary(settings) -> None:
+    event = store.create_event(
+        settings,
+        title="1:1",
+        start=_past_monday(settings).isoformat(timespec="minutes"),
+        rrule="FREQ=WEEKLY;BYDAY=MO",
+    )
+    view = context.writer_view(settings)
+    assert any(e.id == event.id for e in view)  # series shown despite past DTSTART
+    rendered = context.render_events(settings, view, with_ids=True)
+    assert "every Monday" in rendered and event.id in rendered
+
+
+def test_humanize_rrule() -> None:
+    assert recurrence.humanize_rrule("FREQ=WEEKLY;BYDAY=MO") == "every Monday"
+    assert recurrence.humanize_rrule("FREQ=DAILY") == "daily"
+    assert recurrence.humanize_rrule("FREQ=WEEKLY;INTERVAL=2") == "every 2 weeks"
