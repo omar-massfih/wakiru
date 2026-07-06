@@ -2,12 +2,14 @@
 
 Graph shape::
 
-    START -> recall -> codex -> summarize -> END
+    START -> recall -> agenda -> codex -> summarize -> END
 
 * **recall** — semantic memory lookup for the latest user turn; the retrieved
   context is stashed ephemerally (overwritten each turn, never accumulated) and
   the recalled notes are reinforced.
-* **codex** — feed ``[recall context] + history`` to the Codex-backed model.
+* **agenda** — the current time plus upcoming calendar events, stashed
+  ephemerally so the model has a clock and knows what's scheduled.
+* **codex** — feed ``[recall context] + [agenda] + history`` to the Codex model.
 * **summarize** — bound working memory: once history grows past a threshold, fold
   older turns into a rolling summary and keep only the recent messages verbatim.
 
@@ -34,6 +36,7 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
+from .calendar import agenda_context
 from .config import Settings, get_settings
 from .llm import build_model
 from .memory import index, recall_context
@@ -45,6 +48,7 @@ class BrainState(MessagesState):
     """Conversation state plus ephemeral per-turn recall + a rolling summary."""
 
     recall: str
+    agenda: str
     summary: str
 
 
@@ -82,10 +86,22 @@ def build_agent(settings: Settings | None = None) -> CompiledStateGraph:
         context = recall_context(settings, query)
         return {"recall": context.content}
 
+    def agenda(state: BrainState) -> dict:
+        """Give the model a clock and today's schedule (ephemeral, per turn)."""
+        if not settings.enable_calendar:
+            return {"agenda": ""}
+        try:
+            return {"agenda": agenda_context(settings)}
+        except Exception:
+            logger.exception("building agenda context failed; continuing without it")
+            return {"agenda": ""}
+
     def call_codex(state: BrainState) -> dict:
         prefix: list[BaseMessage] = []
         if state.get("recall"):
             prefix.append(SystemMessage(content=state["recall"]))
+        if state.get("agenda"):
+            prefix.append(SystemMessage(content=state["agenda"]))
         if state.get("summary"):
             prefix.append(
                 SystemMessage(content="Conversation so far:\n" + state["summary"])
@@ -125,10 +141,12 @@ def build_agent(settings: Settings | None = None) -> CompiledStateGraph:
 
     graph = StateGraph(BrainState)
     graph.add_node("recall", recall)
+    graph.add_node("agenda", agenda)
     graph.add_node("codex", call_codex)
     graph.add_node("summarize", summarize)
     graph.add_edge(START, "recall")
-    graph.add_edge("recall", "codex")
+    graph.add_edge("recall", "agenda")
+    graph.add_edge("agenda", "codex")
     graph.add_edge("codex", "summarize")
     graph.add_edge("summarize", END)
     return graph.compile(checkpointer=_checkpointer(settings))

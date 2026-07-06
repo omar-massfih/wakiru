@@ -1,0 +1,158 @@
+"""Calendar formation — the write path, modeled on :mod:`assistant.memory.learn`.
+
+After each exchange (in the background, off the reply path) a reconciling
+extractor reads the turn *together with the current time and what's already
+booked* and returns operations —
+
+* ``create``     — schedule a new event,
+* ``reschedule`` — change an existing event's time/details (an in-place update),
+* ``cancel``     — remove an event.
+
+Because the extractor is given the real current time and the upcoming events (with
+their ids), it resolves natural-language dates ("this Friday at 3pm") to concrete
+ISO-8601 datetimes and targets existing events by id, so it neither double-books
+nor invents times. Like memory upkeep it is best-effort: any failure is logged and
+swallowed so the chat reply is never affected.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import re
+
+from ..codex_runner import run_codex
+from ..config import Settings, get_settings
+from . import store
+from .context import now, render_events, upcoming_events
+
+logger = logging.getLogger(__name__)
+
+
+_SCHEDULE_PROMPT = """\
+You maintain the local calendar of a personal assistant. Read the exchange, the
+current time, and the events already scheduled, then decide what should change.
+
+Only act on a clear scheduling intent — the user asking to book, move, or cancel
+something (or the assistant confirming it). Ignore chit-chat and questions that
+merely ask about the schedule. Resolve relative dates ("tomorrow", "this Friday
+at 3pm") against the CURRENT TIME below and always emit absolute ISO-8601
+datetimes that include the timezone offset. To move or cancel an existing event,
+reference it by its exact id from the list below.
+
+Return a JSON array of operations, each one of:
+  {{"op": "create", "title": "<short title>", "start": "<ISO-8601 with offset>", "end": "<ISO-8601 or omit>", "location": "<or omit>", "notes": "<or omit>"}}
+  {{"op": "reschedule", "id": "<existing event id>", "start": "<new ISO-8601 or omit>", "title": "<or omit>", "location": "<or omit>"}}
+  {{"op": "cancel", "id": "<existing event id>"}}
+Return [] if nothing should change. Output JSON only — no prose, no code fences.
+
+CURRENT TIME: {now}
+
+Already scheduled:
+{events}
+
+User: {user}
+Assistant: {assistant}
+"""
+
+
+def _parse_ops(text: str) -> list[dict]:
+    text = text.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```[a-zA-Z]*\n?|\n?```$", "", text).strip()
+    start, end = text.find("["), text.rfind("]")
+    if start == -1 or end == -1 or end < start:
+        return []
+    try:
+        data = json.loads(text[start : end + 1])
+    except json.JSONDecodeError:
+        return []
+    return [
+        d for d in data
+        if isinstance(d, dict) and d.get("op") in {"create", "reschedule", "cancel"}
+    ]
+
+
+def _target_id(settings: Settings, op: dict) -> str | None:
+    """Resolve the event an op refers to, by id or a fuzzy title/query fallback."""
+    ident = op.get("id") or op.get("query") or op.get("title")
+    if not ident:
+        return None
+    found = store.find_event(settings, str(ident))
+    return found.id if found else None
+
+
+def apply_op(settings: Settings, op: dict) -> str | None:
+    """Apply a single parsed operation; return a short log line, or ``None``."""
+    kind = op["op"]
+    if kind == "create" and op.get("title") and op.get("start"):
+        event = store.create_event(
+            settings,
+            title=str(op["title"]),
+            start=str(op["start"]),
+            end=str(op.get("end", "") or ""),
+            location=str(op.get("location", "") or ""),
+            notes=str(op.get("notes", "") or ""),
+        )
+        return f"created: {event.title} @ {event.start}"
+
+    if kind == "reschedule":
+        target = _target_id(settings, op)
+        if target is None:
+            return None
+        revised = store.update_event(
+            settings, target,
+            start=op.get("start"),
+            end=op.get("end"),
+            title=op.get("title"),
+            location=op.get("location"),
+            notes=op.get("notes"),
+        )
+        return f"rescheduled: {revised.title} @ {revised.start}" if revised else None
+
+    if kind == "cancel":
+        target = _target_id(settings, op)
+        if target is None:
+            return None
+        deleted = store.delete_event(settings, target)
+        return f"cancelled: {deleted.title}" if deleted else None
+
+    return None
+
+
+def update_calendar(
+    settings: Settings | None, user_msg: str, assistant_msg: str
+) -> list[str]:
+    """Extract and apply calendar operations for one turn (create/reschedule/cancel).
+
+    Intended to run in the background — it makes a second Codex call. Returns a
+    short log of what changed. No-ops when ``enable_auto_schedule`` is false.
+    """
+    settings = settings or get_settings()
+    if not settings.enable_auto_schedule:
+        return []
+
+    prompt = _SCHEDULE_PROMPT.format(
+        now=now(settings).isoformat(timespec="minutes"),
+        events=render_events(settings, upcoming_events(settings), with_ids=True),
+        user=user_msg,
+        assistant=assistant_msg,
+    )
+    try:
+        raw = run_codex(prompt, settings=settings)
+    except Exception:
+        logger.exception("calendar extraction (run_codex) failed; skipping this turn")
+        return []  # calendar upkeep is best-effort; never break the main flow
+
+    applied: list[str] = []
+    for op in _parse_ops(raw):
+        try:
+            result = apply_op(settings, op)
+            if result:
+                applied.append(result)
+        except Exception:
+            logger.exception("failed to apply calendar op: %s", op)
+
+    if applied:
+        logger.info("calendar updated: %s", "; ".join(applied))
+    return applied

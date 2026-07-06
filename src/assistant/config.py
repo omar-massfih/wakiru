@@ -93,6 +93,21 @@ class Settings(BaseSettings):
     # How many of the most recent messages to keep verbatim after summarizing.
     working_memory_keep_recent: int = 12
 
+    # --- Time & calendar ---
+    # IANA timezone name (e.g. "Europe/Oslo") the assistant reasons in. None =>
+    # the server's system-local timezone. Used for the current-time context it is
+    # given each turn and for resolving natural-language dates when scheduling.
+    timezone: str | None = None
+    # Master switch: inject current time + upcoming events into each turn.
+    enable_calendar: bool = True
+    # Master switch for the write path: an LLM extraction after each turn that
+    # creates/reschedules/cancels events (parallel to enable_auto_memory).
+    enable_auto_schedule: bool = True
+    # How far ahead (days) upcoming events are surfaced to the model.
+    calendar_upcoming_days: int = 14
+    # Cap on how many upcoming events are injected per turn.
+    calendar_max_events: int = 20
+
     # --- HTTP server ---
     host: str = "127.0.0.1"
     port: int = 8000
@@ -106,6 +121,11 @@ class Settings(BaseSettings):
     def memory_db_path(self) -> Path:
         """SQLite file holding the vector index + reinforcement counters."""
         return self.memory_path / "index.db"
+
+    @property
+    def calendar_db_path(self) -> Path:
+        """SQLite file holding the local calendar's events."""
+        return self.memory_path / "calendar.db"
 
     @property
     def checkpoints_db_path(self) -> Path:

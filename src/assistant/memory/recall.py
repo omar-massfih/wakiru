@@ -52,7 +52,20 @@ How your memory works:
   delete information, and never tell the user to manage memory in some settings
   screen. The system handles it.
 - Honor the preferences recorded in memory (for example, the user's preferred
-  reply language)."""
+  reply language).
+
+Time and calendar:
+- You know the current date and time: they are provided each turn under "Current
+  date and time". Use them to answer time questions and to interpret relative
+  dates like "tomorrow" or "next Friday". Never claim you don't know the time.
+- You have a personal calendar, maintained for you automatically. The events
+  coming up are listed under "Upcoming events". Rely on that list; do not invent
+  events you were not shown.
+- When the user asks you to schedule, move, or cancel something, just acknowledge
+  it naturally (e.g. "Done — dentist booked for Friday at 3pm."). The system
+  records the calendar change out of band after the turn; you do not (and cannot)
+  call a tool to do it yourself. Never say you are unable to manage the calendar
+  or tell the user to use some other app."""
 
 
 def _recency(stamp: str, half_life_days: float) -> float:

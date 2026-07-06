@@ -5,6 +5,7 @@ from __future__ import annotations
 import itertools
 import logging
 import uuid
+from datetime import datetime
 from functools import lru_cache
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException
@@ -12,6 +13,8 @@ from langchain_core.messages import HumanMessage
 from pydantic import BaseModel
 
 from .agent import build_agent
+from .calendar import update_calendar
+from .calendar.context import resolve_tz, upcoming_events
 from .codex_runner import CodexError
 from .config import get_settings
 from .memory import consolidate_memory, store, update_memory
@@ -64,8 +67,13 @@ def chat(req: ChatRequest, background: BackgroundTasks) -> ChatResponse:
     # episodic trace plus a reconciling LLM extraction (save/update/forget).
     background.add_task(update_memory, None, req.message, reply, thread_id)
 
-    # Periodic consolidation ("sleep"), also in the background.
+    # Calendar upkeep, also off the request path: a reconciling LLM extraction
+    # that creates/reschedules/cancels events from the turn.
     settings = get_settings()
+    if settings.enable_calendar and settings.enable_auto_schedule:
+        background.add_task(update_calendar, None, req.message, reply)
+
+    # Periodic consolidation ("sleep"), also in the background.
     every = settings.consolidate_every_n_turns
     if every > 0 and next(_turn_counter) % every == 0:
         background.add_task(consolidate_memory, None)
@@ -102,3 +110,25 @@ def memory_stats() -> dict:
 def memory_consolidate() -> dict:
     """Trigger a consolidation pass on demand and return what changed."""
     return consolidate_memory(get_settings())
+
+
+@app.get("/calendar")
+def calendar() -> dict:
+    """List upcoming events (within the configured horizon) and the current time."""
+    settings = get_settings()
+    events = upcoming_events(settings)
+    return {
+        "now": datetime.now(resolve_tz(settings)).isoformat(timespec="seconds"),
+        "total": len(events),
+        "events": [
+            {
+                "id": e.id,
+                "title": e.title,
+                "start": e.start,
+                "end": e.end,
+                "location": e.location,
+                "notes": e.notes,
+            }
+            for e in events
+        ],
+    }
