@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import replace
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from dateutil.rrule import rrulestr
 
@@ -81,31 +81,81 @@ def humanize_rrule(rule: str) -> str:
     return rule
 
 
+def _rule_for(event: Event):
+    """The dateutil rule for a series master, or ``None`` if start/rule is unusable."""
+    dtstart = parse_dt(event.start)
+    if dtstart is None:
+        return None
+    try:
+        return rrulestr(event.rrule, dtstart=dtstart)
+    except (ValueError, TypeError):
+        logger.warning("skipping event %s with invalid rrule %r", event.id, event.rrule)
+        return None
+
+
+def resolve_occurrence(event: Event, when: datetime) -> datetime | None:
+    """Snap ``when`` to the series' actual occurrence datetime near it.
+
+    Matches an exact instant first, then any occurrence on the same calendar date
+    (so "this Monday" resolves even if the LLM's time-of-day is loose). ``None`` if
+    the event is not a series or no occurrence lands within a day of ``when``.
+    """
+    if not event.rrule:
+        return None
+    rule = _rule_for(event)
+    if rule is None:
+        return None
+    window = rule.between(when - timedelta(days=1), when + timedelta(days=1), inc=True)
+    for occ in window:
+        if occ == when:
+            return occ
+    for occ in window:
+        if occ.date() == when.date():
+            return occ
+    return None
+
+
 def expand(event: Event, window_start: datetime, window_end: datetime) -> list[Event]:
     """Occurrences of ``event`` within ``[window_start, window_end]`` (inclusive).
 
     A non-recurring event yields itself. A recurring master yields one synthetic
     :class:`Event` per occurrence — same id, ``rrule`` cleared, ``end`` shifted by
-    the master's original duration. An unparseable master yields nothing (logged).
+    the master's original duration. Skipped occurrences (``exdates``) are dropped and
+    single-occurrence ``overrides`` are applied in place; a moved occurrence keeps its
+    slot in the window even if its new time falls slightly outside it. An unparseable
+    master yields nothing (logged).
     """
     if not event.rrule:
         return [event]
     dtstart = parse_dt(event.start)
-    if dtstart is None:
-        return []
-    try:
-        rule = rrulestr(event.rrule, dtstart=dtstart)
-    except (ValueError, TypeError):
-        logger.warning("skipping event %s with invalid rrule %r", event.id, event.rrule)
+    rule = _rule_for(event)
+    if dtstart is None or rule is None:
         return []
 
     end_dt = parse_dt(event.end)
     duration = end_dt - dtstart if end_dt is not None else None
+    skipped = {parse_dt(x) for x in store.load_exdates(event)}
+    overrides = {parse_dt(k): v for k, v in store.load_overrides(event).items()}
 
     occurrences: list[Event] = []
     for occ in rule.between(window_start, window_end, inc=True):
+        if occ in skipped:
+            continue
         occ_end = (occ + duration).isoformat() if duration is not None else ""
-        occurrences.append(replace(event, start=occ.isoformat(), end=occ_end, rrule=""))
+        item = replace(
+            event, start=occ.isoformat(), end=occ_end, rrule="", exdates="", overrides=""
+        )
+        change = overrides.get(occ)
+        if change:
+            item = replace(
+                item,
+                start=change.get("start") or item.start,
+                end=change.get("end") or item.end,
+                title=change.get("title") or item.title,
+                location=change.get("location") or item.location,
+                notes=change.get("notes") or item.notes,
+            )
+        occurrences.append(item)
     return occurrences
 
 

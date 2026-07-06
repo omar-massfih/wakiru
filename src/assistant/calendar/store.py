@@ -13,6 +13,7 @@ safe to touch from FastAPI request handlers and background tasks alike.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import uuid
 from dataclasses import dataclass
@@ -21,7 +22,11 @@ from datetime import datetime
 from ..config import Settings
 
 # Columns a caller may set on create/update (id + timestamps are managed here).
-_FIELDS = ("title", "start", "end", "location", "notes", "rrule")
+_FIELDS = ("title", "start", "end", "location", "notes", "rrule", "exdates", "overrides")
+
+# Columns added after the table's first release, migrated in on connect (see
+# :func:`_ensure_columns`). All are TEXT DEFAULT ''.
+_ADDED_COLUMNS = ("rrule", "exdates", "overrides")
 
 
 @dataclass
@@ -32,6 +37,11 @@ class Event:
     with ``start`` as its DTSTART. Empty for a one-shot event; when set, this row is
     the series *master* and concrete occurrences are expanded on read
     (see :mod:`assistant.calendar.recurrence`).
+
+    ``exdates`` and ``overrides`` carry per-occurrence exceptions on a series master:
+    ``exdates`` is a JSON list of occurrence-start ISO strings to skip; ``overrides``
+    is a JSON object mapping an occurrence-start ISO string to the changed fields for
+    just that occurrence (a moved/edited single instance). Both empty on a plain event.
     """
 
     id: str
@@ -41,6 +51,8 @@ class Event:
     location: str = ""
     notes: str = ""
     rrule: str = ""
+    exdates: str = ""
+    overrides: str = ""
     created: str = ""
     updated: str = ""
 
@@ -55,7 +67,7 @@ def _connect(settings: Settings) -> sqlite3.Connection:
         "CREATE TABLE IF NOT EXISTS events ("
         " id TEXT PRIMARY KEY, title TEXT NOT NULL, start TEXT NOT NULL,"
         " end TEXT DEFAULT '', location TEXT DEFAULT '', notes TEXT DEFAULT '',"
-        " rrule TEXT DEFAULT '',"
+        " rrule TEXT DEFAULT '', exdates TEXT DEFAULT '', overrides TEXT DEFAULT '',"
         " created TEXT DEFAULT '', updated TEXT DEFAULT '')"
     )
     _ensure_columns(conn)
@@ -66,11 +78,12 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
     """Add columns introduced after the table's first creation (cheap migration).
 
     ``CREATE TABLE IF NOT EXISTS`` never alters an existing table, so a DB created
-    before ``rrule`` existed would lack the column. Add it in place when missing.
+    before these columns existed would lack them. Add any that are missing in place.
     """
     have = {row["name"] for row in conn.execute("PRAGMA table_info(events)")}
-    if "rrule" not in have:
-        conn.execute("ALTER TABLE events ADD COLUMN rrule TEXT DEFAULT ''")
+    for column in _ADDED_COLUMNS:
+        if column not in have:
+            conn.execute(f"ALTER TABLE events ADD COLUMN {column} TEXT DEFAULT ''")
 
 
 def _row_to_event(row: sqlite3.Row) -> Event:
@@ -82,6 +95,8 @@ def _row_to_event(row: sqlite3.Row) -> Event:
         location=row["location"] or "",
         notes=row["notes"] or "",
         rrule=row["rrule"] or "",
+        exdates=row["exdates"] or "",
+        overrides=row["overrides"] or "",
         created=row["created"] or "",
         updated=row["updated"] or "",
     )
@@ -237,3 +252,66 @@ def find_event(settings: Settings, query: str) -> Event | None:
     now = datetime.now().astimezone()
     upcoming = [e for e in matches if (dt := parse_dt(e.start)) and dt >= now]
     return (upcoming or matches)[0]
+
+
+def load_exdates(event: Event) -> list[str]:
+    """The occurrence-start ISO strings skipped on a series (empty if none/malformed)."""
+    try:
+        data = json.loads(event.exdates or "[]")
+    except json.JSONDecodeError:
+        return []
+    return [str(x) for x in data] if isinstance(data, list) else []
+
+
+def load_overrides(event: Event) -> dict[str, dict]:
+    """The per-occurrence overrides on a series: ISO occurrence-start -> changed fields."""
+    try:
+        data = json.loads(event.overrides or "{}")
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {str(k): v for k, v in data.items() if isinstance(v, dict)}
+
+
+def add_exdate(settings: Settings, event_id: str, occurrence: str) -> Event | None:
+    """Mark a single occurrence of a series as skipped; return the updated master.
+
+    ``None`` if the event is absent or not a series. Idempotent. Any override
+    previously set for this occurrence is dropped, since the occurrence is now gone.
+    """
+    event = get_event(settings, event_id)
+    if event is None or not event.rrule:
+        return None
+    exdates = load_exdates(event)
+    if occurrence not in exdates:
+        exdates.append(occurrence)
+    overrides = load_overrides(event)
+    overrides.pop(occurrence, None)
+    return update_event(
+        settings, event_id,
+        exdates=json.dumps(exdates), overrides=json.dumps(overrides),
+    )
+
+
+def set_override(
+    settings: Settings, event_id: str, occurrence: str, fields: dict[str, str]
+) -> Event | None:
+    """Override the given fields for a single occurrence of a series (a moved instance).
+
+    ``fields`` may include ``start``/``end``/``title``/``location``/``notes``; blanks
+    are ignored. Returns the updated master, or ``None`` if absent/not a series.
+    """
+    event = get_event(settings, event_id)
+    if event is None or not event.rrule:
+        return None
+    kept = {k: str(v).strip() for k, v in fields.items() if k in _FIELDS and v}
+    if not kept:
+        return event
+    overrides = load_overrides(event)
+    overrides[occurrence] = {**overrides.get(occurrence, {}), **kept}
+    exdates = [d for d in load_exdates(event) if d != occurrence]  # un-skip if moved back
+    return update_event(
+        settings, event_id,
+        overrides=json.dumps(overrides), exdates=json.dumps(exdates),
+    )

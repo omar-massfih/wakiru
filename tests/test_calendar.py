@@ -270,3 +270,69 @@ def test_humanize_rrule() -> None:
     assert recurrence.humanize_rrule("FREQ=WEEKLY;BYDAY=MO") == "every Monday"
     assert recurrence.humanize_rrule("FREQ=DAILY") == "daily"
     assert recurrence.humanize_rrule("FREQ=WEEKLY;INTERVAL=2") == "every 2 weeks"
+
+
+# --- per-occurrence exceptions (skip / move) ------------------------------ #
+
+
+def _weekly_series(settings: Settings) -> store.Event:
+    return store.create_event(
+        settings,
+        title="Standup",
+        start=_past_monday(settings).isoformat(timespec="minutes"),
+        rrule="FREQ=WEEKLY;BYDAY=MO",
+    )
+
+
+def _upcoming_mondays(settings: Settings) -> list:
+    current = context.now(settings)
+    return recurrence.occurrences_in(settings, current, current + timedelta(days=28))
+
+
+def test_resolve_occurrence_snaps_to_series(settings) -> None:
+    series = _weekly_series(settings)
+    real = store.parse_dt(_upcoming_mondays(settings)[0].start)
+    assert recurrence.resolve_occurrence(series, real) == real  # exact
+    loose = real.replace(hour=15, minute=30)  # same date, sloppy time
+    assert recurrence.resolve_occurrence(series, loose) == real
+
+
+def test_skip_occurrence_drops_only_that_date(settings, monkeypatch) -> None:
+    series = _weekly_series(settings)
+    mondays = _upcoming_mondays(settings)
+    first, second = store.parse_dt(mondays[0].start), store.parse_dt(mondays[1].start)
+
+    canned = f'[{{"op": "skip", "id": "{series.id}", "occurrence": "{first.isoformat()}"}}]'
+    monkeypatch.setattr("assistant.calendar.ops.run_codex", lambda *a, **k: canned)
+    applied = ops.update_calendar(settings, "skip this monday's standup", "Skipped.")
+    assert any(s.startswith("skipped:") for s in applied)
+
+    starts = [store.parse_dt(e.start) for e in _upcoming_mondays(settings)]
+    assert first not in starts and second in starts  # only the one date is gone
+
+
+def test_move_occurrence_changes_only_that_one(settings, monkeypatch) -> None:
+    series = _weekly_series(settings)
+    mondays = _upcoming_mondays(settings)
+    first = store.parse_dt(mondays[0].start)
+    new_start = (first + timedelta(days=1, hours=1)).isoformat()  # Tuesday, an hour later
+
+    canned = (
+        f'[{{"op": "move", "id": "{series.id}", "occurrence": "{first.isoformat()}",'
+        f' "start": "{new_start}", "title": "Standup (special)"}}]'
+    )
+    monkeypatch.setattr("assistant.calendar.ops.run_codex", lambda *a, **k: canned)
+    applied = ops.update_calendar(settings, "move this monday's standup to tuesday", "Moved.")
+    assert any(s.startswith("moved:") for s in applied)
+
+    occ = _upcoming_mondays(settings)
+    moved = [e for e in occ if e.title == "Standup (special)"]
+    assert len(moved) == 1 and moved[0].start == new_start
+    assert all(store.parse_dt(e.start) != first for e in occ)  # original slot vacated
+    assert all(e.title == "Standup" for e in occ if e.title != "Standup (special)")
+
+
+def test_exception_helpers_reject_non_series(settings) -> None:
+    one_shot = store.create_event(settings, title="Once", start=_iso_in(settings, days=1))
+    assert store.add_exdate(settings, one_shot.id, one_shot.start) is None
+    assert store.set_override(settings, one_shot.id, one_shot.start, {"title": "x"}) is None

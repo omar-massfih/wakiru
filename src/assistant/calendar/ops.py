@@ -44,12 +44,19 @@ For a repeating event ("every Monday", "daily standup", "weekly 1:1"), set "rrul
 to an RFC 5545 recurrence rule and use "start" as the first occurrence — e.g. every
 Monday → "FREQ=WEEKLY;BYDAY=MO", every weekday → "FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR",
 daily → "FREQ=DAILY". A series shows its rule in the list below; reschedule and
-cancel act on the whole series by its id (per-occurrence changes are not supported).
+cancel act on the WHOLE series by its id.
+
+To change just ONE occurrence of a series (not the whole series), use "skip" to drop
+that single date, or "move" to change only that occurrence — identify it with
+"occurrence" set to that occurrence's scheduled datetime (resolve "this Monday",
+"next week's" against CURRENT TIME).
 
 Return a JSON array of operations, each one of:
   {{"op": "create", "title": "<short title>", "start": "<ISO-8601 with offset>", "end": "<ISO-8601 or omit>", "location": "<or omit>", "notes": "<or omit>", "rrule": "<RFC 5545 RRULE or omit>"}}
   {{"op": "reschedule", "id": "<existing event id>", "start": "<new ISO-8601 or omit>", "title": "<or omit>", "location": "<or omit>"}}
   {{"op": "cancel", "id": "<existing event id>"}}
+  {{"op": "skip", "id": "<series id>", "occurrence": "<ISO-8601 of the occurrence to drop>"}}
+  {{"op": "move", "id": "<series id>", "occurrence": "<ISO-8601 of the original occurrence>", "start": "<new ISO-8601>", "end": "<or omit>", "title": "<or omit>", "location": "<or omit>"}}
 Return [] if nothing should change. Output JSON only — no prose, no code fences.
 
 CURRENT TIME: {now}
@@ -75,7 +82,8 @@ def _parse_ops(text: str) -> list[dict]:
         return []
     return [
         d for d in data
-        if isinstance(d, dict) and d.get("op") in {"create", "reschedule", "cancel"}
+        if isinstance(d, dict)
+        and d.get("op") in {"create", "reschedule", "cancel", "skip", "move"}
     ]
 
 
@@ -128,7 +136,35 @@ def apply_op(settings: Settings, op: dict) -> str | None:
         deleted = store.delete_event(settings, target)
         return f"cancelled: {deleted.title}" if deleted else None
 
+    if kind in {"skip", "move"}:
+        return _apply_occurrence_op(settings, kind, op)
+
     return None
+
+
+def _apply_occurrence_op(settings: Settings, kind: str, op: dict) -> str | None:
+    """Apply a single-occurrence exception (``skip``/``move``) on a series master."""
+    target = _target_id(settings, op)
+    when = store.parse_dt(str(op.get("occurrence", "")))
+    if target is None or when is None:
+        return None
+    master = store.get_event(settings, target)
+    if master is None or not master.rrule:
+        return None  # exceptions only apply to a series
+    occurrence = recurrence.resolve_occurrence(master, when)
+    if occurrence is None:
+        return None  # no such occurrence in the series
+    key = occurrence.isoformat()
+
+    if kind == "skip":
+        updated = store.add_exdate(settings, target, key)
+        return f"skipped: {master.title} on {key}" if updated else None
+
+    fields = {k: op.get(k) for k in ("start", "end", "title", "location") if op.get(k)}
+    if not fields:
+        return None
+    updated = store.set_override(settings, target, key, fields)
+    return f"moved: {master.title} {key} -> {fields.get('start', key)}" if updated else None
 
 
 def update_calendar(
