@@ -1,8 +1,11 @@
-# agentic-assistent
+# Wakiru
 
 An agentic personal assistant built on **LangGraph + LangChain**, using the **Codex CLI**
 as its reasoning/execution engine. This is the basic plumbing — a minimal LangGraph graph
 that drives `codex exec` and returns its reply — meant to be extended with real capabilities.
+
+> **On the name:** *Wakiru* blends the Arabic *wakīl* (وكيل — "agent," one who acts on your
+> behalf) with the Japanese *wakaru* (分かる — "to understand"): an agent that understands you.
 
 ## How it works
 
