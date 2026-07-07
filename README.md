@@ -31,7 +31,9 @@ Telegram bot  /
   bridge started alongside the server when a bot token is configured.
 
 Codex is itself an autonomous agent (its own model, tools, and sandbox), so tool-use happens
-inside Codex rather than as LangChain tools.
+inside Codex rather than as LangChain tools. Live web search is one such tool: set
+`CODEX_WEB_SEARCH=true` to pass Codex's global `--search` flag, which turns on the native
+Responses `web_search` tool (off by default — extra tokens/latency per turn).
 
 ## The brain (memory)
 
@@ -191,6 +193,7 @@ Smoke tests build the graph and hit `/health` without invoking Codex.
 ## Configuration
 
 See `.env.example`. Notably `CODEX_SANDBOX` defaults to `read-only`; widen it deliberately.
+`CODEX_WEB_SEARCH` is similarly off by default; turn it on deliberately too.
 
 ## Adding an API-backed provider later
 

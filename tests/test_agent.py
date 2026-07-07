@@ -45,6 +45,11 @@ def test_build_command_includes_model_and_cwd() -> None:
     assert "-C" in cmd and "/work" in cmd
 
 
+def test_build_command_web_search_precedes_exec() -> None:
+    cmd = build_command("hi", "/tmp/o.txt", Settings(codex_web_search=True))
+    assert cmd[:3] == ["codex", "--search", "exec"]
+
+
 def test_build_model_defaults_to_codex() -> None:
     model = build_model(Settings())
     assert isinstance(model, CodexChatModel)

@@ -20,8 +20,11 @@ class CodexError(RuntimeError):
 
 def build_command(prompt: str, output_file: str, settings: Settings) -> list[str]:
     """Assemble the ``codex exec`` argv. Kept pure so it can be unit-tested."""
-    cmd: list[str] = [
-        settings.codex_bin,
+    cmd: list[str] = [settings.codex_bin]
+    if settings.codex_web_search:
+        # Must precede the `exec` subcommand — codex rejects it after.
+        cmd.append("--search")
+    cmd += [
         "exec",
         "--skip-git-repo-check",
         "--color",

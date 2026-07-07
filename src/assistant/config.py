@@ -33,6 +33,10 @@ class Settings(BaseSettings):
     codex_working_dir: str | None = None
     # Hard wall-clock cap (seconds) on a single Codex invocation.
     codex_timeout: int = 300
+    # Enable Codex's native web_search tool (live internet search, no
+    # per-call approval). Off by default — costs extra tokens/latency;
+    # widen deliberately, matching codex_sandbox's conservative default.
+    codex_web_search: bool = False
 
     # --- Memory (the "brain") ---
     # Root directory for long-term memory notes + the SQLite index. Relative
