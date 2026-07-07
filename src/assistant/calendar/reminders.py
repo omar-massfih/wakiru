@@ -7,7 +7,7 @@ event ("Dentist in 1 hour"), driven by a wall-clock ticker rather than chat traf
 :func:`run_reminders` is the entry point. On each call it finds events entering a
 configured *lead* window (:attr:`Settings.reminder_lead_minutes`), fires each one
 exactly once via a small SQLite dedupe ledger, and pushes it through
-:func:`assistant.notify.deliver_webhook`. It is best-effort and idempotent, so the
+:func:`assistant.notify.deliver_reminder`. It is best-effort and idempotent, so the
 in-process ticker and a manual ``POST /reminders/run`` can both drive it safely.
 """
 
@@ -18,7 +18,7 @@ import sqlite3
 from datetime import datetime, timedelta
 
 from ..config import Settings, get_settings
-from ..notify import deliver_webhook
+from ..notify import deliver_reminder
 from . import recurrence, store
 from .context import now
 
@@ -141,7 +141,7 @@ def run_reminders(settings: Settings | None = None) -> list[dict]:
             )
             if cursor.rowcount != 1:
                 continue  # already fired for this (event, start, lead)
-            deliver_webhook(settings, reminder)
+            deliver_reminder(settings, reminder)
             sent.append(reminder)
 
     if sent:

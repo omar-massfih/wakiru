@@ -10,15 +10,16 @@ from datetime import datetime
 from functools import lru_cache
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException
-from langchain_core.messages import HumanMessage
 from pydantic import BaseModel
 
-from .agent import build_agent, maybe_summarize
-from .calendar import run_reminders, update_calendar
+from . import telegram
+from .agent import build_agent
+from .calendar import run_reminders
 from .calendar.context import resolve_tz, upcoming_events
+from .chat import run_chat, run_upkeep
 from .codex_runner import CodexError
 from .config import get_settings
-from .memory import consolidate_memory, index, store, update_memory
+from .memory import consolidate_memory, store
 
 logger = logging.getLogger(__name__)
 
@@ -41,14 +42,16 @@ async def _reminder_tick_loop() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
-    task = None
+    tasks: list[asyncio.Task] = []
     if settings.enable_reminders and settings.reminder_tick_seconds > 0:
-        task = asyncio.create_task(_reminder_tick_loop())
+        tasks.append(asyncio.create_task(_reminder_tick_loop()))
         logger.info("reminder ticker started (every %ss)", settings.reminder_tick_seconds)
+    if settings.telegram_bot_token:
+        tasks.append(asyncio.create_task(telegram.poll_loop(_agent(), settings)))
     try:
         yield
     finally:
-        if task is not None:
+        for task in tasks:
             task.cancel()
 
 
@@ -80,36 +83,15 @@ def health() -> dict[str, str]:
 @app.post("/chat", response_model=ChatResponse)
 def chat(req: ChatRequest, background: BackgroundTasks) -> ChatResponse:
     thread_id = req.thread_id or str(uuid.uuid4())
-    config = {"configurable": {"thread_id": thread_id}}
     try:
-        result = _agent().invoke(
-            {"messages": [HumanMessage(content=req.message)]}, config=config
-        )
+        reply = run_chat(_agent(), req.message, thread_id)
     except CodexError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
-    reply = result["messages"][-1].content
-    if not isinstance(reply, str):
-        reply = str(reply)
 
-    # Long-term memory upkeep off the request path so it never adds latency: an
-    # episodic trace plus a reconciling LLM extraction (save/update/forget).
-    background.add_task(update_memory, None, req.message, reply, thread_id)
-
-    # Working-memory upkeep, also off the request path: fold older turns into
-    # the rolling summary once this thread's history grows past the threshold.
-    settings = get_settings()
-    background.add_task(maybe_summarize, _agent(), settings, thread_id)
-
-    # Calendar upkeep, also off the request path: a reconciling LLM extraction
-    # that creates/reschedules/cancels events from the turn.
-    if settings.enable_calendar and settings.enable_auto_schedule:
-        background.add_task(update_calendar, None, req.message, reply)
-
-    # Periodic consolidation ("sleep"), also in the background. The counter is
-    # persisted in the index DB so the cadence survives server restarts.
-    every = settings.consolidate_every_n_turns
-    if every > 0 and index.bump_turn_counter(settings) % every == 0:
-        background.add_task(consolidate_memory, None)
+    # All post-reply maintenance — long-term memory, working-memory folding,
+    # calendar extraction, periodic consolidation — runs off the request path
+    # (shared with the Telegram channel) so it never adds latency.
+    background.add_task(run_upkeep, _agent(), get_settings(), req.message, reply, thread_id)
 
     return ChatResponse(reply=reply, thread_id=thread_id)
 

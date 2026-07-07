@@ -157,6 +157,17 @@ class Settings(BaseSettings):
     # built-in ticker; POST /reminders/run still works for manual/external triggering.
     reminder_tick_seconds: int = 60
 
+    # --- Telegram channel ---
+    # Bot token from @BotFather. Set => the server long-polls Telegram and each
+    # chat becomes a persistent conversation (thread "telegram:<chat_id>").
+    # The first chat to message the bot is paired automatically (trust-on-first-
+    # use, persisted under the memory dir); everyone else gets silence.
+    telegram_bot_token: str | None = None
+    # Optional explicit allowlist (JSON list, e.g. [123456789]), merged with the
+    # paired set — use it to pin the owner up front or add extra chats. Proactive
+    # reminders are pushed to all authorized chats.
+    telegram_allowed_chat_ids: list[int] = []
+
     # --- HTTP server ---
     host: str = "127.0.0.1"
     port: int = 8000

@@ -10,7 +10,9 @@ that drives `codex exec` and returns its reply — meant to be extended with rea
 ## How it works
 
 ```
-HTTP (/chat)  ->  LangGraph StateGraph  ->  CodexChatModel  ->  `codex exec` subprocess
+HTTP (/chat)  \
+               ->  LangGraph StateGraph  ->  CodexChatModel  ->  `codex exec` subprocess
+Telegram bot  /
 ```
 
 - **`codex_runner.py`** — thin subprocess wrapper around `codex exec` (captures the final message).
@@ -19,9 +21,14 @@ HTTP (/chat)  ->  LangGraph StateGraph  ->  CodexChatModel  ->  `codex exec` sub
   are ready-to-fill stubs (each stub documents the exact steps to enable it).
 - **`agent.py`** — the LangGraph graph: `recall -> codex -> summarize`, with a SQLite
   checkpointer for conversation history.
+- **`chat.py`** — the channel-agnostic core: one turn of conversation plus its
+  post-reply upkeep (memory, summary folding, calendar, consolidation), shared by
+  every channel so they all behave identically.
 - **`api.py`** — FastAPI app: `GET /health`, `POST /chat`, `GET /memory` and
   `POST /memory/consolidate` for inspecting and consolidating the brain, `GET /calendar`,
   and `POST /reminders/run` for firing due reminders.
+- **`telegram.py`** — the Telegram channel (see below): a stdlib-only long-polling
+  bridge started alongside the server when a bot token is configured.
 
 Codex is itself an autonomous agent (its own model, tools, and sandbox), so tool-use happens
 inside Codex rather than as LangChain tools.
@@ -62,6 +69,35 @@ How it learns (`src/assistant/memory/`):
   injected into the prompt each turn, so context stays bounded no matter how much the
   assistant has learned.
 
+## Talk to it on Telegram
+
+The assistant is also a Telegram bot, so it lives in your pocket instead of behind
+`curl`. The channel long-polls the Bot API (the server *pulls* messages), so it works
+from a laptop behind NAT — no public URL, no webhook, no open port.
+
+Setup:
+
+1. Message [@BotFather](https://t.me/BotFather) on Telegram, send `/newbot`, and copy
+   the token it gives you into `.env`:
+
+   ```sh
+   TELEGRAM_BOT_TOKEN=123456:ABC-your-token
+   ```
+
+2. Start the server and message your new bot. That's it — the first chat to reach the
+   bot is **paired** (trust-on-first-use, persisted in `memory/telegram_chats.json`)
+   and answered from then on; every other chat gets silence.
+
+Since first contact wins, keep the bot's username to yourself until you've paired.
+The cautious can skip pairing entirely and pin chats up front via
+`TELEGRAM_ALLOWED_CHAT_IDS=[...]` in `.env` (merged with the paired set); un-pair by
+deleting `memory/telegram_chats.json`.
+
+Each chat maps to a stable conversation thread (`telegram:<chat_id>`), so working
+memory and the rolling summary persist across restarts. Proactive reminders are
+pushed to the same chats, so "Dentist in 1 hour" lands where you already talk.
+Replies longer than Telegram's 4096-char limit are split at newline boundaries.
+
 ## Proactive reminders
 
 The calendar can nudge you *before* an event, unprompted — "Dentist in 1 hour" —
@@ -76,9 +112,10 @@ again for its new time).
 REMINDER_WEBHOOK_URL=https://ntfy.sh/your-private-topic
 ```
 
-Delivery is any endpoint that accepts a plain POST (ntfy, a Discord/Slack webhook, …) —
-the message is the body, the event title the `Title` header. Leave the URL unset and
-reminders are still computed, just not pushed.
+Delivery fans out to every configured channel: the webhook (any endpoint that accepts
+a plain POST — ntfy, a Discord/Slack webhook, … — the message is the body, the event
+title the `Title` header) and, when the Telegram channel is set up, every allowed
+Telegram chat. Configure neither and reminders are still computed, just not pushed.
 
 `POST /reminders/run` runs one pass on demand (handy for testing, and idempotent thanks
 to the ledger). Prefer external cron? Set `REMINDER_TICK_SECONDS=0` to disable the
