@@ -8,6 +8,7 @@ monkeypatched, so these stay fast and offline.
 from __future__ import annotations
 
 import pytest
+from urllib.error import HTTPError
 
 from assistant import notify, telegram
 from assistant.codex_runner import CodexError
@@ -61,6 +62,105 @@ def test_long_reply_splits_on_newlines() -> None:
 def test_long_reply_without_newlines_splits_hard() -> None:
     pieces = telegram._chunks("a" * 9000)
     assert [len(p) for p in pieces] == [4096, 4096, 808]
+
+
+# --- formatting ------------------------------------------------------------ #
+
+
+def test_markdown_reply_is_sent_as_telegram_html(calls) -> None:
+    telegram.send_message("tok", 7, "# Title\n\nHello **bold** and _italic_.")
+
+    sends = _sends(calls)
+    assert sends == [
+        {
+            "chat_id": 7,
+            "text": "<b>Title</b>\n\nHello <b>bold</b> and <i>italic</i>.",
+            "parse_mode": "HTML",
+        }
+    ]
+
+
+def test_code_links_lists_and_blockquotes_render_to_supported_html(calls) -> None:
+    telegram.send_message(
+        "tok",
+        7,
+        "\n".join(
+            [
+                "See [site](https://example.com) and `x < y`.",
+                "",
+                "```python",
+                "print('<ok>')",
+                "```",
+                "",
+                "- one",
+                "- two",
+                "",
+                "> quoted",
+            ]
+        ),
+    )
+
+    text = _sends(calls)[0]["text"]
+    assert '<a href="https://example.com">site</a>' in text
+    assert "<code>x &lt; y</code>" in text
+    assert '<pre><code class="language-python">print(&#x27;&lt;ok&gt;&#x27;)</code></pre>' in text
+    assert "• one\n• two" in text
+    assert "<blockquote>quoted</blockquote>" in text
+
+
+def test_raw_html_is_escaped(calls) -> None:
+    telegram.send_message("tok", 7, "<b>not trusted</b> & raw")
+    assert _sends(calls)[0]["text"] == "&lt;b&gt;not trusted&lt;/b&gt; &amp; raw"
+
+
+def test_unsafe_links_render_as_plain_text(calls) -> None:
+    telegram.send_message("tok", 7, "[bad](ftp://example.com)")
+    assert _sends(calls)[0]["text"] == "bad"
+
+
+def test_formatted_send_retries_plain_text_on_rejected_html(monkeypatch) -> None:
+    calls: list[tuple[str, dict]] = []
+
+    def fake_call(token, method, payload, timeout=15):
+        calls.append((method, payload))
+        if payload.get("parse_mode") == "HTML":
+            raise RuntimeError("can't parse entities")
+        return {}
+
+    monkeypatch.setattr(telegram, "_call", fake_call)
+
+    telegram.send_message("tok", 7, "**hello**")
+
+    assert calls == [
+        ("sendMessage", {"chat_id": 7, "text": "<b>hello</b>", "parse_mode": "HTML"}),
+        ("sendMessage", {"chat_id": 7, "text": "**hello**"}),
+    ]
+
+
+def test_formatted_send_retries_plain_text_on_telegram_http_error(monkeypatch) -> None:
+    calls: list[tuple[str, dict]] = []
+
+    def fake_call(token, method, payload, timeout=15):
+        calls.append((method, payload))
+        if payload.get("parse_mode") == "HTML":
+            raise HTTPError("url", 400, "Bad Request: can't parse entities", {}, None)
+        return {}
+
+    monkeypatch.setattr(telegram, "_call", fake_call)
+
+    telegram.send_message("tok", 7, "**hello**")
+
+    assert calls == [
+        ("sendMessage", {"chat_id": 7, "text": "<b>hello</b>", "parse_mode": "HTML"}),
+        ("sendMessage", {"chat_id": 7, "text": "**hello**"}),
+    ]
+
+
+def test_long_formatted_reply_still_splits_into_messages(calls) -> None:
+    telegram.send_message("tok", 7, "**" + ("a" * 9000) + "**")
+    sends = _sends(calls)
+    assert len(sends) == 3
+    assert all(send["parse_mode"] == "HTML" for send in sends)
 
 
 # --- authorization ---------------------------------------------------------- #
