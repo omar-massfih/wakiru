@@ -20,6 +20,7 @@ from .context import agenda_context, now, resolve_tz, upcoming_events
 from .ops import update_calendar
 from .reminders import due_reminders, run_reminders
 from .store import Event
+from .undo import undo_latest
 
 __all__ = [
     "Event",
@@ -31,4 +32,5 @@ __all__ = [
     "update_calendar",
     "due_reminders",
     "run_reminders",
+    "undo_latest",
 ]

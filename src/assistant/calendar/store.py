@@ -219,6 +219,30 @@ def update_event(settings: Settings, event_id: str, **fields: str) -> Event | No
     return get_event(settings, event_id)
 
 
+def restore_event(settings: Settings, event: Event) -> Event:
+    """Re-insert a full event snapshot verbatim, overwriting any current row
+    with the same id.
+
+    Unlike :func:`update_event`, this never bumps ``updated`` — ``created``
+    and ``updated`` are taken as-is from ``event``. Used to undo a cancel
+    (recreate the deleted row) or to put back a full pre-mutation snapshot
+    after a reschedule/skip/move.
+    """
+    with _connect(settings) as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO events"
+            " (id, title, start, end, location, notes, rrule, exdates, overrides,"
+            " created, updated)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                event.id, event.title, event.start, event.end, event.location,
+                event.notes, event.rrule, event.exdates, event.overrides,
+                event.created, event.updated,
+            ),
+        )
+    return event
+
+
 def delete_event(settings: Settings, event_id: str) -> Event | None:
     """Delete an event by id; return it if it existed."""
     existing = get_event(settings, event_id)

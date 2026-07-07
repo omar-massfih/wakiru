@@ -175,7 +175,7 @@ def test_unauthorized_chat_with_allowlist_is_silent(tmp_path, calls, monkeypatch
 
 def test_first_contact_pairs_and_answers(tmp_path, calls, monkeypatch) -> None:
     settings = _settings(tmp_path)  # nobody paired or allowlisted yet
-    monkeypatch.setattr(telegram, "run_chat", lambda agent, text, thread: "svar")
+    monkeypatch.setattr(telegram, "run_chat", lambda agent, text, thread, **kw: "svar")
     monkeypatch.setattr(telegram, "run_upkeep", lambda *a: None)
 
     telegram.handle_update(None, settings, _update(chat_id=7, text="hei"))
@@ -220,7 +220,7 @@ def test_non_text_update_is_ignored(tmp_path, calls) -> None:
 def test_authorized_chat_gets_reply_and_upkeep(tmp_path, calls, monkeypatch) -> None:
     settings = _settings(tmp_path, telegram_allowed_chat_ids=[7])
     monkeypatch.setattr(
-        telegram, "run_chat", lambda agent, text, thread: f"echo:{text} [{thread}]"
+        telegram, "run_chat", lambda agent, text, thread, **kw: f"echo:{text} [{thread}]"
     )
     upkeep: list[tuple] = []
     monkeypatch.setattr(telegram, "run_upkeep", lambda *a: upkeep.append(a))
@@ -238,7 +238,7 @@ def test_authorized_chat_gets_reply_and_upkeep(tmp_path, calls, monkeypatch) -> 
 def test_codex_error_sends_apology(tmp_path, calls, monkeypatch) -> None:
     settings = _settings(tmp_path, telegram_allowed_chat_ids=[7])
 
-    def boom(*args):
+    def boom(*args, **kwargs):
         raise CodexError("codex is down")
 
     monkeypatch.setattr(telegram, "run_chat", boom)

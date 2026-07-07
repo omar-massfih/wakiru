@@ -82,3 +82,40 @@ def deliver_reminder(settings: Settings, reminder: dict) -> bool:
     sent_webhook = deliver_webhook(settings, reminder)
     sent_telegram = deliver_telegram(settings, reminder)
     return sent_webhook or sent_telegram
+
+
+def deliver_write_confirmation(settings: Settings, thread_id: str, message: str) -> bool:
+    """Push a calendar-write confirmation (with its undo hint) back to ``thread_id``.
+
+    Always POSTs the webhook (a distinct device channel, as with reminders). For a
+    Telegram thread (``"telegram:<chat_id>"``) whose chat is authorized, the
+    message goes directly to that one chat rather than fanning out to every
+    authorized chat — a write belongs to the conversation that triggered it, not
+    every paired chat. Falls back to the broad fan-out for a non-Telegram
+    (HTTP-originated) thread or an unrecognized/unauthorized chat id.
+    """
+    sent_webhook = deliver_webhook(settings, {"title": "Calendar updated", "message": message})
+
+    token = settings.telegram_bot_token
+    if not token:
+        return sent_webhook
+    # Imported here, not at module level: see deliver_telegram's note on the cycle.
+    from .telegram import authorized_chats, send_message
+
+    if thread_id.startswith("telegram:"):
+        try:
+            chat_id = int(thread_id.removeprefix("telegram:"))
+        except ValueError:
+            chat_id = None
+        # Only send directly to a chat that is actually authorized — thread_id
+        # is not itself a trust boundary (an HTTP caller could pass any string).
+        if chat_id is not None and chat_id in authorized_chats(settings):
+            try:
+                send_message(token, chat_id, message)
+                return True
+            except Exception as exc:
+                logger.warning("write-confirmation delivery to %s failed: %s", chat_id, exc)
+                return sent_webhook
+
+    sent_telegram = deliver_telegram(settings, {"message": message})
+    return sent_webhook or sent_telegram

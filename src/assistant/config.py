@@ -147,6 +147,14 @@ class Settings(BaseSettings):
     # Cap on how many upcoming events are injected per turn.
     calendar_max_events: int = 20
 
+    # --- Confirmation on writes (undo) ---
+    # Master switch: log every calendar write to an undo ledger, let the user
+    # revert the latest one by replying "undo", and push an out-of-band
+    # confirmation (with the undo hint) after each background write.
+    enable_write_confirmation: bool = True
+    # How long after a write "undo" can still revert it (minutes).
+    write_undo_window_minutes: int = 15
+
     # --- Proactive reminders ---
     # Master switch: fire proactive reminders ahead of upcoming events.
     enable_reminders: bool = True

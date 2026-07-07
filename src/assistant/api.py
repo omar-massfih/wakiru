@@ -84,7 +84,7 @@ def health() -> dict[str, str]:
 def chat(req: ChatRequest, background: BackgroundTasks) -> ChatResponse:
     thread_id = req.thread_id or str(uuid.uuid4())
     try:
-        reply = run_chat(_agent(), req.message, thread_id)
+        reply = run_chat(_agent(), req.message, thread_id, settings=get_settings())
     except CodexError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 

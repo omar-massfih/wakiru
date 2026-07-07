@@ -297,7 +297,7 @@ def handle_update(
 
     thread_id = f"telegram:{chat_id}"
     try:
-        reply = run_chat(agent, text, thread_id)
+        reply = run_chat(agent, text, thread_id, settings=settings)
     except CodexError as exc:
         logger.error("telegram chat turn failed: %s", exc)
         send_message(token, chat_id, "Sorry — I hit an error answering that. Try again.")

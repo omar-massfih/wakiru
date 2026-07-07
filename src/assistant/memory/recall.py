@@ -213,6 +213,13 @@ def build_context_message(
         SYSTEM_PROMPT,
         "\n## Memory index\n" + build_index_view(settings),
     ]
+    if settings.enable_calendar and settings.enable_write_confirmation:
+        parts.append(
+            "\n## Undo\nCalendar writes can be undone: after booking, moving, or "
+            "cancelling something, you may mention the user can reply \"undo\" "
+            f"within {settings.write_undo_window_minutes} minutes to revert it, "
+            "if it fits naturally."
+        )
     if results:
         recalled = "\n\n".join(
             f"### {note.name} ({note.kind})\n{note.body}" for note, _ in results

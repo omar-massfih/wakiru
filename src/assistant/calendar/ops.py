@@ -20,10 +20,12 @@ from __future__ import annotations
 import json
 import logging
 import re
+import uuid
 
+from .. import notify
 from ..codex_runner import run_codex
 from ..config import Settings, get_settings
-from . import recurrence, store
+from . import recurrence, store, undo
 from .context import now, render_events, writer_view
 
 logger = logging.getLogger(__name__)
@@ -96,7 +98,23 @@ def _target_id(settings: Settings, op: dict) -> str | None:
     return found.id if found else None
 
 
-def apply_op(settings: Settings, op: dict) -> str | None:
+def _log_write(
+    settings: Settings,
+    thread_id: str,
+    batch_id: str,
+    event_id: str,
+    op: str,
+    summary: str,
+    before: store.Event | None,
+) -> None:
+    if not (thread_id and batch_id and settings.enable_write_confirmation):
+        return
+    undo.record_write(settings, thread_id, batch_id, event_id, op, summary, before)
+
+
+def apply_op(
+    settings: Settings, op: dict, thread_id: str = "", batch_id: str = ""
+) -> str | None:
     """Apply a single parsed operation; return a short log line, or ``None``."""
     kind = op["op"]
     if kind == "create" and op.get("title") and op.get("start"):
@@ -113,12 +131,15 @@ def apply_op(settings: Settings, op: dict) -> str | None:
             rrule=rrule,
         )
         suffix = f" ({recurrence.humanize_rrule(event.rrule)})" if event.rrule else ""
-        return f"created: {event.title} @ {event.start}{suffix}"
+        summary = f"created: {event.title} @ {event.start}{suffix}"
+        _log_write(settings, thread_id, batch_id, event.id, "create", summary, None)
+        return summary
 
     if kind == "reschedule":
         target = _target_id(settings, op)
         if target is None:
             return None
+        before = store.get_event(settings, target)
         revised = store.update_event(
             settings, target,
             start=op.get("start"),
@@ -127,22 +148,32 @@ def apply_op(settings: Settings, op: dict) -> str | None:
             location=op.get("location"),
             notes=op.get("notes"),
         )
-        return f"rescheduled: {revised.title} @ {revised.start}" if revised else None
+        if revised is None:
+            return None
+        summary = f"rescheduled: {revised.title} @ {revised.start}"
+        _log_write(settings, thread_id, batch_id, target, "reschedule", summary, before)
+        return summary
 
     if kind == "cancel":
         target = _target_id(settings, op)
         if target is None:
             return None
         deleted = store.delete_event(settings, target)
-        return f"cancelled: {deleted.title}" if deleted else None
+        if deleted is None:
+            return None
+        summary = f"cancelled: {deleted.title}"
+        _log_write(settings, thread_id, batch_id, target, "cancel", summary, deleted)
+        return summary
 
     if kind in {"skip", "move"}:
-        return _apply_occurrence_op(settings, kind, op)
+        return _apply_occurrence_op(settings, kind, op, thread_id, batch_id)
 
     return None
 
 
-def _apply_occurrence_op(settings: Settings, kind: str, op: dict) -> str | None:
+def _apply_occurrence_op(
+    settings: Settings, kind: str, op: dict, thread_id: str = "", batch_id: str = ""
+) -> str | None:
     """Apply a single-occurrence exception (``skip``/``move``) on a series master."""
     target = _target_id(settings, op)
     when = store.parse_dt(str(op.get("occurrence", "")))
@@ -158,22 +189,33 @@ def _apply_occurrence_op(settings: Settings, kind: str, op: dict) -> str | None:
 
     if kind == "skip":
         updated = store.add_exdate(settings, target, key)
-        return f"skipped: {master.title} on {key}" if updated else None
+        if updated is None:
+            return None
+        summary = f"skipped: {master.title} on {key}"
+        _log_write(settings, thread_id, batch_id, target, "skip", summary, master)
+        return summary
 
     fields = {k: op.get(k) for k in ("start", "end", "title", "location") if op.get(k)}
     if not fields:
         return None
     updated = store.set_override(settings, target, key, fields)
-    return f"moved: {master.title} {key} -> {fields.get('start', key)}" if updated else None
+    if updated is None:
+        return None
+    summary = f"moved: {master.title} {key} -> {fields.get('start', key)}"
+    _log_write(settings, thread_id, batch_id, target, "move", summary, master)
+    return summary
 
 
 def update_calendar(
-    settings: Settings | None, user_msg: str, assistant_msg: str
+    settings: Settings | None, user_msg: str, assistant_msg: str, thread_id: str = ""
 ) -> list[str]:
     """Extract and apply calendar operations for one turn (create/reschedule/cancel).
 
     Intended to run in the background — it makes a second Codex call. Returns a
     short log of what changed. No-ops when ``enable_auto_schedule`` is false.
+    When ``thread_id`` is given and ``enable_write_confirmation`` is on, every
+    applied op is logged to the undo ledger under one batch and an out-of-band
+    confirmation (with an undo hint) is pushed back to that thread.
     """
     settings = settings or get_settings()
     if not settings.enable_auto_schedule:
@@ -191,10 +233,11 @@ def update_calendar(
         logger.exception("calendar extraction (run_codex) failed; skipping this turn")
         return []  # calendar upkeep is best-effort; never break the main flow
 
+    batch_id = uuid.uuid4().hex if thread_id else ""
     applied: list[str] = []
     for op in _parse_ops(raw):
         try:
-            result = apply_op(settings, op)
+            result = apply_op(settings, op, thread_id, batch_id)
             if result:
                 applied.append(result)
         except Exception:
@@ -202,4 +245,12 @@ def update_calendar(
 
     if applied:
         logger.info("calendar updated: %s", "; ".join(applied))
+        if thread_id and settings.enable_write_confirmation:
+            try:
+                message = "\n".join(applied) + (
+                    f'\nReply "undo" within {settings.write_undo_window_minutes} min to revert.'
+                )
+                notify.deliver_write_confirmation(settings, thread_id, message)
+            except Exception:
+                logger.exception("failed to push write confirmation for thread %s", thread_id)
     return applied
