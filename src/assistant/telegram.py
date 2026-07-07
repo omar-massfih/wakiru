@@ -24,6 +24,7 @@ import json
 import logging
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from urllib.parse import urlparse
 
 from langgraph.graph.state import CompiledStateGraph
@@ -268,21 +269,27 @@ def get_updates(token: str, offset: int | None) -> list[dict]:
 
 def handle_update(
     agent: CompiledStateGraph, settings: Settings, update: dict
-) -> None:
-    """Answer one incoming message: authorize, run the turn, reply, upkeep."""
+) -> Callable[[], None] | None:
+    """Answer one incoming message: authorize, run the turn, reply.
+
+    Returns the turn's post-reply upkeep as a zero-arg callable (or ``None`` when
+    the update produced no turn). The poll loop runs it off the reply path: upkeep
+    makes further Codex calls, and awaiting them here would block the *next*
+    message for as long as they take.
+    """
     token = settings.telegram_bot_token
     message = update.get("message") or {}
     chat_id = (message.get("chat") or {}).get("id")
     text = message.get("text")
     if token is None or chat_id is None or not text:
-        return  # not a text message (sticker, photo, member event, …)
+        return None  # not a text message (sticker, photo, member event, …)
 
     allowed = authorized_chats(settings)
     if chat_id not in allowed:
         if allowed:
             # Once anyone is paired/allowlisted, strangers get silence.
             logger.warning("ignoring telegram message from unauthorized chat %s", chat_id)
-            return
+            return None
         # Trust-on-first-use: the very first chat to reach the bot becomes its
         # owner, so setup needs no id copying, no .env edit, no restart.
         _pair(settings, chat_id)
@@ -301,23 +308,27 @@ def handle_update(
     except CodexError as exc:
         logger.error("telegram chat turn failed: %s", exc)
         send_message(token, chat_id, "Sorry — I hit an error answering that. Try again.")
-        return
+        return None
     send_message(token, chat_id, reply)
-    # The reply is already out, so upkeep here costs the user nothing.
-    run_upkeep(agent, settings, text, reply, thread_id)
+    return lambda: run_upkeep(agent, settings, text, reply, thread_id)
 
 
 async def poll_loop(agent: CompiledStateGraph, settings: Settings) -> None:
     """Long-poll Telegram forever, answering messages one at a time.
 
-    Sequential by design: a turn can take as long as a full Codex run, during
-    which Telegram queues further messages server-side (they are delivered on
-    the next poll). Every failure is logged and retried so the channel survives
-    network blips and API hiccups. Blocking work runs in worker threads to keep
-    the event loop (and the reminder ticker) free.
+    Replies are sequential by design: a turn can take as long as a full Codex
+    run, during which Telegram queues further messages server-side (they are
+    delivered on the next poll). Each turn's upkeep, however, runs as a
+    background task — it makes further Codex calls, and awaiting it inline would
+    make the *next* message wait on the *previous* turn's maintenance. Every
+    failure is logged and retried so the channel survives network blips and API
+    hiccups. Blocking work runs in worker threads to keep the event loop (and
+    the reminder ticker) free.
     """
     token = settings.telegram_bot_token
     offset: int | None = None
+    # Strong refs so fire-and-forget upkeep tasks are never garbage-collected.
+    upkeep_tasks: set[asyncio.Task] = set()
     logger.info("telegram channel started (long polling)")
     while True:
         try:
@@ -330,8 +341,13 @@ async def poll_loop(agent: CompiledStateGraph, settings: Settings) -> None:
             # Advance first: a poison update must not be redelivered forever.
             offset = update["update_id"] + 1
             try:
-                await asyncio.to_thread(handle_update, agent, settings, update)
+                upkeep = await asyncio.to_thread(handle_update, agent, settings, update)
             except Exception:
                 logger.exception(
                     "handling telegram update %s failed", update.get("update_id")
                 )
+                continue
+            if upkeep is not None:
+                task = asyncio.create_task(asyncio.to_thread(upkeep))
+                upkeep_tasks.add(task)
+                task.add_done_callback(upkeep_tasks.discard)

@@ -511,3 +511,19 @@ def test_consolidate_decays_unrecalled_durable(settings) -> None:
     assert effective[fresh.name] == 0.5  # recall history exempts a note
     on_disk = store.find_note(settings, "stale-fact")
     assert on_disk is not None and on_disk.salience == 0.5  # file keeps the base
+
+
+def test_revise_memory_normalizes_legacy_and_unknown_kind(settings) -> None:
+    # revise_memory assigns attributes directly (skipping Note.__post_init__),
+    # so an LLM op saying kind="fact" or garbage used to pollute the index with
+    # an unknown kind that dodges caps, biases, and same-kind dedup.
+    note = learn.save_memory(settings, "The user's name is Omar.", kind="semantic")
+
+    revised = learn.revise_memory(settings, note.name, kind="fact")  # legacy name
+    assert revised.kind == "semantic"
+
+    revised = learn.revise_memory(settings, note.name, kind="banana")  # unknown
+    assert revised.kind == "semantic"  # kept, not overwritten
+
+    kinds = {name: kind for name, _d, kind, *_ in index.list_entries(settings)}
+    assert kinds[note.name] == "semantic"

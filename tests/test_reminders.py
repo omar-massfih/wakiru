@@ -184,3 +184,82 @@ def test_no_webhook_url_skips_post(settings, monkeypatch) -> None:
     )
     fired = reminders.run_reminders(settings)  # webhook unset in the fixture
     assert len(fired) == 1  # still computed + returned
+
+
+def test_non_latin1_title_still_delivers(tmp_path, monkeypatch) -> None:
+    # urllib encodes headers as Latin-1; an emoji title used to raise inside the
+    # ledger transaction and wedge every reminder until the event passed.
+    import base64
+
+    settings = Settings(
+        memory_dir=str(tmp_path / "memory"),
+        timezone="Europe/Oslo",
+        reminder_lead_minutes=[60],
+        reminder_webhook_url="https://ntfy.example/topic",
+    )
+    _event_in(settings, "Trening 💪", minutes=30)
+
+    calls: list[str] = []
+
+    def fake_urlopen(request, timeout=None):
+        title = request.headers.get("Title")
+        title.encode("latin-1")  # what http.client does; must not raise
+        calls.append(title)
+        return _FakeResponse()
+
+    monkeypatch.setattr("assistant.notify.urllib.request.urlopen", fake_urlopen)
+
+    fired = reminders.run_reminders(settings)
+    assert len(fired) == 1
+    assert len(_ledger_rows(settings)) == 1
+    # RFC 2047 encoded word (ntfy decodes these) round-trips the real title.
+    assert calls[0].startswith("=?utf-8?B?")
+    payload = calls[0].removeprefix("=?utf-8?B?").removesuffix("?=")
+    assert base64.b64decode(payload).decode("utf-8") == "Trening 💪"
+
+
+def test_latin1_title_passes_through_unencoded(tmp_path, monkeypatch) -> None:
+    from assistant.notify import _header_value
+
+    assert _header_value("Møte på jobb") == "Møte på jobb"  # Latin-1-safe as-is
+
+
+def test_delivery_crash_keeps_claim_and_batch(settings, monkeypatch) -> None:
+    # Delivery runs outside the ledger transaction and per-reminder guarded: a
+    # push that blows up must neither roll back the claim (which would make the
+    # tick re-fail forever) nor starve the rest of the batch.
+    _event_in(settings, "First", minutes=10)
+    _event_in(settings, "Second", minutes=20)
+
+    delivered: list[str] = []
+
+    def boom(settings_, reminder):
+        if reminder["title"] == "First":
+            raise UnicodeEncodeError("latin-1", "x", 0, 1, "boom")
+        delivered.append(reminder["title"])
+        return True
+
+    monkeypatch.setattr(reminders, "deliver_reminder", boom)
+
+    fired = reminders.run_reminders(settings)
+    assert {r["title"] for r in fired} == {"First", "Second"}
+    assert delivered == ["Second"]  # the crash didn't take the batch down
+    assert len(_ledger_rows(settings)) == 2  # both claims survived the crash
+    assert reminders.run_reminders(settings) == []  # and are not re-fired
+
+
+def test_event_inside_several_lead_windows_fires_once(tmp_path) -> None:
+    settings = Settings(
+        memory_dir=str(tmp_path / "memory"),
+        timezone="Europe/Oslo",
+        reminder_lead_minutes=[1440, 60],
+    )
+    # Booked half an hour ahead: inside BOTH windows -> one push, not two
+    # identical "in 30 min" messages.
+    _event_in(settings, "Flight", minutes=30)
+    fired = reminders.run_reminders(settings)
+    assert len(fired) == 1
+    assert fired[0]["lead_minutes"] == 60  # reported at the tightest lead
+    # Both leads are claimed together, so no later tick can fire a duplicate.
+    assert {r["lead_minutes"] for r in _ledger_rows(settings)} == {60, 1440}
+    assert reminders.run_reminders(settings) == []

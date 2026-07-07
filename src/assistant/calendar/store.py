@@ -103,13 +103,42 @@ def _row_to_event(row: sqlite3.Row) -> Event:
 
 
 def parse_dt(value: str) -> datetime | None:
-    """Parse a stored ISO-8601 datetime; ``None`` if blank or malformed."""
+    """Parse a stored ISO-8601 datetime; ``None`` if blank or malformed.
+
+    Always returns an *aware* datetime: a naive value (a legacy row or hand-edit;
+    new writes are normalized by :func:`_normalize_stamp`) is interpreted as
+    system-local, so one offset-less string can never make an aware/naive
+    comparison raise ``TypeError`` across the read paths.
+    """
     if not value:
         return None
     try:
-        return datetime.fromisoformat(value)
+        dt = datetime.fromisoformat(value)
     except ValueError:
         return None
+    return dt.astimezone() if dt.tzinfo is None else dt
+
+
+def _normalize_stamp(settings: Settings, value: str) -> str:
+    """Attach the assistant's timezone to a naive ISO datetime on its way in.
+
+    The write-path extractor is told to emit offsets, but an LLM slip must not
+    poison the store. Blank or unparseable values pass through unchanged (they
+    are filtered on read).
+    """
+    value = value.strip()
+    if not value:
+        return value
+    try:
+        dt = datetime.fromisoformat(value)
+    except ValueError:
+        return value
+    if dt.tzinfo is not None:
+        return value
+    # Lazy import: context imports this module at top level.
+    from .context import resolve_tz
+
+    return dt.replace(tzinfo=resolve_tz(settings)).isoformat()
 
 
 def _sort_key(event: Event) -> tuple[int, float, str]:
@@ -134,8 +163,8 @@ def create_event(
     event = Event(
         id=uuid.uuid4().hex[:12],
         title=title.strip(),
-        start=start.strip(),
-        end=end.strip(),
+        start=_normalize_stamp(settings, start),
+        end=_normalize_stamp(settings, end),
         location=location.strip(),
         notes=notes.strip(),
         rrule=rrule.strip(),
@@ -203,6 +232,9 @@ def update_event(settings: Settings, event_id: str, **fields: str) -> Event | No
         for k, v in fields.items()
         if k in _FIELDS and v is not None
     }
+    for key in ("start", "end"):
+        if key in updates:
+            updates[key] = _normalize_stamp(settings, updates[key])
     existing = get_event(settings, event_id)
     if existing is None:
         return None

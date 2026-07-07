@@ -52,6 +52,19 @@ def _today() -> str:
     return date.today().isoformat()
 
 
+def normalize_kind(kind: str | None) -> str | None:
+    """Map legacy kind names ("fact"/"learning") to current ones; ``None`` if unknown.
+
+    The single gate for kind values arriving from outside (LLM ops, old
+    frontmatter) — an unrecognized kind must never reach the index, where it
+    would dodge the per-kind caps, biases, and dedup matching.
+    """
+    if not kind:
+        return None
+    kind = _LEGACY_KIND.get(kind, kind)
+    return kind if kind in _CATEGORY else None
+
+
 @dataclass
 class Note:
     """A single long-term memory."""
@@ -70,10 +83,7 @@ class Note:
     recall_count: int = 0
 
     def __post_init__(self) -> None:
-        # Normalize legacy kinds ("fact"/"learning") on the way in.
-        self.kind = _LEGACY_KIND.get(self.kind, self.kind)
-        if self.kind not in _CATEGORY:
-            self.kind = _DEFAULT_KIND
+        self.kind = normalize_kind(self.kind) or _DEFAULT_KIND
 
     @property
     def category(self) -> str:

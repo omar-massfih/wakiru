@@ -15,6 +15,7 @@ swallowed so a push that doesn't land never breaks the reminder tick.
 
 from __future__ import annotations
 
+import base64
 import logging
 import urllib.error
 import urllib.request
@@ -25,6 +26,21 @@ logger = logging.getLogger(__name__)
 
 # Keep a failed push from stalling the tick loop.
 _TIMEOUT_SECONDS = 5
+
+
+def _header_value(text: str) -> str:
+    """A value urllib can put in an HTTP header: Latin-1 as-is, else RFC 2047.
+
+    urllib encodes header values as Latin-1 and raises ``UnicodeEncodeError`` on
+    anything outside it — an emoji in an event title must not crash delivery.
+    ntfy decodes RFC 2047 encoded words in the ``Title`` header.
+    """
+    try:
+        text.encode("latin-1")
+        return text
+    except UnicodeEncodeError:
+        encoded = base64.b64encode(text.encode("utf-8")).decode("ascii")
+        return f"=?utf-8?B?{encoded}?="
 
 
 def deliver_webhook(settings: Settings, reminder: dict) -> bool:
@@ -44,12 +60,13 @@ def deliver_webhook(settings: Settings, reminder: dict) -> bool:
         data=body,
         method="POST",
         # ntfy reads the title from this header; harmless for generic webhooks.
-        headers={"Title": str(reminder.get("title", "Reminder"))},
+        headers={"Title": _header_value(str(reminder.get("title", "Reminder")))},
     )
     try:
         with urllib.request.urlopen(request, timeout=_TIMEOUT_SECONDS):
             return True
-    except (urllib.error.URLError, OSError) as exc:
+    # ValueError covers what urllib raises on a header/URL it cannot encode.
+    except (urllib.error.URLError, OSError, ValueError) as exc:
         logger.warning("reminder webhook delivery failed: %s", exc)
         return False
 

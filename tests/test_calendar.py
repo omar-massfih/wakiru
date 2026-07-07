@@ -336,3 +336,44 @@ def test_exception_helpers_reject_non_series(settings) -> None:
     one_shot = store.create_event(settings, title="Once", start=_iso_in(settings, days=1))
     assert store.add_exdate(settings, one_shot.id, one_shot.start) is None
     assert store.set_override(settings, one_shot.id, one_shot.start, {"title": "x"}) is None
+
+
+# --- naive-datetime hardening ---------------------------------------------- #
+
+
+def test_naive_start_is_normalized_on_write(settings) -> None:
+    # The extractor is told to emit offsets, but an LLM slip must not poison the
+    # store: one naive start used to TypeError every aware/naive comparison.
+    naive = (context.now(settings) + timedelta(days=1)).replace(tzinfo=None)
+    event = store.create_event(settings, title="Dentist", start=naive.isoformat())
+    assert store.parse_dt(event.start).tzinfo is not None
+
+    moved = store.update_event(
+        settings, event.id, start=(naive + timedelta(hours=1)).isoformat()
+    )
+    assert store.parse_dt(moved.start).tzinfo is not None
+    # The agenda read path works with the event in place.
+    assert "Dentist" in context.agenda_context(settings)
+
+
+def test_legacy_naive_row_does_not_break_reads(settings) -> None:
+    # A pre-normalization row (or a hand-edit) lands naive in the DB; reads must
+    # survive it — parse_dt treats naive as local instead of raising.
+    naive = (context.now(settings) + timedelta(days=1)).replace(tzinfo=None)
+    with store._connect(settings) as conn:
+        conn.execute(
+            "INSERT INTO events (id, title, start, rrule) VALUES (?, ?, ?, ?)",
+            ("legacy1", "Old one-shot", naive.isoformat(), ""),
+        )
+        conn.execute(
+            "INSERT INTO events (id, title, start, rrule) VALUES (?, ?, ?, ?)",
+            ("legacy2", "Old series", naive.isoformat(), "FREQ=DAILY"),
+        )
+
+    horizon = context.now(settings) + timedelta(days=7)
+    bounded = store.list_events(settings, start_from=context.now(settings), start_to=horizon)
+    assert {e.title for e in bounded} == {"Old one-shot", "Old series"}
+
+    occurrences = recurrence.occurrences_in(settings, context.now(settings), horizon)
+    assert any(e.title == "Old series" for e in occurrences)
+    assert "Old one-shot" in context.agenda_context(settings)

@@ -66,9 +66,13 @@ def _humanize(delta: timedelta) -> str:
 def due_reminders(settings: Settings, current: datetime | None = None) -> list[dict]:
     """Reminders that should fire as of ``current`` (defaults to the assistant's now).
 
-    For every upcoming event and every configured lead L, the event is due when it
-    starts within the next L minutes (and is not already past). Returns one dict per
-    (event, lead): ``{event_id, title, start, lead_minutes, message}``. Pure — it
+    An event is due when it starts within the next L minutes for a configured lead
+    L (and is not already past). An event inside several lead windows at once (e.g.
+    booked half an hour ahead with leads of a day and an hour) yields ONE reminder,
+    not one per lead: ``lead_minutes`` is the smallest due lead and ``covered_leads``
+    lists every lead window the event is currently inside, so the caller can claim
+    them together instead of pushing duplicates. Returns one dict per event:
+    ``{event_id, title, start, lead_minutes, covered_leads, message}``. Pure — it
     does not touch the ledger or deliver anything.
     """
     leads = settings.reminder_lead_minutes
@@ -87,17 +91,21 @@ def due_reminders(settings: Settings, current: datetime | None = None) -> list[d
         if start is None:
             continue
         remaining = start - current
-        for lead in leads:
-            if timedelta(0) <= remaining <= timedelta(minutes=lead):
-                reminders.append(
-                    {
-                        "event_id": event.id,
-                        "title": event.title,
-                        "start": event.start,
-                        "lead_minutes": lead,
-                        "message": f"{event.title} {_humanize(remaining)}",
-                    }
-                )
+        due_leads = sorted(
+            lead for lead in leads
+            if timedelta(0) <= remaining <= timedelta(minutes=lead)
+        )
+        if due_leads:
+            reminders.append(
+                {
+                    "event_id": event.id,
+                    "title": event.title,
+                    "start": event.start,
+                    "lead_minutes": due_leads[0],
+                    "covered_leads": due_leads,
+                    "message": f"{event.title} {_humanize(remaining)}",
+                }
+            )
     return reminders
 
 
@@ -125,24 +133,36 @@ def run_reminders(settings: Settings | None = None) -> list[dict]:
     # write transaction below never overlaps a nested connection to the same DB.
     due = due_reminders(settings, current)
 
+    # Claim first, commit, deliver after: delivery is network I/O (webhook POST,
+    # a Telegram send per chat) and must not run inside the ledger's write
+    # transaction, where it would hold SQLite's single writer slot past other
+    # writers' busy timeouts. The cost is at-most-once delivery: a claimed
+    # reminder whose push fails is not retried.
     sent: list[dict] = []
     with _connect(settings) as conn:
         _prune_ledger(conn, current)
         for reminder in due:
-            cursor = conn.execute(
-                "INSERT OR IGNORE INTO reminders_fired"
-                " (event_id, event_start, lead_minutes, fired_at) VALUES (?, ?, ?, ?)",
-                (
-                    reminder["event_id"],
-                    reminder["start"],
-                    reminder["lead_minutes"],
-                    fired_at,
-                ),
-            )
-            if cursor.rowcount != 1:
-                continue  # already fired for this (event, start, lead)
+            # Claim every lead window the event is currently inside, so the
+            # larger leads can't fire a duplicate nudge on a later tick.
+            claimed = 0
+            for lead in reminder["covered_leads"]:
+                cursor = conn.execute(
+                    "INSERT OR IGNORE INTO reminders_fired"
+                    " (event_id, event_start, lead_minutes, fired_at)"
+                    " VALUES (?, ?, ?, ?)",
+                    (reminder["event_id"], reminder["start"], lead, fired_at),
+                )
+                claimed += cursor.rowcount
+            if claimed:
+                sent.append(reminder)
+
+    for reminder in sent:
+        try:
             deliver_reminder(settings, reminder)
-            sent.append(reminder)
+        except Exception:
+            # The claim is already committed; a push that blows up must not
+            # take the rest of this batch down with it.
+            logger.exception("reminder delivery failed: %s", reminder["message"])
 
     if sent:
         logger.info("fired %d reminder(s): %s", len(sent), "; ".join(r["message"] for r in sent))

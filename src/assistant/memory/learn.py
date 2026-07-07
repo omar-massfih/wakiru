@@ -155,6 +155,10 @@ def revise_memory(
     if existing is None:
         return None
 
+    # Direct attribute assignment skips Note.__post_init__, so gate the kind here:
+    # an unknown value from an LLM op keeps the note's current kind.
+    kind = store.normalize_kind(kind)
+
     old_path = store.note_path(settings, existing)
     if body is not None:
         existing.body = body.strip()

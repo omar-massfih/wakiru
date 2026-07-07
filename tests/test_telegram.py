@@ -176,7 +176,6 @@ def test_unauthorized_chat_with_allowlist_is_silent(tmp_path, calls, monkeypatch
 def test_first_contact_pairs_and_answers(tmp_path, calls, monkeypatch) -> None:
     settings = _settings(tmp_path)  # nobody paired or allowlisted yet
     monkeypatch.setattr(telegram, "run_chat", lambda agent, text, thread, **kw: "svar")
-    monkeypatch.setattr(telegram, "run_upkeep", lambda *a: None)
 
     telegram.handle_update(None, settings, _update(chat_id=7, text="hei"))
 
@@ -225,14 +224,18 @@ def test_authorized_chat_gets_reply_and_upkeep(tmp_path, calls, monkeypatch) -> 
     upkeep: list[tuple] = []
     monkeypatch.setattr(telegram, "run_upkeep", lambda *a: upkeep.append(a))
 
-    telegram.handle_update(None, settings, _update(chat_id=7, text="hei"))
+    # The turn's upkeep comes back as a callable (the poll loop runs it in the
+    # background so the next message never waits on it), not run inline.
+    do_upkeep = telegram.handle_update(None, settings, _update(chat_id=7, text="hei"))
 
     sends = _sends(calls)
     assert len(sends) == 1
     assert sends[0]["chat_id"] == 7
     # The thread id is stable per chat, so the conversation persists.
     assert sends[0]["text"] == "echo:hei [telegram:7]"
-    assert len(upkeep) == 1  # memory/summary/calendar upkeep ran after the reply
+    assert upkeep == []  # nothing ran on the reply path …
+    do_upkeep()
+    assert len(upkeep) == 1  # … but the deferred upkeep carries the turn
 
 
 def test_codex_error_sends_apology(tmp_path, calls, monkeypatch) -> None:
@@ -242,10 +245,7 @@ def test_codex_error_sends_apology(tmp_path, calls, monkeypatch) -> None:
         raise CodexError("codex is down")
 
     monkeypatch.setattr(telegram, "run_chat", boom)
-    monkeypatch.setattr(
-        telegram, "run_upkeep", lambda *a: pytest.fail("no upkeep on a failed turn")
-    )
-    telegram.handle_update(None, settings, _update(chat_id=7))
+    assert telegram.handle_update(None, settings, _update(chat_id=7)) is None
     sends = _sends(calls)
     assert len(sends) == 1
     assert "error" in sends[0]["text"].lower()
