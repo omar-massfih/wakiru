@@ -57,6 +57,7 @@ def _write_and_index(settings: Settings, note: Note, vector: list[float]) -> Not
         updated=note.updated,
         last_recalled=note.last_recalled,
         recall_count=note.recall_count,
+        text_hash=index.content_hash(note.index_text),
     )
     store.regenerate_index(settings)
     return note
@@ -95,9 +96,11 @@ def save_memory(
     vector = embed_one(note.index_text, settings)
 
     def _absorb(existing: Note) -> Note:
-        """Take over an existing note's identity (name/created/counters)."""
+        """Take over an existing note's identity (name/created/tags/counters)."""
         note.name = existing.name
         note.created = existing.created
+        if not note.tags:
+            note.tags = list(existing.tags)
         stats = index.get_stats(settings, existing.name)
         note.recall_count, note.last_recalled = stats or (
             existing.recall_count,
@@ -181,6 +184,11 @@ def forget_memory(settings: Settings, query: str) -> Note | None:
     """Delete the memory best matching ``query`` (by name, else by similarity)."""
     by_name = store.find_note(settings, query)
     if by_name is not None:
+        # Episodes are a log pruned by consolidation, never forgotten by name —
+        # an LLM-hallucinated name must not be able to punch a hole in it.
+        if by_name.kind == "episodic":
+            logger.warning("refusing to forget episodic trace %r", query)
+            return None
         deleted = store.delete_note(settings, query)
         index.remove(settings, query)
         store.regenerate_index(settings)
@@ -301,11 +309,15 @@ def _format_memories(settings: Settings, query: str) -> str:
     """
     from .recall import search_memory
 
+    # Search a wider pool before dropping episodics: the current turn's own
+    # trace (written just before this) near-duplicates the query and would
+    # otherwise crowd every durable note out of a plain top-k.
+    pool = settings.recall_top_k * settings.recall_candidate_multiplier
     durable = [
         (note, score)
-        for note, score in search_memory(settings, query)
+        for note, score in search_memory(settings, query, k=pool)
         if note.kind != "episodic"
-    ]
+    ][: settings.recall_top_k]
     if not durable:
         return "(none)"
     return "\n".join(

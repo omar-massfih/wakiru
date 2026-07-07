@@ -22,6 +22,7 @@ frontmatter on consolidation.
 
 from __future__ import annotations
 
+import hashlib
 import struct
 import sqlite3
 from datetime import date
@@ -35,6 +36,11 @@ VEC_TABLE = "vec_notes"
 
 def _serialize(vector: list[float]) -> bytes:
     return struct.pack(f"{len(vector)}f", *vector)
+
+
+def content_hash(text: str) -> str:
+    """Fingerprint of the embedded text, so reindex can skip unchanged notes."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def _connect(settings: Settings) -> sqlite3.Connection:
@@ -51,8 +57,12 @@ def _connect(settings: Settings) -> sqlite3.Connection:
         " name TEXT UNIQUE, path TEXT, description TEXT,"
         " kind TEXT DEFAULT 'semantic', salience REAL DEFAULT 0.5,"
         " updated TEXT DEFAULT '', last_recalled TEXT DEFAULT '',"
-        " recall_count INTEGER DEFAULT 0)"
+        " recall_count INTEGER DEFAULT 0, hash TEXT DEFAULT '')"
     )
+    # Migrate pre-hash databases in place (a blank hash just means "re-embed").
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(notes)")}
+    if "hash" not in columns:
+        conn.execute("ALTER TABLE notes ADD COLUMN hash TEXT DEFAULT ''")
     conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
     return conn
 
@@ -98,6 +108,7 @@ def upsert(
     updated: str = "",
     last_recalled: str = "",
     recall_count: int = 0,
+    text_hash: str = "",
 ) -> None:
     """Insert or replace the index entry for ``name`` (preserving its rowid data)."""
     conn = _connect(settings)
@@ -109,8 +120,9 @@ def upsert(
             conn.execute("DELETE FROM notes WHERE id = ?", (row[0],))
         cur = conn.execute(
             "INSERT INTO notes(name, path, description, kind, salience, updated,"
-            " last_recalled, recall_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (name, path, description, kind, salience, updated, last_recalled, recall_count),
+            " last_recalled, recall_count, hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (name, path, description, kind, salience, updated, last_recalled,
+             recall_count, text_hash),
         )
         conn.execute(
             f"INSERT INTO {VEC_TABLE}(rowid, embedding) VALUES (?, ?)",
@@ -270,8 +282,9 @@ def reindex(settings: Settings) -> int:
 
     * If the recorded model/dim differs from ``settings.embedding_model`` the vec
       table is dropped and rebuilt from scratch.
-    * Files present on disk are (re-)embedded and upserted; index rows whose files
-      have vanished are removed.
+    * A note whose ``index_text`` hash matches its index row keeps its vector and
+      only gets a metadata refresh — so a routine restart embeds nothing. Changed
+      or new files are (re-)embedded; index rows whose files vanished are removed.
     * Reinforcement counters (``recall_count`` / ``last_recalled``) are preserved
       by name across the rebuild, falling back to the file's own frontmatter when
       the index had no prior value.
@@ -304,11 +317,48 @@ def reindex(settings: Settings) -> int:
     finally:
         conn.close()
 
-    # Re-embed and upsert every note, carrying counters forward.
-    vectors = embed_passages([n.index_text for n in notes], settings) if notes else []
+    # Split into unchanged (hash matches a live vector row -> metadata refresh
+    # only) and changed/new (re-embed). A blank stored hash always re-embeds.
+    pending: list[tuple] = []  # (note, hash, recall_count, last_recalled)
     live_names: set[str] = set()
-    for note, vector in zip(notes, vectors):
-        rc, lr = prior.get(note.name, (note.recall_count, note.last_recalled))
+    conn = _connect(settings)
+    try:
+        vec_ready = _vec_dim(conn) is not None
+        for note in notes:
+            live_names.add(note.name)
+            text_hash = content_hash(note.index_text)
+            rc, lr = prior.get(note.name, (note.recall_count, note.last_recalled))
+            if not model_changed and vec_ready:
+                row = conn.execute(
+                    "SELECT id, hash FROM notes WHERE name = ?", (note.name,)
+                ).fetchone()
+                vec_row = (
+                    conn.execute(
+                        f"SELECT rowid FROM {VEC_TABLE} WHERE rowid = ?", (row[0],)
+                    ).fetchone()
+                    if row is not None
+                    else None
+                )
+                if row is not None and vec_row is not None and row[1] == text_hash:
+                    conn.execute(
+                        "UPDATE notes SET path = ?, description = ?, kind = ?,"
+                        " salience = ?, updated = ? WHERE id = ?",
+                        (str(store.note_path(settings, note)), note.description,
+                         note.kind, note.salience, note.updated, row[0]),
+                    )
+                    continue
+            pending.append((note, text_hash, rc, lr))
+        conn.commit()
+    finally:
+        conn.close()
+
+    # Re-embed only what changed, carrying counters forward.
+    vectors = (
+        embed_passages([n.index_text for n, _h, _rc, _lr in pending], settings)
+        if pending
+        else []
+    )
+    for (note, text_hash, rc, lr), vector in zip(pending, vectors):
         upsert(
             settings,
             note.name,
@@ -320,8 +370,8 @@ def reindex(settings: Settings) -> int:
             updated=note.updated,
             last_recalled=lr,
             recall_count=rc,
+            text_hash=text_hash,
         )
-        live_names.add(note.name)
 
     # Drop index rows whose files disappeared.
     conn = _connect(settings)

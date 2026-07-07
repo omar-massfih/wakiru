@@ -201,6 +201,38 @@ def test_forget_no_match_returns_none(settings) -> None:
     assert store.list_notes(settings)
 
 
+def test_dedup_absorb_preserves_tags(settings) -> None:
+    # Hand-added tags must survive a restatement absorbing the note in place.
+    note = learn.save_memory(settings, body="The user prefers replies in Norwegian.")
+    tagged = store.find_note(settings, note.name)
+    assert tagged is not None
+    tagged.tags = ["language"]
+    store.write_note(settings, tagged)
+    learn.save_memory(settings, body="The user prefers replies in Norwegian please.")
+    notes = store.list_notes(settings)
+    assert len(notes) == 1 and notes[0].tags == ["language"]
+
+
+def test_forget_by_exact_name_refuses_episodic(settings) -> None:
+    # Episodes are a log pruned by consolidation; even an exact-name forget
+    # (e.g. an LLM-hallucinated name) must not delete one.
+    episode = learn.record_episode(settings, "went hiking in the mountains today", "Nice!")
+    assert episode is not None
+    assert learn.forget_memory(settings, episode.name) is None
+    assert len(store.list_notes(settings)) == 1
+
+
+def test_format_memories_sees_durables_past_episodes(settings) -> None:
+    # The current turn's own episodic trace near-duplicates the query and tops a
+    # plain top-k; the reconciliation list must still surface durable notes.
+    settings.recall_top_k = 1
+    settings.recall_candidate_multiplier = 3
+    learn.save_memory(settings, body="The user lives in Oslo right now.", kind="semantic")
+    learn.record_episode(settings, "where does the user live right now", "In Oslo.")
+    text = learn._format_memories(settings, "where does the user live right now")
+    assert "The user lives in Oslo" in text
+
+
 # --- reindex (files are the source of truth) ------------------------------ #
 
 
@@ -214,6 +246,30 @@ def test_reindex_picks_up_new_file_and_drops_deleted(settings) -> None:
     store.delete_note(settings, "manual")
     index.reindex(settings)
     assert not recall.search_memory(settings, "hand-added fact")
+
+
+def test_reindex_skips_unchanged_notes(settings, monkeypatch) -> None:
+    learn.save_memory(settings, body="The user likes hiking.")
+    learn.save_memory(settings, body="The user plays chess.")
+
+    calls: list[list[str]] = []
+
+    def counting(texts, prefix="", settings=None):
+        calls.append(list(texts))
+        return _fake_embed(texts, prefix, settings)
+
+    monkeypatch.setattr("assistant.memory.embeddings._embed", counting)
+    assert index.reindex(settings) == 2
+    assert calls == []  # a routine restart embeds nothing
+
+    # A hand-edited file changes its hash and must be re-embedded — only it.
+    note = store.find_note(settings, "the-user-likes-hiking")
+    assert note is not None
+    note.body = "The user likes hiking and skiing."
+    store.write_note(settings, note)
+    assert index.reindex(settings) == 2
+    assert len(calls) == 1 and len(calls[0]) == 1
+    assert recall.search_memory(settings, "hiking and skiing")
 
 
 def test_reindex_on_model_change_preserves_counters(settings, tmp_path) -> None:

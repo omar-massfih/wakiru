@@ -49,7 +49,7 @@ def run_upkeep(
     """
     # Long-term memory: an episodic trace + a reconciling save/update/forget pass.
     try:
-        update_memory(None, message, reply, thread_id)
+        update_memory(settings, message, reply, thread_id)
     except Exception:
         logger.exception("memory upkeep failed for thread %s", thread_id)
 
@@ -70,6 +70,6 @@ def run_upkeep(
     try:
         every = settings.consolidate_every_n_turns
         if every > 0 and index.bump_turn_counter(settings) % every == 0:
-            consolidate_memory(None)
+            consolidate_memory(settings)
     except Exception:
         logger.exception("consolidation failed")
