@@ -527,3 +527,15 @@ def test_revise_memory_normalizes_legacy_and_unknown_kind(settings) -> None:
 
     kinds = {name: kind for name, _d, kind, *_ in index.list_entries(settings)}
     assert kinds[note.name] == "semantic"
+
+
+def test_reindex_preserves_decayed_salience(settings) -> None:
+    # Durable decay is index-only (the file keeps the base value); a restart's
+    # reindex must not overwrite the effective value with the file's copy.
+    note = learn.save_memory(
+        settings, body="The user's name is Omar.", description="user name", salience=0.9
+    )
+    index.set_salience(settings, note.name, 0.4)  # what consolidation's decay does
+    index.reindex(settings)  # what a restart does
+    entries = {name: sal for name, _d, _k, sal, _rc, _lr, _u in index.list_entries(settings)}
+    assert entries[note.name] == 0.4

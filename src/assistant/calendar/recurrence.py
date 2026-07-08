@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import replace
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, tzinfo
 
 from dateutil.rrule import rrulestr
 
@@ -81,11 +81,21 @@ def humanize_rrule(rule: str) -> str:
     return rule
 
 
-def _rule_for(event: Event):
-    """The dateutil rule for a series master, or ``None`` if start/rule is unusable."""
+def _rule_for(event: Event, tz: tzinfo | None = None):
+    """The dateutil rule for a series master, or ``None`` if start/rule is unusable.
+
+    ``tz`` should be the assistant's timezone (a ZoneInfo when configured).
+    Stored starts round-trip through ISO strings, whose parsed tzinfo is a
+    *fixed* UTC offset — expanding a rule from that would pin every occurrence
+    to the offset the master was created under, drifting an hour across a DST
+    change. Converting DTSTART to the zone first keeps occurrences on the same
+    wall-clock time year-round.
+    """
     dtstart = parse_dt(event.start)
     if dtstart is None:
         return None
+    if tz is not None:
+        dtstart = dtstart.astimezone(tz)
     try:
         return rrulestr(event.rrule, dtstart=dtstart)
     except (ValueError, TypeError):
@@ -93,7 +103,9 @@ def _rule_for(event: Event):
         return None
 
 
-def resolve_occurrence(event: Event, when: datetime) -> datetime | None:
+def resolve_occurrence(
+    event: Event, when: datetime, tz: tzinfo | None = None
+) -> datetime | None:
     """Snap ``when`` to the series' actual occurrence datetime near it.
 
     Matches an exact instant first, then any occurrence on the same calendar date
@@ -102,7 +114,7 @@ def resolve_occurrence(event: Event, when: datetime) -> datetime | None:
     """
     if not event.rrule:
         return None
-    rule = _rule_for(event)
+    rule = _rule_for(event, tz)
     if rule is None:
         return None
     window = rule.between(when - timedelta(days=1), when + timedelta(days=1), inc=True)
@@ -115,7 +127,12 @@ def resolve_occurrence(event: Event, when: datetime) -> datetime | None:
     return None
 
 
-def expand(event: Event, window_start: datetime, window_end: datetime) -> list[Event]:
+def expand(
+    event: Event,
+    window_start: datetime,
+    window_end: datetime,
+    tz: tzinfo | None = None,
+) -> list[Event]:
     """Occurrences of ``event`` within ``[window_start, window_end]`` (inclusive).
 
     A non-recurring event yields itself. A recurring master yields one synthetic
@@ -128,7 +145,7 @@ def expand(event: Event, window_start: datetime, window_end: datetime) -> list[E
     if not event.rrule:
         return [event]
     dtstart = parse_dt(event.start)
-    rule = _rule_for(event)
+    rule = _rule_for(event, tz)
     if dtstart is None or rule is None:
         return []
 
@@ -167,10 +184,14 @@ def occurrences_in(
     Reads every master unbounded (so a past-DTSTART series is still considered),
     expands recurring ones into the window, and window-filters one-shot events.
     """
+    # Lazy import: context imports this module at top level.
+    from .context import resolve_tz
+
+    tz = resolve_tz(settings)
     result: list[Event] = []
     for master in store.list_events(settings):
         if master.rrule:
-            result.extend(expand(master, start_from, start_to))
+            result.extend(expand(master, start_from, start_to, tz))
         else:
             dt = parse_dt(master.start)
             if dt is not None and start_from <= dt <= start_to:

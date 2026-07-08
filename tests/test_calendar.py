@@ -377,3 +377,29 @@ def test_legacy_naive_row_does_not_break_reads(settings) -> None:
     occurrences = recurrence.occurrences_in(settings, context.now(settings), horizon)
     assert any(e.title == "Old series" for e in occurrences)
     assert "Old one-shot" in context.agenda_context(settings)
+
+
+def test_weekly_series_keeps_wall_clock_across_dst(settings) -> None:
+    # A master created in winter round-trips through ISO with a fixed +01:00
+    # offset; summer occurrences must still land at 09:00 Oslo wall time
+    # (+02:00), not stay pinned to the winter offset (which would render 10:00).
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    oslo = ZoneInfo("Europe/Oslo")
+    master = store.create_event(
+        settings,
+        title="Standup",
+        start="2026-01-05T09:00:00+01:00",  # a Monday, CET
+        rrule="FREQ=WEEKLY;BYDAY=MO",
+    )
+    occurrences = recurrence.expand(
+        master,
+        datetime(2026, 7, 6, 0, 0, tzinfo=oslo),
+        datetime(2026, 7, 12, 23, 59, tzinfo=oslo),
+        oslo,
+    )
+    assert len(occurrences) == 1
+    occ = store.parse_dt(occurrences[0].start).astimezone(oslo)
+    assert (occ.hour, occ.minute) == (9, 0)
+    assert occ.utcoffset() == timedelta(hours=2)  # CEST — same wall clock, new offset

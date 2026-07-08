@@ -26,7 +26,7 @@ from .. import notify
 from ..codex_runner import run_codex
 from ..config import Settings, get_settings
 from . import recurrence, store, undo
-from .context import now, render_events, writer_view
+from .context import now, render_events, resolve_tz, writer_view
 
 logger = logging.getLogger(__name__)
 
@@ -182,7 +182,7 @@ def _apply_occurrence_op(
     master = store.get_event(settings, target)
     if master is None or not master.rrule:
         return None  # exceptions only apply to a series
-    occurrence = recurrence.resolve_occurrence(master, when)
+    occurrence = recurrence.resolve_occurrence(master, when, resolve_tz(settings))
     if occurrence is None:
         return None  # no such occurrence in the series
     key = occurrence.isoformat()

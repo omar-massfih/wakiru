@@ -39,20 +39,38 @@ async def _reminder_tick_loop() -> None:
         await asyncio.sleep(get_settings().reminder_tick_seconds)
 
 
+def _log_task_death(task: asyncio.Task) -> None:
+    """Surface a background task that stopped on its own — it should run forever."""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.error("background task %r died", task.get_name(), exc_info=exc)
+    else:
+        logger.error("background task %r exited unexpectedly", task.get_name())
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
     tasks: list[asyncio.Task] = []
     if settings.enable_reminders and settings.reminder_tick_seconds > 0:
-        tasks.append(asyncio.create_task(_reminder_tick_loop()))
+        tasks.append(asyncio.create_task(_reminder_tick_loop(), name="reminder-ticker"))
         logger.info("reminder ticker started (every %ss)", settings.reminder_tick_seconds)
     if settings.telegram_bot_token:
-        tasks.append(asyncio.create_task(telegram.poll_loop(_agent(), settings)))
+        tasks.append(
+            asyncio.create_task(telegram.poll_loop(_agent(), settings), name="telegram-poll")
+        )
+    for task in tasks:
+        task.add_done_callback(_log_task_death)
     try:
         yield
     finally:
         for task in tasks:
             task.cancel()
+        # Wait for cancellation to land so shutdown doesn't strand mid-operation
+        # work; return_exceptions swallows the resulting CancelledErrors.
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 app = FastAPI(title="Agentic assistant", version="0.1.0", lifespan=lifespan)

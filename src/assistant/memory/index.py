@@ -340,11 +340,16 @@ def reindex(settings: Settings) -> int:
                     else None
                 )
                 if row is not None and vec_row is not None and row[1] == text_hash:
+                    # Deliberately NOT refreshing salience: the index carries the
+                    # *effective* (possibly decayed) value, which consolidation
+                    # maintains index-only — taking the file's copy here would
+                    # undo durable decay on every restart. A changed note goes
+                    # through upsert below and picks up the file's salience.
                     conn.execute(
                         "UPDATE notes SET path = ?, description = ?, kind = ?,"
-                        " salience = ?, updated = ? WHERE id = ?",
+                        " updated = ? WHERE id = ?",
                         (str(store.note_path(settings, note)), note.description,
-                         note.kind, note.salience, note.updated, row[0]),
+                         note.kind, note.updated, row[0]),
                     )
                     continue
             pending.append((note, text_hash, rc, lr))

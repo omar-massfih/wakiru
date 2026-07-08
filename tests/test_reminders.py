@@ -263,3 +263,19 @@ def test_event_inside_several_lead_windows_fires_once(tmp_path) -> None:
     # Both leads are claimed together, so no later tick can fire a duplicate.
     assert {r["lead_minutes"] for r in _ledger_rows(settings)} == {60, 1440}
     assert reminders.run_reminders(settings) == []
+
+
+def test_ledger_prune_compares_instants_not_strings(settings) -> None:
+    # A fresh row stamped under another UTC offset sorts lexically before the
+    # cutoff string; pruning must compare instants and keep it.
+    from datetime import timezone
+
+    fresh_other_offset = (context.now(settings) - timedelta(days=1)).astimezone(timezone.utc)
+    with reminders._connect(settings) as conn:
+        conn.execute(
+            "INSERT INTO reminders_fired (event_id, event_start, lead_minutes, fired_at)"
+            " VALUES ('fresh', 'x', 60, ?)",
+            (fresh_other_offset.isoformat(timespec="seconds"),),
+        )
+    reminders.run_reminders(settings)  # prunes before firing
+    assert any(r["event_id"] == "fresh" for r in _ledger_rows(settings))

@@ -30,24 +30,47 @@ def test_agent_graph_compiles(tmp_path) -> None:
 
 
 def test_build_command_defaults() -> None:
-    cmd = build_command("hello", "/tmp/out.txt", Settings())
+    cmd = build_command("/tmp/out.txt", Settings())
     assert cmd[:2] == ["codex", "exec"]
     assert "--skip-git-repo-check" in cmd
-    assert cmd[-1] == "hello"  # prompt is the trailing positional arg
+    assert cmd[-1] == "-"  # prompt arrives on stdin, not argv (argv size limits)
     assert "-o" in cmd and "/tmp/out.txt" in cmd
     assert "-s" in cmd and "read-only" in cmd
 
 
 def test_build_command_includes_model_and_cwd() -> None:
     settings = Settings(codex_model="gpt-5-codex", codex_working_dir="/work")
-    cmd = build_command("hi", "/tmp/o.txt", settings)
+    cmd = build_command("/tmp/o.txt", settings)
     assert "-m" in cmd and "gpt-5-codex" in cmd
     assert "-C" in cmd and "/work" in cmd
 
 
 def test_build_command_web_search_precedes_exec() -> None:
-    cmd = build_command("hi", "/tmp/o.txt", Settings(codex_web_search=True))
+    cmd = build_command("/tmp/o.txt", Settings(codex_web_search=True))
     assert cmd[:3] == ["codex", "--search", "exec"]
+
+
+def test_run_codex_pipes_prompt_on_stdin(monkeypatch) -> None:
+    from assistant import codex_runner
+
+    seen: dict = {}
+
+    def fake_run(cmd, **kwargs):
+        seen["cmd"] = cmd
+        seen["input"] = kwargs.get("input")
+
+        class Result:
+            returncode = 0
+            stdout = "final message"
+            stderr = ""
+
+        return Result()
+
+    monkeypatch.setattr(codex_runner.subprocess, "run", fake_run)
+    long_prompt = "x" * 500_000  # would exceed the kernel's per-arg limit as argv
+    assert codex_runner.run_codex(long_prompt, settings=Settings()) == "final message"
+    assert seen["input"] == long_prompt
+    assert long_prompt not in seen["cmd"]
 
 
 def test_build_model_defaults_to_codex() -> None:

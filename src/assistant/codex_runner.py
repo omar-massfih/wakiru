@@ -18,8 +18,13 @@ class CodexError(RuntimeError):
     """Raised when the Codex CLI exits non-zero or times out."""
 
 
-def build_command(prompt: str, output_file: str, settings: Settings) -> list[str]:
-    """Assemble the ``codex exec`` argv. Kept pure so it can be unit-tested."""
+def build_command(output_file: str, settings: Settings) -> list[str]:
+    """Assemble the ``codex exec`` argv. Kept pure so it can be unit-tested.
+
+    The prompt itself is NOT part of the argv: it is piped on stdin (the ``-``
+    positional). A long conversation flattened into a single argument would hit
+    the kernel's per-argument size limit (~128 KB on Linux) and fail the exec.
+    """
     cmd: list[str] = [settings.codex_bin]
     if settings.codex_web_search:
         # Must precede the `exec` subcommand — codex rejects it after.
@@ -38,8 +43,8 @@ def build_command(prompt: str, output_file: str, settings: Settings) -> list[str
         cmd += ["-m", settings.codex_model]
     if settings.codex_working_dir:
         cmd += ["-C", settings.codex_working_dir]
-    # Prompt is the trailing positional argument.
-    cmd.append(prompt)
+    # Read the prompt from stdin.
+    cmd.append("-")
     return cmd
 
 
@@ -49,11 +54,12 @@ def run_codex(prompt: str, settings: Settings | None = None) -> str:
 
     with tempfile.TemporaryDirectory() as tmp:
         out_path = Path(tmp) / "last_message.txt"
-        cmd = build_command(prompt, str(out_path), settings)
+        cmd = build_command(str(out_path), settings)
 
         try:
             result = subprocess.run(
                 cmd,
+                input=prompt,
                 capture_output=True,
                 text=True,
                 timeout=settings.codex_timeout,

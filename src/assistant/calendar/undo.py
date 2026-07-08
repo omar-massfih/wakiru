@@ -91,7 +91,7 @@ def undo_latest(settings: Settings, thread_id: str, window_minutes: int) -> str:
     "compute first, mutate second, claim third" discipline used by
     :func:`assistant.calendar.reminders.run_reminders`.
     """
-    cutoff = (now(settings) - timedelta(minutes=window_minutes)).isoformat(timespec="seconds")
+    cutoff = now(settings) - timedelta(minutes=window_minutes)
 
     with _connect(settings) as conn:
         latest = conn.execute(
@@ -101,7 +101,10 @@ def undo_latest(settings: Settings, thread_id: str, window_minutes: int) -> str:
         ).fetchone()
         if latest is None:
             return "Nothing to undo."
-        if latest["applied_at"] < cutoff:
+        # Compare as datetimes, not ISO strings: stamps written under different
+        # UTC offsets (a DST change) don't order lexically.
+        applied_at = store.parse_dt(latest["applied_at"])
+        if applied_at is None or applied_at < cutoff:
             return "Nothing recent enough to undo."
         rows = [
             dict(r)

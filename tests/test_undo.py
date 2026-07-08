@@ -248,3 +248,24 @@ def test_write_log_empty_when_confirmation_disabled(tmp_path, monkeypatch) -> No
     assert len(store.list_events(settings)) == 1  # write still applied
     assert _log_rows(settings) == []  # but nothing logged
     assert undo.undo_latest(settings, THREAD, 15) == "Nothing to undo."
+
+
+def test_undo_window_survives_offset_change(settings) -> None:
+    # A stamp written under another UTC offset (a DST flip) is lexically far from
+    # the cutoff string even when the instant is minutes old; the window check
+    # must compare instants, not strings.
+    from datetime import timezone
+
+    event = store.create_event(settings, title="Dentist", start=_iso_in(settings, days=1))
+    applied_utc = (context.now(settings) - timedelta(minutes=5)).astimezone(timezone.utc)
+    with undo._connect(settings) as conn:
+        conn.execute(
+            "INSERT INTO write_log"
+            " (thread_id, batch_id, event_id, op, summary, before_json, applied_at)"
+            " VALUES (?, ?, ?, ?, ?, NULL, ?)",
+            (THREAD, "b1", event.id, "create", "created: Dentist",
+             applied_utc.isoformat(timespec="seconds")),
+        )
+    result = undo.undo_latest(settings, THREAD, 15)
+    assert result.startswith("Undone:")
+    assert store.get_event(settings, event.id) is None

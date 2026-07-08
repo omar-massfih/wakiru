@@ -110,8 +110,25 @@ def due_reminders(settings: Settings, current: datetime | None = None) -> list[d
 
 
 def _prune_ledger(conn: sqlite3.Connection, current: datetime) -> None:
-    cutoff = (current - timedelta(days=_LEDGER_RETENTION_DAYS)).isoformat()
-    conn.execute("DELETE FROM reminders_fired WHERE fired_at < ?", (cutoff,))
+    """Drop fired rows older than the retention window (and unparseable ones).
+
+    Compared as datetimes in Python rather than as ISO strings in SQL: stamps
+    written under different UTC offsets (a DST change) don't order lexically.
+    The ledger holds at most ~30 days of rows, so the full scan is cheap.
+    """
+    cutoff = current - timedelta(days=_LEDGER_RETENTION_DAYS)
+    stale = [
+        (row["event_id"], row["event_start"], row["lead_minutes"])
+        for row in conn.execute(
+            "SELECT event_id, event_start, lead_minutes, fired_at FROM reminders_fired"
+        )
+        if (fired := store.parse_dt(row["fired_at"])) is None or fired < cutoff
+    ]
+    conn.executemany(
+        "DELETE FROM reminders_fired"
+        " WHERE event_id = ? AND event_start = ? AND lead_minutes = ?",
+        stale,
+    )
 
 
 def run_reminders(settings: Settings | None = None) -> list[dict]:

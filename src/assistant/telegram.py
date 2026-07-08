@@ -245,15 +245,80 @@ def _telegram_html(markdown: str) -> str:
     return rendered or html.escape(markdown.strip()) or "(empty reply)"
 
 
+def _split_piece(piece: str) -> list[str] | None:
+    """Split a markdown piece roughly in half, preferring a block boundary.
+
+    Tries a blank line first (keeps whole blocks together), then a newline,
+    then a space. ``None`` when no split point yields two non-empty halves.
+    """
+    mid = len(piece) // 2
+    for sep in ("\n\n", "\n", " "):
+        cut = piece.rfind(sep, 1, mid)
+        if cut < 1:
+            cut = piece.find(sep, mid, len(piece) - 1)
+        if cut > 0:
+            head, tail = piece[:cut].strip("\n"), piece[cut:].strip("\n")
+            if head and tail:
+                return [head, tail]
+    return None
+
+
+def _render_chunks(text: str) -> list[tuple[str, str | None]]:
+    """Markdown pieces paired with rendered HTML that fits the API limit.
+
+    Rendering grows the text (entity escaping, ``<b>``/``<a>`` tags), so the
+    limit can only be checked *after* rendering: chunk, render, and re-split any
+    piece whose rendered form is still too long. A piece that cannot be split
+    further comes back with ``None`` HTML — the caller sends it as plain text.
+    """
+    queue = _chunks(text)
+    rendered: list[tuple[str, str | None]] = []
+    while queue:
+        piece = queue.pop(0)
+        html_piece = _telegram_html(piece)
+        if len(html_piece) <= _MAX_MESSAGE_CHARS:
+            rendered.append((piece, html_piece))
+            continue
+        halves = _split_piece(piece)
+        if halves is None:
+            rendered.append((piece, None))
+        else:
+            queue[:0] = halves
+    return rendered
+
+
 def send_message(token: str, chat_id: int, text: str) -> None:
-    """Deliver ``text`` to a chat, split into API-sized chunks."""
-    for piece in _chunks(text):
-        payload = {"chat_id": chat_id, "text": _telegram_html(piece), "parse_mode": "HTML"}
+    """Deliver ``text`` to a chat, split into API-sized chunks.
+
+    Each chunk is sent as HTML, falling back to plain text when Telegram
+    rejects the markup or the network hiccups. A failed chunk is logged and the
+    rest still go out; only total failure (nothing delivered) raises, so
+    callers can tell a dead channel from a partial delivery.
+    """
+    delivered = False
+    last_error: Exception | None = None
+    for piece, html_piece in _render_chunks(text):
         try:
-            _call(token, "sendMessage", payload)
-        except (urllib.error.HTTPError, RuntimeError) as exc:
-            logger.warning("telegram HTML delivery failed; retrying as plain text: %s", exc)
+            if html_piece is not None:
+                try:
+                    _call(
+                        token,
+                        "sendMessage",
+                        {"chat_id": chat_id, "text": html_piece, "parse_mode": "HTML"},
+                    )
+                    delivered = True
+                    continue
+                except (urllib.error.URLError, OSError, RuntimeError) as exc:
+                    logger.warning(
+                        "telegram HTML delivery failed; retrying as plain text: %s", exc
+                    )
             _call(token, "sendMessage", {"chat_id": chat_id, "text": piece})
+            delivered = True
+        except (urllib.error.URLError, OSError, RuntimeError) as exc:
+            logger.warning("telegram delivery of one chunk failed: %s", exc)
+            last_error = exc
+    if not delivered and last_error is not None:
+        raise last_error
 
 
 def get_updates(token: str, offset: int | None) -> list[dict]:

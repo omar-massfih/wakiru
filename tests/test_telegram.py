@@ -8,7 +8,7 @@ monkeypatched, so these stay fast and offline.
 from __future__ import annotations
 
 import pytest
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 
 from assistant import notify, telegram
 from assistant.codex_runner import CodexError
@@ -276,3 +276,59 @@ def test_no_telegram_config_skips_delivery(tmp_path, monkeypatch) -> None:
         lambda *a: pytest.fail("must not send without telegram config"),
     )
     assert notify.deliver_telegram(settings, {"message": "x"}) is False
+
+
+def test_oversized_render_is_resplit_under_limit(calls) -> None:
+    # Escaping expands the text ("&" -> "&amp;"), so a markdown chunk that fits
+    # can render past the API limit; the sender must re-split until it fits.
+    text = "\n".join(["&" * 80] * 40)  # 3.2k of markdown, ~16k once escaped
+    telegram.send_message("tok", 7, text)
+    sends = _sends(calls)
+    assert len(sends) >= 4
+    assert all(len(s["text"]) <= telegram._MAX_MESSAGE_CHARS for s in sends)
+    assert all(s.get("parse_mode") == "HTML" for s in sends)
+    # Nothing was lost across the splits.
+    assert "".join(s["text"] for s in sends).count("&amp;") == 80 * 40
+
+
+def test_network_error_on_html_send_falls_back_to_plain_text(monkeypatch) -> None:
+    calls: list[tuple[str, dict]] = []
+
+    def fake_call(token, method, payload, timeout=15):
+        calls.append((method, payload))
+        if payload.get("parse_mode") == "HTML":
+            raise URLError("timed out")  # not an HTTPError: a transport failure
+        return {}
+
+    monkeypatch.setattr(telegram, "_call", fake_call)
+
+    telegram.send_message("tok", 7, "**hello**")
+
+    assert calls == [
+        ("sendMessage", {"chat_id": 7, "text": "<b>hello</b>", "parse_mode": "HTML"}),
+        ("sendMessage", {"chat_id": 7, "text": "**hello**"}),
+    ]
+
+
+def test_send_raises_only_when_nothing_was_delivered(monkeypatch) -> None:
+    def fake_call(token, method, payload, timeout=15):
+        raise URLError("network down")
+
+    monkeypatch.setattr(telegram, "_call", fake_call)
+    with pytest.raises(URLError):
+        telegram.send_message("tok", 7, "hi")
+
+
+def test_one_failed_chunk_does_not_kill_the_rest(monkeypatch) -> None:
+    delivered: list[str] = []
+
+    def fake_call(token, method, payload, timeout=15):
+        if delivered == [] and "parse_mode" in payload:
+            raise URLError("blip")  # first chunk's HTML attempt fails …
+        delivered.append(payload["text"])
+        return {}
+
+    monkeypatch.setattr(telegram, "_call", fake_call)
+    text = "\n".join(["x" * 100] * 60)  # two chunks
+    telegram.send_message("tok", 7, text)  # must not raise
+    assert len(delivered) == 2  # plain-text retry of chunk 1, then chunk 2
