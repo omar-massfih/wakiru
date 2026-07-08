@@ -34,9 +34,17 @@ def now(settings: Settings) -> datetime:
     return datetime.now(resolve_tz(settings))
 
 
-def _render_event(event: Event, tz: tzinfo, with_id: bool) -> str:
-    dt = store.parse_dt(event.start)
-    when = dt.astimezone(tz).strftime("%a %d %b %Y %H:%M") if dt else event.start
+def format_when(settings: Settings, iso: str) -> str:
+    """Human-readable local datetime for user-facing summaries."""
+    dt = store.parse_dt(iso)
+    if dt is None:
+        return iso
+    return dt.astimezone(resolve_tz(settings)).strftime("%a %d %b %Y %H:%M")
+
+
+def _render_event(event: Event, settings: Settings, with_id: bool) -> str:
+    when = format_when(settings, event.start)
+    tz = resolve_tz(settings)
     line = f"- {when} — {event.title}"
     if event.location:
         line += f" @ {event.location}"
@@ -86,10 +94,9 @@ def writer_view(settings: Settings) -> list[Event]:
 
 def render_events(settings: Settings, events: list[Event], with_ids: bool = False) -> str:
     """Render a list of events as text (optionally exposing ids for the writer)."""
-    tz = resolve_tz(settings)
     if not events:
         return "(no upcoming events)"
-    return "\n".join(_render_event(e, tz, with_ids) for e in events)
+    return "\n".join(_render_event(e, settings, with_ids) for e in events)
 
 
 def agenda_context(settings: Settings | None = None) -> str:

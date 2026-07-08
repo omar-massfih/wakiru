@@ -26,7 +26,7 @@ from .. import notify
 from ..codex_runner import run_codex
 from ..config import Settings, get_settings
 from . import recurrence, store, undo
-from .context import now, render_events, resolve_tz, writer_view
+from .context import format_when, now, render_events, resolve_tz, writer_view
 
 logger = logging.getLogger(__name__)
 
@@ -131,7 +131,7 @@ def apply_op(
             rrule=rrule,
         )
         suffix = f" ({recurrence.humanize_rrule(event.rrule)})" if event.rrule else ""
-        summary = f"created: {event.title} @ {event.start}{suffix}"
+        summary = f"created: {event.title} @ {format_when(settings, event.start)}{suffix}"
         _log_write(settings, thread_id, batch_id, event.id, "create", summary, None)
         return summary
 
@@ -150,7 +150,7 @@ def apply_op(
         )
         if revised is None:
             return None
-        summary = f"rescheduled: {revised.title} @ {revised.start}"
+        summary = f"rescheduled: {revised.title} @ {format_when(settings, revised.start)}"
         _log_write(settings, thread_id, batch_id, target, "reschedule", summary, before)
         return summary
 
@@ -191,7 +191,7 @@ def _apply_occurrence_op(
         updated = store.add_exdate(settings, target, key)
         if updated is None:
             return None
-        summary = f"skipped: {master.title} on {key}"
+        summary = f"skipped: {master.title} on {format_when(settings, key)}"
         _log_write(settings, thread_id, batch_id, target, "skip", summary, master)
         return summary
 
@@ -201,7 +201,11 @@ def _apply_occurrence_op(
     updated = store.set_override(settings, target, key, fields)
     if updated is None:
         return None
-    summary = f"moved: {master.title} {key} -> {fields.get('start', key)}"
+    new_start = str(fields.get("start", key))
+    summary = (
+        f"moved: {master.title} {format_when(settings, key)}"
+        f" -> {format_when(settings, new_start)}"
+    )
     _log_write(settings, thread_id, batch_id, target, "move", summary, master)
     return summary
 

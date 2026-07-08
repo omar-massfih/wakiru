@@ -110,6 +110,21 @@ def test_agenda_context_empty_calendar(settings) -> None:
     assert "no upcoming events" in block.lower()
 
 
+def test_format_when(settings) -> None:
+    assert context.format_when(settings, "2026-07-08T23:00:00+00:00") == "Thu 09 Jul 2026 01:00"
+    assert "2026-07-08T23:00:00" not in context.format_when(settings, "2026-07-08T23:00:00+00:00")
+    assert context.format_when(settings, "not-a-date") == "not-a-date"
+
+
+def test_apply_op_summary_human_dates(settings) -> None:
+    summary = ops.apply_op(
+        settings,
+        {"op": "create", "title": "Get ready for bed", "start": "2026-07-08T23:00:00+00:00"},
+    )
+    assert summary == "created: Get ready for bed @ Thu 09 Jul 2026 01:00"
+    assert "2026-07-08T23:00:00" not in summary
+
+
 def test_render_events_can_expose_ids(settings) -> None:
     event = store.create_event(settings, title="Review", start=_iso_in(settings, days=1))
     upcoming = context.upcoming_events(settings)

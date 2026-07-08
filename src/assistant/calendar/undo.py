@@ -17,7 +17,7 @@ from datetime import timedelta
 
 from ..config import Settings
 from . import store
-from .context import now
+from .context import format_when, now
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +76,7 @@ def _revert_row(settings: Settings, row: sqlite3.Row) -> str | None:
             return None
         before = store.Event(**json.loads(row["before_json"]))
         restored = store.restore_event(settings, before)
-        return f"restored: {restored.title} @ {restored.start}"
+        return f"restored: {restored.title} @ {format_when(settings, restored.start)}"
     except Exception:
         logger.exception("failed to revert write_log row %s", row["id"])
         return None
