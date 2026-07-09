@@ -165,6 +165,16 @@ class Settings(BaseSettings):
     # Cap on how many upcoming events are injected per turn.
     calendar_max_events: int = 20
 
+    # --- Tasks / to-dos ---
+    # Master switch: inject open tasks into each turn (the read path) so the model
+    # knows what's outstanding.
+    enable_tasks: bool = True
+    # Master switch for the write path: an LLM extraction after each turn that
+    # adds/completes/updates/removes tasks (parallel to enable_auto_schedule).
+    enable_auto_tasks: bool = True
+    # Cap on how many open tasks are injected per turn.
+    tasks_max_open: int = 20
+
     # --- Confirmation on writes (undo) ---
     # Master switch: log every calendar write to an undo ledger, let the user
     # revert the latest one by replying "undo", and push an out-of-band
@@ -220,6 +230,11 @@ class Settings(BaseSettings):
     def calendar_db_path(self) -> Path:
         """SQLite file holding the local calendar's events."""
         return self.memory_path / "calendar.db"
+
+    @property
+    def tasks_db_path(self) -> Path:
+        """SQLite file holding the to-do list (tasks + their undo ledger)."""
+        return self.memory_path / "tasks.db"
 
     @property
     def checkpoints_db_path(self) -> Path:

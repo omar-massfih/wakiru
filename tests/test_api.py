@@ -81,6 +81,30 @@ def test_calendar_shape_lists_events(client) -> None:
     assert {"id", "title", "start", "end", "location", "notes"} <= event.keys()
 
 
+def test_tasks_shape_lists_open_and_all(client) -> None:
+    import assistant.api as api
+    from assistant.tasks import store as tstore
+
+    c = client(None)
+    app_settings = api.get_settings()
+    keep = tstore.create_task(app_settings, "call plumber")
+    done = tstore.create_task(app_settings, "buy milk")
+    tstore.complete_task(app_settings, done.id)
+
+    # Default: open tasks only.
+    body = c.get("/tasks").json()
+    assert body["total"] == 1
+    assert body["tasks"][0]["title"] == "call plumber"
+    assert body["tasks"][0]["done"] is False
+    assert {"id", "title", "done", "due", "notes", "done_at"} <= body["tasks"][0].keys()
+
+    # include_done surfaces the completed one too.
+    all_body = c.get("/tasks", params={"include_done": "true"}).json()
+    assert all_body["total"] == 2
+    assert any(t["done"] for t in all_body["tasks"])
+    _ = keep
+
+
 def test_reminders_run_shape_on_empty_store(client) -> None:
     body = client(None).post("/reminders/run").json()
     assert body["count"] == 0

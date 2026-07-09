@@ -23,6 +23,8 @@ from .chat import run_chat, run_chat_stream, run_upkeep
 from .codex_runner import CodexError
 from .config import get_settings
 from .memory import consolidate_memory, store
+from .tasks import store as tasks_store
+from .tasks.reminders import run_task_reminders
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +39,7 @@ async def _reminder_tick_loop() -> None:
     while True:
         try:
             await asyncio.to_thread(run_reminders, get_settings())
+            await asyncio.to_thread(run_task_reminders, get_settings())
         except Exception:
             logger.exception("reminder tick failed")
         await asyncio.sleep(get_settings().reminder_tick_seconds)
@@ -218,9 +221,32 @@ def reminders_run() -> dict:
 
     The in-process ticker calls this same logic on a cadence; this endpoint lets it
     also be driven manually or from external cron. Idempotent via the dedupe ledger.
+    Fires both calendar-event and due-task reminders.
     """
-    fired = run_reminders(get_settings())
+    settings = get_settings()
+    fired = run_reminders(settings) + run_task_reminders(settings)
     return {"count": len(fired), "fired": fired}
+
+
+@app.get("/tasks", dependencies=[Depends(require_token)])
+def tasks(include_done: bool = False) -> dict:
+    """List tasks — open ones by default, or all with ``?include_done=true``."""
+    settings = get_settings()
+    items = tasks_store.list_tasks(settings, include_done=include_done)
+    return {
+        "total": len(items),
+        "tasks": [
+            {
+                "id": t.id,
+                "title": t.title,
+                "done": t.done,
+                "due": t.due,
+                "notes": t.notes,
+                "done_at": t.done_at,
+            }
+            for t in items
+        ],
+    }
 
 
 @app.get("/calendar", dependencies=[Depends(require_token)])

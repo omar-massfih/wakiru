@@ -19,15 +19,19 @@ Telegram bot  /
 - **`llm.py`** — the **provider abstraction**. `build_model()` selects a LangChain `BaseChatModel`
   by `LLM_PROVIDER`. `codex` (default), `openai`, and `anthropic` are all wired; the API-backed
   providers read `LLM_API_KEY` / `LLM_MODEL` (and `LLM_BASE_URL` for openai).
-- **`agent.py`** — the LangGraph graph: `START -> recall -> agenda -> codex -> END`, with a SQLite
-  checkpointer for conversation history. Working-memory summarization runs off the reply path
+- **`agent.py`** — the LangGraph graph: `START -> recall -> agenda -> tasks -> codex -> END`, with a
+  SQLite checkpointer for conversation history. Working-memory summarization runs off the reply path
   (in the background), not as a graph node.
 - **`chat.py`** — the channel-agnostic core: one turn of conversation plus its
   post-reply upkeep (memory, summary folding, calendar, consolidation), shared by
   every channel so they all behave identically.
-- **`api.py`** — FastAPI app: `GET /health`, `POST /chat`, `GET /memory` and
-  `POST /memory/consolidate` for inspecting and consolidating the brain, `GET /calendar`,
-  and `POST /reminders/run` for firing due reminders.
+- **`api.py`** — FastAPI app: `GET /health`, `POST /chat`, `POST /chat/stream` (SSE),
+  `GET /memory` and `POST /memory/consolidate` for inspecting and consolidating the brain,
+  `GET /calendar`, `GET /tasks` for the to-do list, and `POST /reminders/run` for firing
+  due reminders (events and tasks).
+- **`tasks/`** — the to-do list: a store, a read path (open tasks injected each turn), a
+  reconciling write path (add/complete/update/remove), a due-task reminder path, and an undo
+  ledger — mirroring the `calendar/` package for work with no fixed time and a done state.
 - **`telegram.py`** — the Telegram channel (see below): a stdlib-only long-polling
   bridge started alongside the server when a bot token is configured.
 

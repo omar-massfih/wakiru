@@ -16,16 +16,20 @@ from langchain_core.messages import AIMessageChunk, HumanMessage
 from langgraph.graph.state import CompiledStateGraph
 
 from .agent import maybe_summarize
-from .calendar import undo_latest, update_calendar
+from .calendar import update_calendar
 from .config import Settings, get_settings
 from .memory import consolidate_memory, index, update_memory
+from .tasks import update_tasks
+from .undo import undo_latest
 
 logger = logging.getLogger(__name__)
 
 
 def _is_undo_command(settings: Settings, message: str) -> bool:
-    """Whether ``message`` asks to undo the last calendar write on this thread."""
-    if not (settings.enable_calendar and settings.enable_write_confirmation):
+    """Whether ``message`` asks to undo the last calendar or task write on this thread."""
+    if not settings.enable_write_confirmation:
+        return False
+    if not (settings.enable_calendar or settings.enable_tasks):
         return False
     text = message.strip().lower()
     return text == "undo" or text.startswith("undo ")
@@ -133,6 +137,13 @@ def run_upkeep(
             update_calendar(settings, message, reply, thread_id)
         except Exception:
             logger.exception("calendar upkeep failed for thread %s", thread_id)
+
+    # Tasks: a reconciling extraction that adds/completes/updates/removes to-dos.
+    if settings.enable_tasks and settings.enable_auto_tasks:
+        try:
+            update_tasks(settings, message, reply, thread_id)
+        except Exception:
+            logger.exception("task upkeep failed for thread %s", thread_id)
 
     # Periodic consolidation ("sleep"); the counter persists across restarts.
     try:
