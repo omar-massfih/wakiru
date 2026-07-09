@@ -17,10 +17,11 @@ Telegram bot  /
 
 - **`codex_runner.py`** — thin subprocess wrapper around `codex exec` (captures the final message).
 - **`llm.py`** — the **provider abstraction**. `build_model()` selects a LangChain `BaseChatModel`
-  by `LLM_PROVIDER`. `codex` is wired (`CodexChatModel` over the runner); `openai` and `anthropic`
-  are ready-to-fill stubs (each stub documents the exact steps to enable it).
-- **`agent.py`** — the LangGraph graph: `recall -> codex -> summarize`, with a SQLite
-  checkpointer for conversation history.
+  by `LLM_PROVIDER`. `codex` (default), `openai`, and `anthropic` are all wired; the API-backed
+  providers read `LLM_API_KEY` / `LLM_MODEL` (and `LLM_BASE_URL` for openai).
+- **`agent.py`** — the LangGraph graph: `START -> recall -> agenda -> codex -> END`, with a SQLite
+  checkpointer for conversation history. Working-memory summarization runs off the reply path
+  (in the background), not as a graph node.
 - **`chat.py`** — the channel-agnostic core: one turn of conversation plus its
   post-reply upkeep (memory, summary folding, calendar, consolidation), shared by
   every channel so they all behave identically.

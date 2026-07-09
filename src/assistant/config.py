@@ -18,9 +18,21 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     # --- LLM provider selection ---
-    # Which backend the agent's model uses. Wired: "codex".
-    # Future: "openai", "anthropic" (see llm.py stubs).
+    # Which backend the agent's model uses. Wired: "codex", "openai", "anthropic".
     llm_provider: str = "codex"
+
+    # --- API-backed providers (openai / anthropic) ---
+    # Only used when llm_provider is "openai" or "anthropic"; the codex provider
+    # authenticates through the Codex CLI itself and ignores these.
+    # API key for the selected provider (OPENAI_API_KEY / ANTHROPIC_API_KEY also
+    # work via the provider SDKs, but setting it here keeps config in one place).
+    llm_api_key: str | None = None
+    # Optional custom base URL — e.g. an OpenAI-compatible endpoint or a proxy.
+    # Ignored by the anthropic provider.
+    llm_base_url: str | None = None
+    # Model name for the selected provider. None => a sensible per-provider
+    # default (see llm.py: gpt-4o for openai, claude-sonnet-4-5 for anthropic).
+    llm_model: str | None = None
 
     # --- Codex CLI ---
     codex_bin: str = "codex"
