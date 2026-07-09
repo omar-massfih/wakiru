@@ -33,7 +33,11 @@ Telegram bot  /
   reconciling write path (add/complete/update/remove), a due-task reminder path, and an undo
   ledger — mirroring the `calendar/` package for work with no fixed time and a done state.
 - **`telegram.py`** — the Telegram channel (see below): a stdlib-only long-polling
-  bridge started alongside the server when a bot token is configured.
+  bridge started alongside the server when a bot token is configured. Free text goes to
+  the model; the slash commands `/help`, `/tasks`, `/calendar`, `/memory`, and `/reset`
+  are answered locally (no model call), and `"undo"` reverts the last calendar/task write.
+- **`cli.py`** — a terminal REPL over the same `chat.py` seam (`assistant-cli`), for chatting
+  without the HTTP server or a bot token; it uses one stable thread so history persists.
 
 Codex is itself an autonomous agent (its own model, tools, and sandbox), so tool-use happens
 inside Codex rather than as LangChain tools. Live web search is one such tool: set

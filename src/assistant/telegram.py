@@ -377,6 +377,106 @@ def get_updates(token: str, offset: int | None) -> list[dict]:
     return result if isinstance(result, list) else []
 
 
+# Slash commands the bot advertises (via setMyCommands) and handles locally —
+# free text and the "undo" keyword still flow through the model as before.
+_COMMANDS = [
+    ("start", "Show what I can do"),
+    ("help", "Show what I can do"),
+    ("reset", "Forget this conversation's history"),
+    ("memory", "Show what I remember about you"),
+    ("tasks", "Show your open to-do list"),
+    ("calendar", "Show upcoming events"),
+]
+
+_HELP_TEXT = (
+    "I'm your personal assistant. Just talk to me in plain language — I remember "
+    "what matters, track your calendar and to-dos, and can remind you about them.\n\n"
+    "Commands:\n"
+    "/help — this message\n"
+    "/tasks — your open to-do list\n"
+    "/calendar — upcoming events\n"
+    "/memory — what I remember about you\n"
+    "/reset — forget this conversation's history\n\n"
+    'Tip: reply "undo" right after I change your calendar or tasks to revert it.'
+)
+
+
+def set_commands(token: str) -> None:
+    """Register the slash-command menu with Telegram (best-effort, once at startup)."""
+    try:
+        _call(
+            token,
+            "setMyCommands",
+            {"commands": [{"command": c, "description": d} for c, d in _COMMANDS]},
+        )
+    except Exception:
+        logger.warning("setMyCommands failed; the command menu may be stale", exc_info=True)
+
+
+def _reset_thread(agent: CompiledStateGraph, thread_id: str) -> None:
+    """Clear one thread's checkpointed conversation history and rolling summary."""
+    from langchain_core.messages import RemoveMessage
+
+    config = {"configurable": {"thread_id": thread_id}}
+    snapshot = agent.get_state(config)
+    messages = snapshot.values.get("messages", [])
+    removals = [RemoveMessage(id=m.id) for m in messages if m.id is not None]
+    # as_node="codex" matches the node the graph's message-producing edge runs on,
+    # mirroring how maybe_summarize applies its trims.
+    agent.update_state(config, {"messages": removals, "summary": ""}, as_node="codex")
+
+
+def _command_reply(agent: CompiledStateGraph, settings: Settings, command: str, thread_id: str) -> str:
+    """Produce the reply text for a slash command (no model call, no upkeep)."""
+    if command in ("start", "help"):
+        return _HELP_TEXT
+    if command == "reset":
+        try:
+            _reset_thread(agent, thread_id)
+        except Exception:
+            logger.exception("reset failed for thread %s", thread_id)
+            return "Couldn't reset — try again."
+        return "Done — I've forgotten this conversation's history."
+    if command == "tasks":
+        from .tasks import tasks_context
+
+        return tasks_context(settings)
+    if command == "calendar":
+        from .calendar import agenda_context
+
+        return agenda_context(settings)
+    if command == "memory":
+        from .memory import store as memory_store
+
+        notes = memory_store.list_notes(settings)
+        if not notes:
+            return "I don't have any durable memories yet."
+        by_kind: dict[str, int] = {}
+        for note in notes:
+            by_kind[note.kind] = by_kind.get(note.kind, 0) + 1
+        counts = ", ".join(f"{k}: {v}" for k, v in sorted(by_kind.items()))
+        lines = [f"I'm holding {len(notes)} memories ({counts}).", ""]
+        lines += [f"- {n.description or n.name}" for n in notes[:20]]
+        if len(notes) > 20:
+            lines.append(f"…and {len(notes) - 20} more.")
+        return "\n".join(lines)
+    return _HELP_TEXT  # unknown command → show help
+
+
+def _dispatch_command(
+    agent: CompiledStateGraph, settings: Settings, token: str, chat_id: int, text: str, thread_id: str
+) -> bool:
+    """Handle a ``/command`` message; return True if it was a command (so the
+    caller skips the model turn and its upkeep). Non-slash text returns False."""
+    if not text.startswith("/"):
+        return False
+    # "/tasks@MyBot arg" -> "tasks"; commands take no args here.
+    command = text[1:].split()[0].split("@")[0].lower() if len(text) > 1 else ""
+    reply = _command_reply(agent, settings, command, thread_id)
+    send_message(token, chat_id, reply)
+    return True
+
+
 def handle_update(
     agent: CompiledStateGraph, settings: Settings, update: dict
 ) -> Callable[[], None] | None:
@@ -406,13 +506,19 @@ def handle_update(
         _handle_pairing(settings, token, chat_id, text)
         return None
 
+    thread_id = f"telegram:{chat_id}"
+
+    # Slash commands are answered locally (help/reset/tasks/calendar/memory) with
+    # no model call and no upkeep — they never reach run_chat.
+    if _dispatch_command(agent, settings, token, chat_id, text, thread_id):
+        return None
+
     # Show "typing…" while the model thinks (best-effort; it expires after ~5s).
     try:
         _call(token, "sendChatAction", {"chat_id": chat_id, "action": "typing"})
     except (urllib.error.URLError, OSError, RuntimeError):
         pass
 
-    thread_id = f"telegram:{chat_id}"
     try:
         reply = run_chat(agent, text, thread_id, settings=settings)
     except CodexError as exc:
@@ -439,6 +545,7 @@ async def poll_loop(agent: CompiledStateGraph, settings: Settings) -> None:
     offset: int | None = None
     # Strong refs so fire-and-forget upkeep tasks are never garbage-collected.
     upkeep_tasks: set[asyncio.Task] = set()
+    await asyncio.to_thread(set_commands, token)  # advertise the /command menu
     logger.info("telegram channel started (long polling)")
     while True:
         try:

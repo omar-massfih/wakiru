@@ -395,3 +395,55 @@ def test_poll_loop_survives_poison_updates_and_outages(tmp_path, monkeypatch) ->
     # First poll starts blank; the poison update advanced the offset to 2 and
     # the good one to 3 (never redelivered); the outage retried, not died.
     assert offsets == [None, 3, 3]
+
+
+# --- slash commands -------------------------------------------------------- #
+
+
+def test_help_command_answers_without_model_or_upkeep(tmp_path, calls, monkeypatch) -> None:
+    settings = _settings(tmp_path, telegram_allowed_chat_ids=[7])
+    monkeypatch.setattr(
+        telegram, "run_chat", lambda *a, **k: pytest.fail("commands must not call the model")
+    )
+    upkeep = telegram.handle_update(None, settings, _update(chat_id=7, text="/help"))
+    assert upkeep is None  # commands never schedule upkeep
+    sends = _sends(calls)
+    assert len(sends) == 1
+    assert "personal assistant" in sends[0]["text"].lower()
+
+
+def test_tasks_command_lists_open_tasks(tmp_path, calls, monkeypatch) -> None:
+    settings = _settings(tmp_path, telegram_allowed_chat_ids=[7], timezone="Europe/Oslo")
+    from assistant.tasks import store as tstore
+
+    tstore.create_task(settings, "call plumber")
+    monkeypatch.setattr(telegram, "run_chat", lambda *a, **k: pytest.fail("no model"))
+    telegram.handle_update(None, settings, _update(chat_id=7, text="/tasks"))
+    assert "call plumber" in _sends(calls)[0]["text"]
+
+
+def test_unknown_command_shows_help(tmp_path, calls, monkeypatch) -> None:
+    settings = _settings(tmp_path, telegram_allowed_chat_ids=[7])
+    monkeypatch.setattr(telegram, "run_chat", lambda *a, **k: pytest.fail("no model"))
+    telegram.handle_update(None, settings, _update(chat_id=7, text="/wat"))
+    assert "Commands:" in _sends(calls)[0]["text"]
+
+
+def test_command_with_botname_suffix_is_stripped(tmp_path, calls, monkeypatch) -> None:
+    settings = _settings(tmp_path, telegram_allowed_chat_ids=[7])
+    monkeypatch.setattr(telegram, "run_chat", lambda *a, **k: pytest.fail("no model"))
+    # In groups Telegram appends @BotName; it must still resolve to /help.
+    telegram.handle_update(None, settings, _update(chat_id=7, text="/help@MyAssistantBot"))
+    assert "personal assistant" in _sends(calls)[0]["text"].lower()
+
+
+def test_reset_command_clears_history(tmp_path, calls, monkeypatch) -> None:
+    settings = _settings(tmp_path, telegram_allowed_chat_ids=[7])
+    monkeypatch.setattr(telegram, "run_chat", lambda *a, **k: pytest.fail("no model"))
+    reset_calls: list[str] = []
+    monkeypatch.setattr(
+        telegram, "_reset_thread", lambda agent, thread_id: reset_calls.append(thread_id)
+    )
+    telegram.handle_update(None, settings, _update(chat_id=7, text="/reset"))
+    assert reset_calls == ["telegram:7"]
+    assert "forgotten" in _sends(calls)[0]["text"].lower()
