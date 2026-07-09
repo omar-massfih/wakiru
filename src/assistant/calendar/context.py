@@ -18,6 +18,11 @@ from . import recurrence, store
 from .store import Event
 
 
+# Assumed duration for an event that has no explicit end, when reasoning about
+# overlaps / availability. An hour is a sensible default appointment length.
+_DEFAULT_EVENT_MINUTES = 60
+
+
 def resolve_tz(settings: Settings) -> tzinfo:
     """The timezone the assistant reasons in (configured, else system-local)."""
     if settings.timezone:
@@ -97,6 +102,50 @@ def render_events(settings: Settings, events: list[Event], with_ids: bool = Fals
     if not events:
         return "(no upcoming events)"
     return "\n".join(_render_event(e, settings, with_ids) for e in events)
+
+
+def event_interval(settings: Settings, event: Event) -> tuple[datetime, datetime] | None:
+    """The ``[start, end)`` instants an event occupies, or ``None`` if its start
+    is unparseable. An event with no (or a non-positive) end is treated as lasting
+    :data:`_DEFAULT_EVENT_MINUTES`."""
+    start = store.parse_dt(event.start)
+    if start is None:
+        return None
+    end = store.parse_dt(event.end)
+    if end is None or end <= start:
+        end = start + timedelta(minutes=_DEFAULT_EVENT_MINUTES)
+    return start, end
+
+
+def busy_events(settings: Settings, start: datetime, end: datetime) -> list[Event]:
+    """Events (expanding recurring series into occurrences) that overlap the
+    half-open interval ``[start, end)``, soonest first — the "busy" set for an
+    availability question like "am I free Thursday 2–4pm?"."""
+    # Pad the scan window so an event starting just before `start` but running
+    # into it (or a recurring occurrence near the edge) is still considered.
+    pad = timedelta(days=1)
+    busy: list[Event] = []
+    for event in recurrence.occurrences_in(settings, start - pad, end + pad):
+        interval = event_interval(settings, event)
+        if interval is None:
+            continue
+        e_start, e_end = interval
+        if e_start < end and start < e_end:  # half-open overlap
+            busy.append(event)
+    return busy
+
+
+def overlapping_events(
+    settings: Settings, event: Event, ignore_id: str | None = None
+) -> list[Event]:
+    """Existing events that overlap ``event``'s time span. ``ignore_id`` excludes
+    a given event id (and all its recurring occurrences) — pass the event's own id
+    when checking an already-stored event so it doesn't conflict with itself."""
+    interval = event_interval(settings, event)
+    if interval is None:
+        return []
+    start, end = interval
+    return [e for e in busy_events(settings, start, end) if e.id != ignore_id]
 
 
 def agenda_context(settings: Settings | None = None) -> str:

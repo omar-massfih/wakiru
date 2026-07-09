@@ -26,7 +26,14 @@ from .. import notify
 from ..codex_runner import run_codex
 from ..config import Settings, get_settings
 from . import recurrence, store, undo
-from .context import format_when, now, render_events, resolve_tz, writer_view
+from .context import (
+    format_when,
+    now,
+    overlapping_events,
+    render_events,
+    resolve_tz,
+    writer_view,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -111,6 +118,25 @@ def _target_id(settings: Settings, op: dict) -> str | None:
     return matches[0].id if matches else None
 
 
+def _conflict_note(settings: Settings, event: store.Event) -> str:
+    """A `` ⚠ conflicts with <titles>`` suffix if ``event`` overlaps others, else ''.
+
+    Non-blocking — a booking is never refused, only flagged, and the note flows
+    into the write-confirmation message the user already receives. Best-effort:
+    any failure computing overlaps yields no note rather than breaking the write.
+    """
+    try:
+        conflicts = overlapping_events(settings, event, ignore_id=event.id)
+    except Exception:
+        logger.exception("overlap check failed for %s", event.id)
+        return ""
+    if not conflicts:
+        return ""
+    # Dedupe titles (a recurring series contributes several same-title occurrences).
+    titles = ", ".join(dict.fromkeys(c.title for c in conflicts))
+    return f" ⚠ conflicts with {titles}"
+
+
 def _log_write(
     settings: Settings,
     thread_id: str,
@@ -145,6 +171,7 @@ def apply_op(
         )
         suffix = f" ({recurrence.humanize_rrule(event.rrule)})" if event.rrule else ""
         summary = f"created: {event.title} @ {format_when(settings, event.start)}{suffix}"
+        summary += _conflict_note(settings, event)
         _log_write(settings, thread_id, batch_id, event.id, "create", summary, None)
         return summary
 
@@ -164,6 +191,7 @@ def apply_op(
         if revised is None:
             return None
         summary = f"rescheduled: {revised.title} @ {format_when(settings, revised.start)}"
+        summary += _conflict_note(settings, revised)
         _log_write(settings, thread_id, batch_id, target, "reschedule", summary, before)
         return summary
 

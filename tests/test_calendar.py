@@ -438,3 +438,56 @@ def test_destructive_op_skips_ambiguous_title(settings) -> None:
     # With a single match left, fuzzy targeting works again.
     assert ops.apply_op(settings, {"op": "cancel", "title": "standup"}) is not None
     assert store.list_events(settings) == []
+
+
+# --- availability / conflict awareness ------------------------------------ #
+
+
+def test_busy_events_finds_overlap(settings) -> None:
+    start = _iso_in(settings, days=1)
+    end = (store.parse_dt(start) + timedelta(hours=1)).isoformat()
+    store.create_event(settings, title="Meeting", start=start, end=end)
+    # A window overlapping the meeting's second half is busy.
+    q_start = store.parse_dt(start) + timedelta(minutes=30)
+    q_end = q_start + timedelta(hours=1)
+    busy = context.busy_events(settings, q_start, q_end)
+    assert [e.title for e in busy] == ["Meeting"]
+
+
+def test_busy_events_free_slot_is_empty(settings) -> None:
+    start = _iso_in(settings, days=1)
+    store.create_event(settings, title="Meeting", start=start)  # default 60 min
+    # A window starting right after the default hour is free (half-open).
+    q_start = store.parse_dt(start) + timedelta(hours=1)
+    q_end = q_start + timedelta(hours=1)
+    assert context.busy_events(settings, q_start, q_end) == []
+
+
+def test_overlapping_events_excludes_self(settings) -> None:
+    start = _iso_in(settings, days=1)
+    event = store.create_event(settings, title="Solo", start=start)
+    # An event never conflicts with itself once ignore_id is its own id.
+    assert context.overlapping_events(settings, event, ignore_id=event.id) == []
+
+
+def test_create_op_warns_on_conflict(settings, monkeypatch) -> None:
+    start = _iso_in(settings, days=1)
+    store.create_event(settings, title="Standup", start=start, end=(
+        store.parse_dt(start) + timedelta(hours=1)).isoformat())
+    # Booking an overlapping event surfaces a non-blocking conflict warning.
+    summary = ops.apply_op(
+        settings,
+        {"op": "create", "title": "Interview", "start": start},
+    )
+    assert summary is not None
+    assert "⚠ conflicts with Standup" in summary
+    # The event is still created — the warning does not block the write.
+    assert {e.title for e in store.list_events(settings)} == {"Standup", "Interview"}
+
+
+def test_create_op_no_warning_when_free(settings) -> None:
+    start = _iso_in(settings, days=1)
+    later = _iso_in(settings, days=2)
+    store.create_event(settings, title="Standup", start=start)
+    summary = ops.apply_op(settings, {"op": "create", "title": "Solo", "start": later})
+    assert summary is not None and "conflicts" not in summary

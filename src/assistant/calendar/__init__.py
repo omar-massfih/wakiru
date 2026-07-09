@@ -16,7 +16,14 @@ Events live in a SQLite store (:mod:`.store`) under the memory directory.
 from __future__ import annotations
 
 from . import store
-from .context import agenda_context, now, resolve_tz, upcoming_events
+from .context import (
+    agenda_context,
+    busy_events,
+    now,
+    overlapping_events,
+    resolve_tz,
+    upcoming_events,
+)
 from .ops import update_calendar
 from .reminders import due_reminders, run_reminders
 from .store import Event
@@ -26,7 +33,9 @@ __all__ = [
     "Event",
     "store",
     "agenda_context",
+    "busy_events",
     "now",
+    "overlapping_events",
     "resolve_tz",
     "upcoming_events",
     "update_calendar",
