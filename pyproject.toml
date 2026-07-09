@@ -32,6 +32,7 @@ dev = [
 
 [project.scripts]
 assistant-cli = "assistant.cli:main"
+assistant-import-local = "assistant.import_local:main"
 
 [build-system]
 requires = ["hatchling"]

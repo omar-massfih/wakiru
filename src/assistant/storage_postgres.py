@@ -60,6 +60,13 @@ def _rows(cur) -> list[dict]:
     return [dict(zip(cols, row)) for row in cur.fetchall()]
 
 
+def _executemany(conn, sql: str, params: list) -> None:
+    if not params:
+        return
+    with conn.cursor() as cur:
+        cur.executemany(sql, params)
+
+
 def ensure_memory_schema(settings: Settings) -> None:
     with connect(settings) as conn:
         conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
@@ -448,7 +455,8 @@ def bump_recall(settings: Settings, names: list[str]) -> None:
     today = datetime.now(timezone.utc).date().isoformat()
     ensure_memory_schema(settings)
     with connect(settings) as conn:
-        conn.executemany(
+        _executemany(
+            conn,
             "UPDATE assistant_memory_index "
             "SET recall_count = recall_count + 1, last_recalled = %s "
             "WHERE name = %s",
@@ -1061,7 +1069,7 @@ def mark_calendar_writes_undone(settings: Settings, ids: list[int], undone_at: s
         return
     ensure_calendar_schema(settings)
     with connect(settings) as conn:
-        conn.executemany("UPDATE assistant_calendar_write_log SET undone_at = %s WHERE id = %s", [(undone_at, i) for i in ids])
+        _executemany(conn, "UPDATE assistant_calendar_write_log SET undone_at = %s WHERE id = %s", [(undone_at, i) for i in ids])
 
 
 def record_task_write(settings: Settings, thread_id: str, batch_id: str, task_id: str, op: str, summary: str, before_json: str | None, applied_at: str) -> None:
@@ -1086,7 +1094,7 @@ def mark_task_writes_undone(settings: Settings, ids: list[int], undone_at: str) 
         return
     ensure_tasks_schema(settings)
     with connect(settings) as conn:
-        conn.executemany("UPDATE assistant_task_write_log SET undone_at = %s WHERE id = %s", [(undone_at, i) for i in ids])
+        _executemany(conn, "UPDATE assistant_task_write_log SET undone_at = %s WHERE id = %s", [(undone_at, i) for i in ids])
 
 
 def claim_calendar_reminders(settings: Settings, reminders: list[dict], fired_at: str, current) -> list[dict]:
@@ -1104,7 +1112,8 @@ def claim_calendar_reminders(settings: Settings, reminders: list[dict], fired_at
             for r in rows
             if (fired := calendar_store.parse_dt(str(r["fired_at"]))) is None or fired < cutoff
         ]
-        conn.executemany(
+        _executemany(
+            conn,
             "DELETE FROM assistant_calendar_reminders_fired WHERE event_id = %s AND event_start = %s AND lead_minutes = %s",
             stale,
         )
@@ -1136,7 +1145,8 @@ def claim_task_reminders(settings: Settings, reminders: list[dict], fired_at: st
             for r in rows
             if (fired := parse_dt(str(r["fired_at"]))) is None or fired < cutoff
         ]
-        conn.executemany(
+        _executemany(
+            conn,
             "DELETE FROM assistant_task_reminders_fired WHERE task_id = %s AND due = %s AND lead_minutes = %s",
             stale,
         )
