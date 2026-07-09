@@ -83,9 +83,21 @@ def test_build_model_unknown_provider_raises() -> None:
         build_model(Settings(llm_provider="does-not-exist"))
 
 
-def test_stub_providers_raise_not_implemented() -> None:
+def test_api_providers_build_with_key() -> None:
+    # ChatOpenAI / ChatAnthropic are constructed (no network); assert the
+    # selected model and key flow through, and the default model applies.
+    openai = build_model(Settings(llm_provider="openai", llm_api_key="sk-test"))
+    assert openai.model_name == "gpt-4o"
+
+    anthropic = build_model(
+        Settings(llm_provider="anthropic", llm_api_key="sk-test", llm_model="claude-sonnet-5")
+    )
+    assert anthropic.model == "claude-sonnet-5"
+
+
+def test_api_providers_require_key() -> None:
     for provider in ("openai", "anthropic"):
-        with pytest.raises(NotImplementedError):
+        with pytest.raises(ValueError, match="requires LLM_API_KEY"):
             build_model(Settings(llm_provider=provider))
 
 

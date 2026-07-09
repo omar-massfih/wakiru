@@ -5,11 +5,13 @@ graph, the API) is provider-agnostic. ``build_model`` selects one via
 ``settings.llm_provider``.
 
 Wired today:
-  - ``codex``  — drives the Codex CLI (auth via ``codex login``; no API key).
-
-Ready to add (stubs below say exactly what to fill in):
+  - ``codex``     — drives the Codex CLI (auth via ``codex login``; no API key).
   - ``openai``    — hosted OpenAI / any OpenAI-compatible endpoint via ChatOpenAI.
   - ``anthropic`` — Claude via ChatAnthropic.
+
+The API-backed providers read their key/model/base-url from ``Settings``
+(``llm_api_key`` / ``llm_model`` / ``llm_base_url``); the codex provider ignores
+those and authenticates through the Codex CLI itself.
 """
 
 from __future__ import annotations
@@ -88,33 +90,47 @@ def _build_codex(settings: Settings) -> BaseChatModel:
 
 
 # --------------------------------------------------------------------------- #
-# Future API-backed providers (stubs)
+# API-backed providers
 # --------------------------------------------------------------------------- #
+
+# Per-provider default model when settings.llm_model is unset.
+_DEFAULT_OPENAI_MODEL = "gpt-4o"
+_DEFAULT_ANTHROPIC_MODEL = "claude-opus-4-8"
+
+
+def _require_api_key(settings: Settings, provider: str) -> str:
+    key = settings.llm_api_key
+    if not key:
+        raise ValueError(
+            f"LLM_PROVIDER={provider!r} requires LLM_API_KEY to be set "
+            "(the API key for the provider)."
+        )
+    return key
 
 
 def _build_openai(settings: Settings) -> BaseChatModel:
-    # To enable:
-    #   1) uv add langchain-openai
-    #   2) add settings fields (e.g. llm_api_key, llm_base_url, llm_model)
-    #   3) replace the body below with:
-    #        from langchain_openai import ChatOpenAI
-    #        return ChatOpenAI(model=settings.llm_model, api_key=settings.llm_api_key,
-    #                          base_url=settings.llm_base_url, temperature=0)
-    raise NotImplementedError(
-        "openai provider is not wired yet — see the instructions in llm.py:_build_openai."
+    from langchain_openai import ChatOpenAI
+
+    return ChatOpenAI(
+        model=settings.llm_model or _DEFAULT_OPENAI_MODEL,
+        api_key=_require_api_key(settings, "openai"),
+        # None => the SDK's default endpoint; set for an OpenAI-compatible proxy.
+        base_url=settings.llm_base_url,
+        temperature=0,
+        timeout=settings.codex_timeout,
     )
 
 
 def _build_anthropic(settings: Settings) -> BaseChatModel:
-    # To enable:
-    #   1) uv add langchain-anthropic
-    #   2) add settings fields (e.g. llm_api_key, llm_model)
-    #   3) replace the body below with:
-    #        from langchain_anthropic import ChatAnthropic
-    #        return ChatAnthropic(model=settings.llm_model, api_key=settings.llm_api_key,
-    #                             max_tokens=4096)
-    raise NotImplementedError(
-        "anthropic provider is not wired yet — see the instructions in llm.py:_build_anthropic."
+    from langchain_anthropic import ChatAnthropic
+
+    # No temperature: the current Claude models (Opus 4.8 etc.) reject non-default
+    # sampling params, and ChatAnthropic omits it unless set.
+    return ChatAnthropic(
+        model=settings.llm_model or _DEFAULT_ANTHROPIC_MODEL,
+        api_key=_require_api_key(settings, "anthropic"),
+        max_tokens=4096,
+        timeout=settings.codex_timeout,
     )
 
 

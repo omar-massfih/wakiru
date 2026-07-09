@@ -208,16 +208,25 @@ Set `API_TOKEN` to require `Authorization: Bearer <token>` on every endpoint exc
 default loopback bind, but a must before exposing it to a network (the Docker
 image binds `0.0.0.0`).
 
-## Adding an API-backed provider later
+## Using an API-backed provider
 
-`LLM_PROVIDER=openai` or `anthropic` are registered but stubbed. To enable one, open the
-matching `_build_*` function in `llm.py` and follow the inline steps (add the LangChain
-integration package, add config fields, return the chat model). No other file changes.
+Set `LLM_PROVIDER=openai` or `anthropic` and `LLM_API_KEY=<your key>`. Optionally
+override `LLM_MODEL` (defaults: `gpt-4o` for openai, `claude-opus-4-8` for anthropic)
+and, for openai-compatible endpoints, `LLM_BASE_URL`. Unlike the default `codex`
+provider, these support token streaming (see below).
+
+## Streaming
+
+`POST /chat/stream` returns the reply as Server-Sent Events: `data: <text>` frames
+as the model produces the reply, a final `event: done` frame with the `thread_id`,
+and `event: error` if the model fails mid-stream. Post-reply upkeep runs once, after
+the stream closes, exactly as `POST /chat` does. The `codex` provider can't stream
+token-by-token, so it emits the whole reply as a single `data:` frame — the endpoint
+works regardless of backend.
 
 ## Roadmap / not yet wired
 
-- OpenAI / Claude providers at the `llm.py` stubs.
-- Additional tools, routing nodes, and streaming.
+- Additional tools and routing nodes.
 
 > **Note on the embedding model:** the default `EMBEDDING_MODEL` is
 > `intfloat/multilingual-e5-large` (1024-dim, strong Norwegian recall). Its first use

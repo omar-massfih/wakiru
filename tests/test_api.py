@@ -93,3 +93,30 @@ def test_memory_consolidate_shape_on_empty_store(client) -> None:
     resp = client(None).post("/memory/consolidate")
     assert resp.status_code == 200
     assert isinstance(resp.json(), dict)
+
+
+# --- streaming endpoint --------------------------------------------------- #
+
+
+def test_chat_stream_emits_sse_frames_and_done(client, monkeypatch) -> None:
+    import assistant.api as api
+
+    async def fake_stream(agent, message, thread_id, settings=None):
+        for text in ("Hel", "lo"):
+            yield text
+
+    # Avoid building the real graph / making Codex calls; the post-stream upkeep
+    # is exercised elsewhere (test_chat.py) and would load the embedding model.
+    monkeypatch.setattr(api, "run_chat_stream", fake_stream)
+    monkeypatch.setattr(api, "_agent", lambda: object())
+    monkeypatch.setattr(api, "run_upkeep", lambda *a, **k: None)
+
+    c = client(None)
+    resp = c.post("/chat/stream", json={"message": "hi", "thread_id": "t1"})
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/event-stream")
+    body = resp.text
+    assert "data: Hel\n\n" in body
+    assert "data: lo\n\n" in body
+    # Terminal frame carries the thread id.
+    assert "event: done\ndata: t1\n\n" in body

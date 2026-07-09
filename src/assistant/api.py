@@ -12,13 +12,14 @@ from datetime import datetime
 from functools import lru_cache
 
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from . import telegram
 from .agent import build_agent
 from .calendar import run_reminders
 from .calendar.context import resolve_tz, upcoming_events
-from .chat import run_chat, run_upkeep
+from .chat import run_chat, run_chat_stream, run_upkeep
 from .codex_runner import CodexError
 from .config import get_settings
 from .memory import consolidate_memory, store
@@ -143,6 +144,41 @@ def chat(req: ChatRequest, background: BackgroundTasks) -> ChatResponse:
     background.add_task(run_upkeep, _agent(), get_settings(), req.message, reply, thread_id)
 
     return ChatResponse(reply=reply, thread_id=thread_id)
+
+
+@app.post("/chat/stream", dependencies=[Depends(require_token)])
+async def chat_stream(req: ChatRequest, background: BackgroundTasks) -> StreamingResponse:
+    """Stream a reply as Server-Sent Events, then run upkeep once, off-path.
+
+    Emits ``data: <text>`` frames as the model produces the reply (a single
+    frame for the Codex provider, which can't stream token-by-token), a final
+    ``event: done`` frame carrying the ``thread_id``, and ``event: error`` if the
+    model fails mid-stream. Post-reply maintenance runs after the stream closes,
+    exactly as the buffered ``/chat`` endpoint does.
+    """
+    thread_id = req.thread_id or str(uuid.uuid4())
+
+    async def event_stream():
+        parts: list[str] = []
+        try:
+            async for chunk in run_chat_stream(
+                _agent(), req.message, thread_id, settings=get_settings()
+            ):
+                parts.append(chunk)
+                yield f"data: {chunk}\n\n"
+        except CodexError as exc:
+            logger.error("streaming chat turn failed: %s", exc)
+            yield f"event: error\ndata: {exc}\n\n"
+            return
+        yield f"event: done\ndata: {thread_id}\n\n"
+        # Upkeep needs the full reply; run it off the stream so it never delays
+        # the client, mirroring the buffered /chat path.
+        reply = "".join(parts)
+        background.add_task(
+            run_upkeep, _agent(), get_settings(), req.message, reply, thread_id
+        )
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
 @app.get("/memory", dependencies=[Depends(require_token)])

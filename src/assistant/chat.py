@@ -10,8 +10,9 @@ identical and the channels themselves thin.
 from __future__ import annotations
 
 import logging
+from collections.abc import AsyncIterator
 
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessageChunk, HumanMessage
 from langgraph.graph.state import CompiledStateGraph
 
 from .agent import maybe_summarize
@@ -54,6 +55,45 @@ def run_chat(
     result = agent.invoke({"messages": [HumanMessage(content=message)]}, config=config)
     reply = result["messages"][-1].content
     return reply if isinstance(reply, str) else str(reply)
+
+
+async def run_chat_stream(
+    agent: CompiledStateGraph,
+    message: str,
+    thread_id: str,
+    settings: Settings | None = None,
+) -> AsyncIterator[str]:
+    """Run one turn on ``thread_id``, yielding the reply incrementally.
+
+    Yields text chunks as the model produces them (via ``agent.astream`` in
+    ``"messages"`` mode). Providers that can't stream token-by-token — the Codex
+    CLI, whose subprocess only returns a finished message — still work: LangGraph
+    emits the whole reply as a single chunk, so a consumer sees one yield.
+
+    An "undo" command short-circuits exactly like :func:`run_chat` and yields the
+    deterministic ledger result as a single chunk. The caller is responsible for
+    running :func:`run_upkeep` once the stream is exhausted.
+
+    Raises :class:`assistant.codex_runner.CodexError` when the model fails.
+    """
+    settings = settings or get_settings()
+    if _is_undo_command(settings, message):
+        yield undo_latest(settings, thread_id, settings.write_undo_window_minutes)
+        return
+
+    config = {"configurable": {"thread_id": thread_id}}
+    async for chunk, _meta in agent.astream(
+        {"messages": [HumanMessage(content=message)]},
+        config=config,
+        stream_mode="messages",
+    ):
+        # Only the codex node's model output is user-facing; other nodes (recall,
+        # agenda) don't emit message chunks in this mode. Skip non-AI chunks and
+        # empty deltas so the consumer sees only reply text.
+        if isinstance(chunk, AIMessageChunk):
+            text = chunk.content if isinstance(chunk.content, str) else str(chunk.content)
+            if text:
+                yield text
 
 
 def run_upkeep(

@@ -10,6 +10,7 @@ from __future__ import annotations
 from datetime import timedelta
 
 import pytest
+from langchain_core.messages import AIMessageChunk
 
 from assistant import chat
 from assistant.calendar import context, ops, store
@@ -90,6 +91,57 @@ def test_run_chat_undo_disabled_by_config_falls_through_to_agent(tmp_path) -> No
     reply = chat.run_chat(agent, "undo", THREAD, settings=settings)
     assert reply == "sure, undoing what?"
     assert agent.invoked
+
+
+# --- run_chat_stream -------------------------------------------------------- #
+
+
+class _StreamingAgent:
+    """An agent stub whose ``astream`` yields message chunks in "messages" mode."""
+
+    def __init__(self, chunks: list[str]) -> None:
+        self.chunks = chunks
+        self.streamed = False
+
+    async def astream(self, _input, config=None, stream_mode=None):
+        assert stream_mode == "messages"
+        self.streamed = True
+        for text in self.chunks:
+            yield AIMessageChunk(content=text), {"langgraph_node": "codex"}
+
+
+def _collect(aiter) -> list[str]:
+    # No async pytest plugin here; drive the async generator via asyncio.run,
+    # matching test_agent.py's ainvoke test.
+    import asyncio
+
+    async def _run() -> list[str]:
+        return [chunk async for chunk in aiter]
+
+    return asyncio.run(_run())
+
+
+def test_run_chat_stream_yields_reply_chunks(settings) -> None:
+    agent = _StreamingAgent(["Hel", "lo ", "there"])
+    chunks = _collect(chat.run_chat_stream(agent, "hi", THREAD, settings=settings))
+    assert chunks == ["Hel", "lo ", "there"]
+    assert "".join(chunks) == "Hello there"
+    assert agent.streamed
+
+
+def test_run_chat_stream_skips_empty_chunks(settings) -> None:
+    agent = _StreamingAgent(["", "hi", ""])
+    chunks = _collect(chat.run_chat_stream(agent, "hi", THREAD, settings=settings))
+    assert chunks == ["hi"]
+
+
+def test_run_chat_stream_undo_short_circuits(settings, monkeypatch) -> None:
+    _seed_booking(settings, monkeypatch)
+    agent = _StreamingAgent(["must not stream"])
+    chunks = _collect(chat.run_chat_stream(agent, "undo", THREAD, settings=settings))
+    assert len(chunks) == 1 and chunks[0].startswith("Undone:")
+    assert not agent.streamed  # deterministic undo never touches the model
+    assert store.list_events(settings) == []
 
 
 # --- run_upkeep --------------------------------------------------------------- #
