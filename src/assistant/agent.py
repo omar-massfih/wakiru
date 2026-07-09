@@ -43,6 +43,7 @@ from langgraph.graph.state import CompiledStateGraph
 
 from .calendar import agenda_context
 from .config import Settings, get_settings
+from .docs import docs_context
 from .llm import build_model
 from .memory import index, recall_context
 from .tasks import tasks_context
@@ -161,8 +162,17 @@ def build_agent(settings: Settings | None = None) -> CompiledStateGraph:
 
     def recall(state: BrainState) -> dict:
         query = _latest_human_text(state["messages"])
-        context = recall_context(settings, query)
-        return {"recall": context.content}
+        content = recall_context(settings, query).content
+        # Fold in the most relevant document excerpts on the same channel, so
+        # "what did I write about X" is answered from ingested docs too.
+        try:
+            docs = docs_context(settings, query)
+        except Exception:
+            logger.exception("document recall failed; continuing without it")
+            docs = ""
+        if docs:
+            content = f"{content}\n\n{docs}" if content else docs
+        return {"recall": content}
 
     def agenda(state: BrainState) -> dict:
         """Give the model a clock and today's schedule (ephemeral, per turn)."""

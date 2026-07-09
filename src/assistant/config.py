@@ -165,6 +165,17 @@ class Settings(BaseSettings):
     # Cap on how many upcoming events are injected per turn.
     calendar_max_events: int = 20
 
+    # --- Documents / notes ---
+    # Master switch: ingest documents (chunked + embedded) and surface the most
+    # relevant chunks into the recall context each turn ("what did I write about X").
+    enable_docs: bool = True
+    # How many document chunks to inject per turn.
+    docs_recall_top_k: int = 3
+    # Cosine-similarity floor for a chunk to be injected at all.
+    docs_min_similarity: float = 0.35
+    # Target size (characters) for a document chunk when ingesting.
+    docs_chunk_chars: int = 800
+
     # --- Tasks / to-dos ---
     # Master switch: inject open tasks into each turn (the read path) so the model
     # knows what's outstanding.
@@ -235,6 +246,11 @@ class Settings(BaseSettings):
     def tasks_db_path(self) -> Path:
         """SQLite file holding the to-do list (tasks + their undo ledger)."""
         return self.memory_path / "tasks.db"
+
+    @property
+    def docs_db_path(self) -> Path:
+        """SQLite file holding ingested documents + their chunk vector index."""
+        return self.memory_path / "docs.db"
 
     @property
     def checkpoints_db_path(self) -> Path:

@@ -22,6 +22,8 @@ from .calendar.context import resolve_tz, upcoming_events
 from .chat import run_chat, run_chat_stream, run_upkeep
 from .codex_runner import CodexError
 from .config import get_settings
+from .docs import store as docs_store
+from .docs.summarize import summarize_document
 from .memory import consolidate_memory, store
 from .tasks import store as tasks_store
 from .tasks.reminders import run_task_reminders
@@ -121,6 +123,11 @@ class ChatRequest(BaseModel):
     message: str
     # Continue an existing conversation by passing the id returned earlier.
     thread_id: str | None = None
+
+
+class DocRequest(BaseModel):
+    title: str
+    text: str
 
 
 class ChatResponse(BaseModel):
@@ -226,6 +233,59 @@ def reminders_run() -> dict:
     settings = get_settings()
     fired = run_reminders(settings) + run_task_reminders(settings)
     return {"count": len(fired), "fired": fired}
+
+
+@app.post("/documents", dependencies=[Depends(require_token)])
+def docs_add(req: DocRequest) -> dict:
+    """Ingest a document (chunked + embedded) so it can be recalled and summarized."""
+    doc = docs_store.add_document(get_settings(), req.title, req.text)
+    return {"id": doc.id, "title": doc.title, "chunks": doc.chunks, "added": doc.added}
+
+
+@app.get("/documents", dependencies=[Depends(require_token)])
+def docs_list() -> dict:
+    """List ingested documents (metadata only, most recent first)."""
+    items = docs_store.list_documents(get_settings())
+    return {
+        "total": len(items),
+        "documents": [
+            {"id": d.id, "title": d.title, "chunks": d.chunks, "added": d.added}
+            for d in items
+        ],
+    }
+
+
+@app.get("/documents/search", dependencies=[Depends(require_token)])
+def docs_search(q: str) -> dict:
+    """Return the document chunks most relevant to ``q``."""
+    chunks = docs_store.search_chunks(get_settings(), q)
+    return {
+        "total": len(chunks),
+        "chunks": [
+            {"doc_id": c.doc_id, "doc_title": c.doc_title, "text": c.text, "similarity": c.similarity}
+            for c in chunks
+        ],
+    }
+
+
+@app.post("/documents/{doc_id}/summarize", dependencies=[Depends(require_token)])
+def docs_summarize(doc_id: str) -> dict:
+    """Summarize a stored document with the configured model."""
+    try:
+        summary = summarize_document(get_settings(), doc_id)
+    except CodexError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    if summary is None:
+        raise HTTPException(status_code=404, detail="No such document.")
+    return {"id": doc_id, "summary": summary}
+
+
+@app.delete("/documents/{doc_id}", dependencies=[Depends(require_token)])
+def docs_delete(doc_id: str) -> dict:
+    """Delete a document and its chunks."""
+    if not docs_store.delete_document(get_settings(), doc_id):
+        raise HTTPException(status_code=404, detail="No such document.")
+    return {"id": doc_id, "deleted": True}
 
 
 @app.get("/tasks", dependencies=[Depends(require_token)])

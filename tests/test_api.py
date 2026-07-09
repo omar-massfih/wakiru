@@ -105,6 +105,41 @@ def test_tasks_shape_lists_open_and_all(client) -> None:
     _ = keep
 
 
+def test_docs_ingest_list_search_and_delete(client, monkeypatch) -> None:
+    import math
+    import re
+    import zlib
+
+    def _fake_embed(texts, prefix="", settings=None):
+        vecs = []
+        for text in texts:
+            v = [0.0] * 64
+            for word in re.findall(r"[a-z0-9]+", text.lower()):
+                v[zlib.crc32(word.encode()) % 64] += 1.0
+            norm = math.sqrt(sum(x * x for x in v)) or 1.0
+            vecs.append([x / norm for x in v])
+        return vecs
+
+    # Keep the real sqlite-vec index but skip the 2GB embedding model.
+    monkeypatch.setattr("assistant.memory.embeddings._embed", _fake_embed)
+
+    c = client(None)
+    created = c.post("/documents", json={"title": "Bergen", "text": "The fish market sells salmon."})
+    assert created.status_code == 200
+    doc_id = created.json()["id"]
+    assert created.json()["chunks"] == 1
+
+    listed = c.get("/documents").json()
+    assert listed["total"] == 1 and listed["documents"][0]["title"] == "Bergen"
+
+    found = c.get("/documents/search", params={"q": "salmon fish market"}).json()
+    assert found["total"] >= 1 and found["chunks"][0]["doc_title"] == "Bergen"
+
+    assert c.delete(f"/documents/{doc_id}").json()["deleted"] is True
+    assert c.get("/documents").json()["total"] == 0
+    assert c.delete(f"/documents/{doc_id}").status_code == 404
+
+
 def test_reminders_run_shape_on_empty_store(client) -> None:
     body = client(None).post("/reminders/run").json()
     assert body["count"] == 0

@@ -27,11 +27,15 @@ Telegram bot  /
   every channel so they all behave identically.
 - **`api.py`** — FastAPI app: `GET /health`, `POST /chat`, `POST /chat/stream` (SSE),
   `GET /memory` and `POST /memory/consolidate` for inspecting and consolidating the brain,
-  `GET /calendar`, `GET /tasks` for the to-do list, and `POST /reminders/run` for firing
-  due reminders (events and tasks).
+  `GET /calendar`, `GET /tasks` for the to-do list, `POST|GET /documents` (+ `/documents/search`,
+  `/documents/{id}/summarize`) for documents, and `POST /reminders/run` for firing
+  due reminders (events and tasks). Swagger UI stays at `/docs`.
 - **`tasks/`** — the to-do list: a store, a read path (open tasks injected each turn), a
   reconciling write path (add/complete/update/remove), a due-task reminder path, and an undo
   ledger — mirroring the `calendar/` package for work with no fixed time and a done state.
+- **`docs/`** — ingested documents, chunked and embedded into their own `docs.db` vector
+  index. The most relevant chunks ride in on the `recall` node each turn (so "what did I
+  write about X" works), and a whole document can be summarized on demand.
 - **`telegram.py`** — the Telegram channel (see below): a stdlib-only long-polling
   bridge started alongside the server when a bot token is configured. Free text goes to
   the model; the slash commands `/help`, `/tasks`, `/calendar`, `/memory`, and `/reset`
