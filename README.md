@@ -47,6 +47,11 @@ Telegram bot  /
   are answered locally (no model call), and `"undo"` reverts the last calendar/task write.
 - **`cli.py`** — a terminal REPL over the same `chat.py` seam (`assistant-cli`), for chatting
   without the HTTP server or a bot token; it uses one stable thread so history persists.
+- **`slack.py`** — the Slack channel: an Events API bridge (`POST /slack/events`) authenticated
+  by HMAC signature over the raw body. Only allowlisted user ids are answered — with no pairing
+  handshake, an empty allowlist fails closed. Reminders can fan out to Slack too.
+- **`webui.py`** — a single self-contained HTML page at `GET /ui` that streams replies from
+  `/chat/stream`. No build step, no CDN. Prompts for `API_TOKEN` when one is configured.
 
 Codex is itself an autonomous agent (its own model, tools, and sandbox), so tool-use happens
 inside Codex rather than as LangChain tools. Live web search is one such tool: set

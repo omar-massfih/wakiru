@@ -94,11 +94,29 @@ def deliver_telegram(settings: Settings, reminder: dict) -> bool:
     return delivered
 
 
+def deliver_slack(settings: Settings, reminder: dict, channel: str | None = None) -> bool:
+    """Push a reminder to a Slack channel (``slack_notify_channel`` by default)."""
+    token = settings.slack_bot_token
+    channel = channel or settings.slack_notify_channel
+    if not (token and channel):
+        return False
+    # Imported here, not at module level: see deliver_telegram's note on the cycle.
+    from .slack import post_message
+
+    try:
+        post_message(token, channel, f"⏰ {reminder.get('message', '')}")
+        return True
+    except Exception as exc:
+        logger.warning("slack reminder delivery failed: %s", exc)
+        return False
+
+
 def deliver_reminder(settings: Settings, reminder: dict) -> bool:
     """Fan a reminder out to every configured channel; True if any delivered."""
     sent_webhook = deliver_webhook(settings, reminder)
     sent_telegram = deliver_telegram(settings, reminder)
-    return sent_webhook or sent_telegram
+    sent_slack = deliver_slack(settings, reminder)
+    return sent_webhook or sent_telegram or sent_slack
 
 
 def deliver_write_confirmation(settings: Settings, thread_id: str, message: str) -> bool:
@@ -108,10 +126,27 @@ def deliver_write_confirmation(settings: Settings, thread_id: str, message: str)
     Telegram thread (``"telegram:<chat_id>"``) whose chat is authorized, the
     message goes directly to that one chat rather than fanning out to every
     authorized chat — a write belongs to the conversation that triggered it, not
-    every paired chat. Falls back to the broad fan-out for a non-Telegram
+    every paired chat. A Slack thread (``"slack:<channel>:<user>"``) is routed to
+    its channel the same way. Falls back to the broad fan-out for a non-Telegram
     (HTTP-originated) thread or an unrecognized/unauthorized chat id.
     """
     sent_webhook = deliver_webhook(settings, {"title": "Calendar updated", "message": message})
+
+    if thread_id.startswith("slack:"):
+        # "slack:<channel>:<user>" — answer in the channel that triggered the write,
+        # but only for a user we actually answer (thread_id is not a trust boundary).
+        from .slack import authorized_users, post_message
+
+        _, _, rest = thread_id.partition(":")
+        channel, _, user = rest.partition(":")
+        token = settings.slack_bot_token
+        if token and channel and user in authorized_users(settings):
+            try:
+                post_message(token, channel, message)
+                return True
+            except Exception as exc:
+                logger.warning("write-confirmation delivery to slack %s failed: %s", channel, exc)
+        return sent_webhook
 
     token = settings.telegram_bot_token
     if not token:

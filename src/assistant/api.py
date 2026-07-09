@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import json
 import logging
 import secrets
 import uuid
@@ -12,10 +13,10 @@ from datetime import datetime
 from functools import lru_cache
 
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 
-from . import telegram
+from . import slack, telegram, webui
 from .agent import build_agent
 from .calendar import run_reminders
 from .calendar.context import resolve_tz, upcoming_events
@@ -151,6 +152,16 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/ui", response_class=HTMLResponse)
+def ui() -> str:
+    """A minimal self-contained chat page that streams from /chat/stream.
+
+    Not token-gated: the page carries no data. The API calls it makes are — when
+    API_TOKEN is set the page prompts for it and sends it as a bearer header.
+    """
+    return webui.PAGE
+
+
 @app.post("/chat", response_model=ChatResponse, dependencies=[Depends(require_token)])
 def chat(req: ChatRequest, background: BackgroundTasks) -> ChatResponse:
     thread_id = req.thread_id or str(uuid.uuid4())
@@ -200,6 +211,42 @@ async def chat_stream(req: ChatRequest, background: BackgroundTasks) -> Streamin
         )
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@app.post("/slack/events")
+async def slack_events(request: Request, background: BackgroundTasks) -> dict:
+    """Slack Events API callback.
+
+    Not behind ``require_token``: Slack can't send a bearer token. It is
+    authenticated instead by the HMAC signature over the raw body, verified
+    against ``slack_signing_secret`` before anything is parsed or dispatched.
+    The turn runs as a background task because Slack expects an ack within 3s.
+    """
+    settings = get_settings()
+    if not (settings.slack_bot_token and settings.slack_signing_secret):
+        raise HTTPException(status_code=404, detail="Slack channel is not configured.")
+
+    raw = await request.body()
+    if not slack.verify_signature(
+        settings.slack_signing_secret,
+        request.headers.get("x-slack-request-timestamp", ""),
+        raw,
+        request.headers.get("x-slack-signature", ""),
+    ):
+        raise HTTPException(status_code=401, detail="Bad Slack signature.")
+
+    payload = json.loads(raw or b"{}")
+    # The one-time endpoint verification handshake.
+    if payload.get("type") == "url_verification":
+        return {"challenge": payload.get("challenge", "")}
+
+    def turn() -> None:
+        upkeep = slack.handle_event(_agent(), settings, payload)
+        if upkeep is not None:
+            upkeep()
+
+    background.add_task(turn)
+    return {"ok": True}
 
 
 @app.get("/memory", dependencies=[Depends(require_token)])

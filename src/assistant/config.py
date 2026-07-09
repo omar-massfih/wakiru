@@ -251,6 +251,20 @@ class Settings(BaseSettings):
     # reminders are pushed to all authorized chats.
     telegram_allowed_chat_ids: list[int] = []
 
+    # --- Slack channel ---
+    # Bot token (xoxb-…). Set => POST /slack/events accepts Slack Events API
+    # callbacks and each user's DM/channel becomes a persistent conversation.
+    slack_bot_token: str | None = None
+    # Signing secret from the Slack app config; every callback's HMAC is verified
+    # against it. Required whenever slack_bot_token is set.
+    slack_signing_secret: str | None = None
+    # Explicit allowlist of Slack user ids (e.g. ["U0123ABC"]) the bot answers.
+    # Empty => the bot answers nobody: unlike Telegram there is no pairing
+    # handshake, so an unconfigured allowlist must fail closed, not open.
+    slack_allowed_user_ids: list[str] = []
+    # Channel id reminders and write-confirmations are pushed to. None => no push.
+    slack_notify_channel: str | None = None
+
     # --- HTTP server ---
     host: str = "127.0.0.1"
     port: int = 8000

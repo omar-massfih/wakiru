@@ -104,6 +104,54 @@ def test_write_confirmation_rejects_unauthorized_chat_id(settings, monkeypatch) 
     assert all(chat_id == 7 for chat_id, _ in sends)
 
 
+def test_deliver_slack_posts_to_notify_channel(tmp_path, monkeypatch) -> None:
+    settings = Settings(
+        memory_dir=str(tmp_path / "m"),
+        slack_bot_token="xoxb",
+        slack_notify_channel="C1",
+    )
+    posts: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "assistant.slack.post_message", lambda tok, ch, text: posts.append((ch, text))
+    )
+    assert notify.deliver_slack(settings, {"message": "Dentist in 30 min"}) is True
+    assert posts == [("C1", "⏰ Dentist in 30 min")]
+
+
+def test_deliver_slack_noop_without_channel(tmp_path) -> None:
+    settings = Settings(memory_dir=str(tmp_path / "m"), slack_bot_token="xoxb")
+    assert notify.deliver_slack(settings, {"message": "x"}) is False
+
+
+def test_write_confirmation_routes_to_originating_slack_channel(tmp_path, monkeypatch) -> None:
+    settings = Settings(
+        memory_dir=str(tmp_path / "m"),
+        slack_bot_token="xoxb",
+        slack_allowed_user_ids=["U1"],
+    )
+    posts: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "assistant.slack.post_message", lambda tok, ch, text: posts.append((ch, text))
+    )
+    ok = notify.deliver_write_confirmation(settings, "slack:C9:U1", "created: Dentist")
+    assert ok is True
+    assert posts == [("C9", "created: Dentist")]
+
+
+def test_write_confirmation_rejects_unauthorized_slack_user(tmp_path, monkeypatch) -> None:
+    settings = Settings(
+        memory_dir=str(tmp_path / "m"),
+        slack_bot_token="xoxb",
+        slack_allowed_user_ids=["U1"],
+    )
+    monkeypatch.setattr(
+        "assistant.slack.post_message",
+        lambda *a: pytest.fail("must not post for an unauthorized user"),
+    )
+    # thread_id is attacker-controllable; an unlisted user gets nothing.
+    assert notify.deliver_write_confirmation(settings, "slack:C9:U-evil", "secret") is False
+
+
 def test_write_confirmation_without_telegram_uses_webhook_only(tmp_path, monkeypatch) -> None:
     settings = Settings(
         memory_dir=str(tmp_path / "m"),
