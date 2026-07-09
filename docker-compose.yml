@@ -1,0 +1,13 @@
+services:
+  agentic-assistent:
+    build: .
+    image: agentic-assistent:latest
+    container_name: agentic-assistent
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8000:8000"
+    env_file:
+      - .env
+    volumes:
+      - ${HOME}/.codex:/home/assistant/.codex:ro
+      - ./memory:/app/memory
