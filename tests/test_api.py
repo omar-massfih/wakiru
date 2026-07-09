@@ -247,6 +247,136 @@ def test_ui_serves_html_without_token(client) -> None:
 # --- streaming endpoint --------------------------------------------------- #
 
 
+def _parse_sse(body: str) -> tuple[str, dict[str, str]]:
+    """Reconstruct an SSE stream the way a spec-compliant client (webui.py) does:
+    a frame ends at a blank line, and its payload is the ``data:`` lines joined
+    by newlines. Returns (concatenated data payloads, {event_name: payload})."""
+    text, events = "", {}
+    for frame in body.split("\n\n"):
+        if not frame:
+            continue
+        name, data = None, []
+        for line in frame.split("\n"):
+            if line.startswith("event: "):
+                name = line[7:]
+            elif line.startswith("data: "):
+                data.append(line[6:])
+        payload = "\n".join(data)
+        if name:
+            events[name] = payload
+        else:
+            text += payload
+    return text, events
+
+
+def test_chat_stream_preserves_newlines_and_blank_lines(client, monkeypatch) -> None:
+    """A reply with a paragraph break must survive the wire intact.
+
+    Regression: encoding a chunk as a single ``data: {chunk}`` line meant a blank
+    line inside it terminated the frame early, silently truncating the reply.
+    The Codex provider yields the whole reply as one chunk, so this hit nearly
+    every multi-paragraph answer.
+    """
+    import assistant.api as api
+
+    reply = "Line one.\nLine two.\n\nNew paragraph."
+
+    async def fake_stream(agent, message, thread_id, settings=None):
+        yield reply  # one chunk, as the codex provider does
+
+    monkeypatch.setattr(api, "run_chat_stream", fake_stream)
+    monkeypatch.setattr(api, "_agent", lambda: object())
+    monkeypatch.setattr(api, "run_upkeep", lambda *a, **k: None)
+
+    resp = client(None).post("/chat/stream", json={"message": "hi", "thread_id": "t1"})
+    text, events = _parse_sse(resp.text)
+    assert text == reply  # lossless, blank line and all
+    assert events["done"] == "t1"
+
+
+def test_chat_stream_error_frame_survives_multiline_message(client, monkeypatch) -> None:
+    import assistant.api as api
+    from assistant.codex_runner import CodexError
+
+    async def boom(agent, message, thread_id, settings=None):
+        raise CodexError("failed:\n\nstderr detail")
+        yield  # pragma: no cover - makes this an async generator
+
+    monkeypatch.setattr(api, "run_chat_stream", boom)
+    monkeypatch.setattr(api, "_agent", lambda: object())
+
+    resp = client(None).post("/chat/stream", json={"message": "hi"})
+    _, events = _parse_sse(resp.text)
+    assert events["error"] == "failed:\n\nstderr detail"
+
+
+def test_sse_frame_encodes_one_data_line_per_content_line() -> None:
+    from assistant.api import sse_frame
+
+    assert sse_frame("a\n\nb") == "data: a\ndata: \ndata: b\n\n"
+    assert sse_frame("x", event="done") == "event: done\ndata: x\n\n"
+
+
+def test_chat_stream_runs_upkeep_once_after_the_stream(client, monkeypatch) -> None:
+    """The background task is added from *inside* the generator, after the
+    response object was returned — assert it still runs, with the full reply."""
+    import assistant.api as api
+
+    async def fake_stream(agent, message, thread_id, settings=None):
+        yield "hel"
+        yield "lo"
+
+    ran: list[tuple] = []
+    monkeypatch.setattr(api, "run_chat_stream", fake_stream)
+    monkeypatch.setattr(api, "_agent", lambda: object())
+    monkeypatch.setattr(api, "run_upkeep", lambda a, s, m, r, t: ran.append((m, r, t)))
+
+    client(None).post("/chat/stream", json={"message": "hi", "thread_id": "t1"})
+    assert ran == [("hi", "hello", "t1")]  # once, with the reassembled reply
+
+
+def test_chat_stream_skips_upkeep_when_the_model_fails(client, monkeypatch) -> None:
+    import assistant.api as api
+    from assistant.codex_runner import CodexError
+
+    async def boom(agent, message, thread_id, settings=None):
+        raise CodexError("nope")
+        yield  # pragma: no cover - makes this an async generator
+
+    monkeypatch.setattr(api, "run_chat_stream", boom)
+    monkeypatch.setattr(api, "_agent", lambda: object())
+    monkeypatch.setattr(api, "run_upkeep", lambda *a: pytest.fail("no upkeep on failure"))
+    client(None).post("/chat/stream", json={"message": "hi"})
+
+
+def test_slack_route_rejects_malformed_json(tmp_path, monkeypatch) -> None:
+    import hashlib
+    import hmac
+    import time
+
+    import assistant.api as api
+
+    settings = Settings(
+        memory_dir=str(tmp_path / "m"),
+        slack_bot_token="xoxb",
+        slack_signing_secret="secret",
+    )
+    monkeypatch.setattr(api, "get_settings", lambda: settings)
+
+    body = b"not json"
+    ts = str(int(time.time()))
+    sig = "v0=" + hmac.new(
+        b"secret", b"v0:" + ts.encode() + b":" + body, hashlib.sha256
+    ).hexdigest()
+    resp = TestClient(api.app).post(
+        "/slack/events",
+        content=body,
+        headers={"x-slack-request-timestamp": ts, "x-slack-signature": sig},
+    )
+    # 400, not 500 — a 5xx would make Slack retry the same bad payload.
+    assert resp.status_code == 400
+
+
 def test_chat_stream_emits_sse_frames_and_done(client, monkeypatch) -> None:
     import assistant.api as api
 

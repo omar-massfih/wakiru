@@ -89,8 +89,10 @@ async function ask(text) {
   }
   if (!res.ok) { out.remove(); bubble('err', 'Server error ' + res.status); return; }
 
-  // Parse the SSE stream: `data:` frames carry reply text, `event: done`
-  // carries the thread id, `event: error` reports a model failure.
+  // Parse the SSE stream. A frame is terminated by a blank line; its payload is
+  // every `data:` line joined by "\\n" (the spec's encoding — the server splits
+  // multi-line text across one `data:` line each, so paragraph breaks survive).
+  // `event: done` carries the thread id, `event: error` a model failure.
   const reader = res.body.getReader();
   const dec = new TextDecoder();
   let buf = '';
@@ -101,13 +103,20 @@ async function ask(text) {
     const frames = buf.split('\\n\\n');
     buf = frames.pop();
     for (const frame of frames) {
-      if (frame.startsWith('event: done')) {
-        const id = frame.slice(frame.indexOf('data: ') + 6);
-        if (id) { threadId = id; localStorage.setItem('thread_id', id); }
-      } else if (frame.startsWith('event: error')) {
-        bubble('err', frame.slice(frame.indexOf('data: ') + 6));
-      } else if (frame.startsWith('data: ')) {
-        out.textContent += frame.slice(6);
+      if (!frame) continue;
+      let name = null;
+      const data = [];
+      for (const line of frame.split('\\n')) {
+        if (line.startsWith('event: ')) name = line.slice(7);
+        else if (line.startsWith('data: ')) data.push(line.slice(6));
+      }
+      const payload = data.join('\\n');
+      if (name === 'done') {
+        if (payload) { threadId = payload; localStorage.setItem('thread_id', payload); }
+      } else if (name === 'error') {
+        bubble('err', payload);
+      } else if (data.length) {
+        out.textContent += payload;
         log.scrollTop = log.scrollHeight;
       }
     }

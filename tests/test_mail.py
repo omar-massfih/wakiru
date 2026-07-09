@@ -187,8 +187,12 @@ def test_send_is_blocked_unless_explicitly_enabled(settings, monkeypatch) -> Non
     monkeypatch.setattr(
         client, "_smtp_connect", lambda s: pytest.fail("must not open SMTP")
     )
-    with pytest.raises(MailDisabledError, match="Sending is disabled"):
+    # It must not open IMAP either — the refusal saves nothing, so it must not
+    # claim a draft was written (this message is surfaced verbatim to the user).
+    monkeypatch.setattr(client, "imap_connect", lambda s: pytest.fail("must not draft"))
+    with pytest.raises(MailDisabledError) as excinfo:
         client.send_message(settings, "bob@x.com", "Hi", "body")
+    assert "nothing was sent or drafted" in str(excinfo.value)
 
 
 def test_send_works_when_both_switches_are_on(settings, monkeypatch) -> None:

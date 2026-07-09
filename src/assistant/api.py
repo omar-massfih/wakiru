@@ -178,12 +178,28 @@ def chat(req: ChatRequest, background: BackgroundTasks) -> ChatResponse:
     return ChatResponse(reply=reply, thread_id=thread_id)
 
 
+def sse_frame(data: str, event: str | None = None) -> str:
+    """Encode one Server-Sent Events frame.
+
+    Per the SSE spec a frame's payload is carried by one ``data:`` line *per line
+    of content*, and the receiver rejoins them with newlines. Emitting a raw
+    ``f"data: {text}\\n\\n"`` is wrong the moment ``text`` contains a blank line:
+    it terminates the frame early, and the remainder is parsed as a new
+    (unrecognized) frame and dropped. Not a rare edge — the Codex provider yields
+    the whole reply as one chunk, so nearly every multi-paragraph answer would
+    lose everything after its first blank line.
+    """
+    lines = "".join(f"data: {line}\n" for line in data.split("\n"))
+    prefix = f"event: {event}\n" if event else ""
+    return f"{prefix}{lines}\n"
+
+
 @app.post("/chat/stream", dependencies=[Depends(require_token)])
 async def chat_stream(req: ChatRequest, background: BackgroundTasks) -> StreamingResponse:
     """Stream a reply as Server-Sent Events, then run upkeep once, off-path.
 
-    Emits ``data: <text>`` frames as the model produces the reply (a single
-    frame for the Codex provider, which can't stream token-by-token), a final
+    Emits ``data:`` frames as the model produces the reply (a single frame for
+    the Codex provider, which can't stream token-by-token), a final
     ``event: done`` frame carrying the ``thread_id``, and ``event: error`` if the
     model fails mid-stream. Post-reply maintenance runs after the stream closes,
     exactly as the buffered ``/chat`` endpoint does.
@@ -197,12 +213,12 @@ async def chat_stream(req: ChatRequest, background: BackgroundTasks) -> Streamin
                 _agent(), req.message, thread_id, settings=get_settings()
             ):
                 parts.append(chunk)
-                yield f"data: {chunk}\n\n"
+                yield sse_frame(chunk)
         except CodexError as exc:
             logger.error("streaming chat turn failed: %s", exc)
-            yield f"event: error\ndata: {exc}\n\n"
+            yield sse_frame(str(exc), event="error")
             return
-        yield f"event: done\ndata: {thread_id}\n\n"
+        yield sse_frame(thread_id, event="done")
         # Upkeep needs the full reply; run it off the stream so it never delays
         # the client, mirroring the buffered /chat path.
         reply = "".join(parts)
@@ -235,7 +251,11 @@ async def slack_events(request: Request, background: BackgroundTasks) -> dict:
     ):
         raise HTTPException(status_code=401, detail="Bad Slack signature.")
 
-    payload = json.loads(raw or b"{}")
+    try:
+        payload = json.loads(raw or b"{}")
+    except json.JSONDecodeError as exc:
+        # Signature-valid but unparseable: a 500 here would make Slack retry it.
+        raise HTTPException(status_code=400, detail="Malformed JSON body.") from exc
     # The one-time endpoint verification handshake.
     if payload.get("type") == "url_verification":
         return {"challenge": payload.get("challenge", "")}

@@ -206,9 +206,11 @@ def send_message(settings: Settings, to: str, subject: str, body: str) -> str:
     """
     _require_enabled(settings)
     if not settings.enable_email_send:
+        # Nothing has been written at this point — say so rather than claiming a
+        # draft was saved. The caller can call save_draft() if it wants one.
         raise MailDisabledError(
-            "Sending is disabled. I saved a draft instead — "
-            "set ENABLE_EMAIL_SEND=true to allow sending."
+            "Sending is disabled, so nothing was sent or drafted. "
+            "Use a draft instead, or set ENABLE_EMAIL_SEND=true to allow sending."
         )
     _require_address(to)
     message = _build(settings, to, subject, body)
