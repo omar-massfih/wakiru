@@ -260,6 +260,17 @@ async def slack_events(request: Request, background: BackgroundTasks) -> dict:
     if payload.get("type") == "url_verification":
         return {"challenge": payload.get("challenge", "")}
 
+    # A retry means Slack didn't see our ack, not that the turn didn't run — the
+    # first delivery may still be working in the background. Ack and drop it.
+    # Read only after the signature check: an unverified header proves nothing.
+    if request.headers.get("x-slack-retry-num"):
+        logger.info(
+            "acking slack retry %s of event %s without re-running it",
+            request.headers.get("x-slack-retry-num"),
+            payload.get("event_id"),
+        )
+        return {"ok": True}
+
     def turn() -> None:
         upkeep = slack.handle_event(_agent(), settings, payload)
         if upkeep is not None:

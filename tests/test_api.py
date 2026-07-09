@@ -236,6 +236,69 @@ def test_slack_route_answers_url_verification(tmp_path, monkeypatch) -> None:
     assert resp.json() == {"challenge": "abc123"}
 
 
+def test_slack_route_acks_a_retry_without_running_the_turn(tmp_path, monkeypatch) -> None:
+    import hashlib
+    import hmac
+    import json
+    import time
+
+    import assistant.api as api
+    from assistant import slack
+
+    settings = Settings(
+        memory_dir=str(tmp_path / "m"),
+        slack_bot_token="xoxb",
+        slack_signing_secret="secret",
+        slack_allowed_user_ids=["U1"],
+    )
+    monkeypatch.setattr(api, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        slack, "handle_event", lambda *a, **k: pytest.fail("a retry must not run the turn")
+    )
+
+    body = json.dumps(
+        {"event_id": "Ev-retry", "event": {"type": "message", "user": "U1", "text": "hi"}}
+    ).encode()
+    ts = str(int(time.time()))
+    sig = "v0=" + hmac.new(
+        b"secret", b"v0:" + ts.encode() + b":" + body, hashlib.sha256
+    ).hexdigest()
+
+    resp = TestClient(api.app).post(
+        "/slack/events",
+        content=body,
+        headers={
+            "x-slack-request-timestamp": ts,
+            "x-slack-signature": sig,
+            "x-slack-retry-num": "1",
+        },
+    )
+    assert resp.status_code == 200 and resp.json() == {"ok": True}
+
+
+def test_slack_retry_header_is_ignored_without_a_valid_signature(tmp_path, monkeypatch) -> None:
+    import assistant.api as api
+
+    settings = Settings(
+        memory_dir=str(tmp_path / "m"),
+        slack_bot_token="xoxb",
+        slack_signing_secret="secret",
+    )
+    monkeypatch.setattr(api, "get_settings", lambda: settings)
+
+    # An unverified header proves nothing: the 401 must still win.
+    resp = TestClient(api.app).post(
+        "/slack/events",
+        content=b"{}",
+        headers={
+            "x-slack-request-timestamp": "1",
+            "x-slack-signature": "v0=bad",
+            "x-slack-retry-num": "1",
+        },
+    )
+    assert resp.status_code == 401
+
+
 def test_ui_serves_html_without_token(client) -> None:
     # The page carries no data, so it is not token-gated even when API_TOKEN is set.
     resp = client("sekrit").get("/ui")

@@ -80,12 +80,20 @@ def _parse_ops(text: str) -> list[dict]:
     ]
 
 
+# Ops whose schema defines "title" as the NEW value, not an identifier. Looking
+# the target up by it would resolve to whichever task already bears the new name
+# — a row the user never referred to.
+_TITLE_IS_NEW_VALUE = {"update"}
+
+
 def _target_id(settings: Settings, op: dict) -> str | None:
     """Resolve the task an op refers to, by id or a fuzzy title fallback.
 
     A fuzzy reference matching more than one task is skipped rather than guessed
     at — the same ambiguity guard the calendar extractor uses."""
-    ident = op.get("id") or op.get("query") or op.get("title")
+    ident = op.get("id") or op.get("query")
+    if not ident and op["op"] not in _TITLE_IS_NEW_VALUE:
+        ident = op.get("title")
     if not ident:
         return None
     matches = store.find_tasks(settings, str(ident))

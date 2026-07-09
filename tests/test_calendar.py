@@ -440,6 +440,30 @@ def test_destructive_op_skips_ambiguous_title(settings) -> None:
     assert store.list_events(settings) == []
 
 
+def test_reschedule_never_targets_by_its_new_title(settings) -> None:
+    # For a "reschedule" the schema's `title` is the REPLACEMENT value. Using it
+    # to look the target up resolves to whichever event already bears that title
+    # — an appointment the user never named.
+    dentist = store.create_event(settings, title="Dentist", start=_iso_in(settings, days=1))
+    bystander = store.create_event(
+        settings, title="Dentist checkup", start=_iso_in(settings, days=2)
+    )
+
+    # "rename Dentist to Dentist checkup", with the id omitted.
+    assert ops.apply_op(
+        settings,
+        {"op": "reschedule", "title": "Dentist checkup", "start": _iso_in(settings, days=5)},
+    ) is None
+    assert store.get_event(settings, bystander.id).start == bystander.start
+    assert store.get_event(settings, dentist.id).title == "Dentist"
+
+    # An exact id still reschedules and renames it.
+    assert ops.apply_op(
+        settings, {"op": "reschedule", "id": dentist.id, "title": "Dentist checkup"}
+    ) is not None
+    assert store.get_event(settings, dentist.id).title == "Dentist checkup"
+
+
 # --- availability / conflict awareness ------------------------------------ #
 
 

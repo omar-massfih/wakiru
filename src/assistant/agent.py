@@ -44,6 +44,7 @@ from langgraph.graph.state import CompiledStateGraph
 from .calendar import agenda_context
 from .config import Settings, get_settings
 from .docs import docs_context
+from .docs import store as docs_store
 from .llm import build_model
 from .memory import index, recall_context
 from .tasks import tasks_context
@@ -173,6 +174,13 @@ def build_agent(settings: Settings | None = None) -> CompiledStateGraph:
         index.reindex(settings)
     except Exception:
         logger.exception("startup reindex failed; continuing with existing index")
+
+    # Same for the document chunk index, rebuilt from the stored document text.
+    if settings.enable_docs:
+        try:
+            docs_store.reindex(settings)
+        except Exception:
+            logger.exception("startup docs reindex failed; continuing with existing index")
 
     model = build_model(settings)
 

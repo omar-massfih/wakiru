@@ -96,6 +96,12 @@ def _parse_ops(text: str) -> list[dict]:
     ]
 
 
+# Ops whose schema defines "title" as the NEW value, not an identifier. Looking
+# the target up by it would resolve to whichever event already bears the new name
+# — an appointment the user never referred to.
+_TITLE_IS_NEW_VALUE = {"reschedule", "move"}
+
+
 def _target_id(settings: Settings, op: dict) -> str | None:
     """Resolve the event an op refers to, by id or a fuzzy title/query fallback.
 
@@ -104,7 +110,9 @@ def _target_id(settings: Settings, op: dict) -> str | None:
     beats cancelling the wrong appointment (the same rule memory's fuzzy forget
     applies). An exact id always resolves unambiguously.
     """
-    ident = op.get("id") or op.get("query") or op.get("title")
+    ident = op.get("id") or op.get("query")
+    if not ident and op["op"] not in _TITLE_IS_NEW_VALUE:
+        ident = op.get("title")
     if not ident:
         return None
     matches = store.find_events(settings, str(ident))

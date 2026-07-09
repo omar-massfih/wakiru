@@ -591,6 +591,55 @@ def docs_meta_set(conn, key: str, value: str) -> None:
 
 
 
+def reindex_docs(settings: Settings) -> int:
+    """Rebuild document chunk vectors from the stored text when the model changed.
+
+    The docs mirror of :func:`reindex_memory`. ``assistant_document_chunks.embedding``
+    is an undimensioned ``vector``, so a swapped embedding model does not fail on
+    insert — it quietly mixes dimensions, and the ``<=>`` cosine operator then raises
+    at query time. Rebuilding from ``assistant_documents.text`` (this store's source
+    of truth) keeps every chunk on one model. No-op when the model is unchanged.
+    """
+    from .docs.store import chunk_text
+    from .memory.embeddings import embed_passages
+
+    ensure_docs_schema(settings)
+    with connect(settings) as conn:
+        stored_model = docs_meta_get(conn, "embedding_model")
+        rows = _rows(conn.execute("SELECT id, text FROM assistant_documents"))
+        model_changed = stored_model != settings.embedding_model
+        if not rows or not model_changed:
+            return len(rows)
+        conn.execute("DELETE FROM assistant_document_chunks")
+        conn.execute(
+            "DELETE FROM assistant_docs_meta WHERE key IN ('dim', 'embedding_model')"
+        )
+
+    for row in rows:
+        pieces = chunk_text(str(row["text"]), settings.docs_chunk_chars)
+        vectors = embed_passages(pieces, settings) if pieces else []
+        if len(vectors) != len(pieces):
+            raise RuntimeError(
+                f"embedder returned {len(vectors)} vectors for {len(pieces)} chunks"
+            )
+        with connect(settings) as conn:
+            if vectors and docs_meta_get(conn, "dim") is None:
+                docs_meta_set(conn, "dim", str(len(vectors[0])))
+                docs_meta_set(conn, "embedding_model", settings.embedding_model)
+            for ord_, (piece, vector) in enumerate(zip(pieces, vectors)):
+                conn.execute(
+                    "INSERT INTO assistant_document_chunks(doc_id, ord, text, embedding) "
+                    "VALUES (%s, %s, %s, %s::vector)",
+                    (str(row["id"]), ord_, piece, vector_literal(vector)),
+                )
+
+    # A corpus whose documents are all empty never records a dim above; stamp the
+    # model anyway so the next startup doesn't see a "changed" model and rebuild.
+    with connect(settings) as conn:
+        docs_meta_set(conn, "embedding_model", settings.embedding_model)
+    return len(rows)
+
+
 def add_document(settings: Settings, title: str, text: str, pieces: list[str], vectors: list[list[float]]):
     from .docs.store import Document
     import uuid

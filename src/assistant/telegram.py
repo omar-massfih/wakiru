@@ -485,8 +485,10 @@ def _dispatch_command(
     caller skips the model turn and its upkeep). Non-slash text returns False."""
     if not text.startswith("/"):
         return False
-    # "/tasks@MyBot arg" -> "tasks"; commands take no args here.
-    command = text[1:].split()[0].split("@")[0].lower() if len(text) > 1 else ""
+    # "/tasks@MyBot arg" -> "tasks"; commands take no args here. Split before
+    # indexing: a bare "/" or a "/" followed only by spaces has no first word.
+    parts = text[1:].split()
+    command = parts[0].split("@")[0].lower() if parts else ""
     reply = _command_reply(agent, settings, command, thread_id)
     send_message(token, chat_id, reply)
     return True

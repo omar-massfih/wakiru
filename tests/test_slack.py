@@ -131,6 +131,42 @@ def test_authorized_user_gets_reply_and_deferred_upkeep(posted, monkeypatch) -> 
     assert len(upkeep) == 1  # … the route runs it in the background
 
 
+def test_duplicate_event_id_runs_the_turn_once(posted, monkeypatch) -> None:
+    settings = _settings(slack_allowed_user_ids=["U1"])
+    turns: list[str] = []
+    monkeypatch.setattr(slack, "run_chat", lambda a, text, thread, **kw: turns.append(text) or "hi")
+    monkeypatch.setattr(slack, "run_upkeep", lambda *a: None)
+
+    payload = {**_event(user="U1", channel="C1", text="hei"), "event_id": "Ev-dedupe-1"}
+    first = slack.handle_event(None, settings, payload)
+    # Slack redelivers the same envelope; the turn (and its memory/calendar
+    # upkeep) must not run a second time.
+    second = slack.handle_event(None, settings, dict(payload))
+
+    assert first is not None and second is None
+    assert turns == ["hei"]
+    assert posted == [("C1", "hi")]
+
+
+def test_distinct_event_ids_each_run(posted, monkeypatch) -> None:
+    settings = _settings(slack_allowed_user_ids=["U1"])
+    monkeypatch.setattr(slack, "run_chat", lambda *a, **kw: "hi")
+    monkeypatch.setattr(slack, "run_upkeep", lambda *a: None)
+
+    for event_id in ("Ev-distinct-1", "Ev-distinct-2"):
+        payload = {**_event(user="U1", channel="C1"), "event_id": event_id}
+        assert slack.handle_event(None, settings, payload) is not None
+    assert len(posted) == 2
+
+
+def test_already_seen_is_bounded_and_ignores_empty_ids() -> None:
+    assert slack.already_seen("") is False  # a payload with no id never dedupes
+    assert slack.already_seen("") is False
+    for i in range(slack._SEEN_MAX + 50):
+        slack.already_seen(f"Ev-bound-{i}")
+    assert len(slack._seen_events) <= slack._SEEN_MAX
+
+
 def test_codex_error_posts_apology(posted, monkeypatch) -> None:
     from assistant.codex_runner import CodexError
 

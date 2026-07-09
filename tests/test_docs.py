@@ -13,21 +13,30 @@ import re
 import zlib
 
 import pytest
+from pydantic import ValidationError
 
 from assistant.config import Settings
 from assistant.docs import store, summarize
 from assistant.docs.context import docs_context
 
 
-def _fake_embed(texts, prefix: str = "", settings=None):
-    vecs = []
-    for text in texts:
-        v = [0.0] * 64
-        for word in re.findall(r"[a-z0-9]+", text.lower()):
-            v[zlib.crc32(word.encode()) % 64] += 1.0
-        norm = math.sqrt(sum(x * x for x in v)) or 1.0
-        vecs.append([x / norm for x in v])
-    return vecs
+def _embed_with_dim(dim: int):
+    """The same deterministic bag-of-words embedder, at a chosen dimension."""
+
+    def _embed(texts, prefix: str = "", settings=None):
+        vecs = []
+        for text in texts:
+            v = [0.0] * dim
+            for word in re.findall(r"[a-z0-9]+", text.lower()):
+                v[zlib.crc32(word.encode()) % dim] += 1.0
+            norm = math.sqrt(sum(x * x for x in v)) or 1.0
+            vecs.append([x / norm for x in v])
+        return vecs
+
+    return _embed
+
+
+_fake_embed = _embed_with_dim(64)
 
 
 @pytest.fixture(autouse=True)
@@ -59,6 +68,19 @@ def test_chunk_hard_splits_a_huge_paragraph() -> None:
     chunks = store.chunk_text("x" * 500, target_chars=100)
     assert all(len(c) <= 200 for c in chunks)
     assert "".join(chunks) == "x" * 500
+
+
+def test_chunk_survives_a_zero_target() -> None:
+    # A zero target used to make the hard-split loop slice nothing off each pass,
+    # so it spun forever. Reaching the assertions at all is the point.
+    chunks = store.chunk_text("hello world", target_chars=0)
+    assert "".join(chunks) == "hello world"
+    assert all(chunks)  # no empty pieces
+
+
+def test_zero_chunk_size_is_rejected_by_config() -> None:
+    with pytest.raises(ValidationError):
+        Settings(docs_chunk_chars=0)
 
 
 # --- ingest + list + delete ------------------------------------------------- #
@@ -117,6 +139,46 @@ def test_docs_context_disabled_returns_empty(tmp_path) -> None:
     assert docs_context(s, "content") == ""
 
 
+# --- reindex / embedding-model migration ------------------------------------ #
+
+
+def test_reindex_rebuilds_after_an_embedding_model_change(tmp_path, monkeypatch) -> None:
+    memory_dir = str(tmp_path / "memory")
+
+    def _at(model: str, dim: int) -> Settings:
+        monkeypatch.setattr("assistant.memory.embeddings._embed", _embed_with_dim(dim))
+        return Settings(
+            memory_dir=memory_dir, embedding_model=model, docs_min_similarity=0.1
+        )
+
+    old = _at("fake/dim-64", 64)
+    store.add_document(old, "Bergen", "The Bergen fish market sells salmon.")
+    assert store.search_chunks(old, "fish market salmon")
+
+    # Swap to a model of a different dimension. Without a migration the vec table
+    # stays float[64] and every read and write raises "Dimension mismatch".
+    new = _at("fake/dim-32", 32)
+    assert store.reindex(new) == 1
+
+    hits = store.search_chunks(new, "fish market salmon")
+    assert hits and hits[0].doc_title == "Bergen"
+    store.add_document(new, "Cars", "The engine needs an oil change.")  # writes work again
+
+
+def test_reindex_embeds_nothing_when_the_model_is_unchanged(settings, monkeypatch) -> None:
+    store.add_document(settings, "Bergen", "The Bergen fish market sells salmon.")
+
+    embedded: list[int] = []
+
+    def counting(texts, prefix: str = "", settings=None):
+        embedded.append(len(texts))
+        return _fake_embed(texts, prefix, settings)
+
+    monkeypatch.setattr("assistant.memory.embeddings._embed", counting)
+    assert store.reindex(settings) == 1
+    assert embedded == []  # a routine restart must not re-embed the corpus
+
+
 # --- summarize -------------------------------------------------------------- #
 
 
@@ -134,3 +196,41 @@ def test_summarize_uses_model(settings, monkeypatch) -> None:
 
 def test_summarize_missing_document_returns_none(settings) -> None:
     assert summarize.summarize_document(settings, "nope") is None
+
+
+class _CountingModel:
+    """Records every prompt it is asked to complete."""
+
+    def __init__(self) -> None:
+        self.prompts: list[str] = []
+
+    def invoke(self, messages):
+        self.prompts.append(messages[0].content)
+        return type("Msg", (), {"content": f"summary {len(self.prompts)}"})()
+
+
+def test_short_document_summarizes_in_one_call(settings, monkeypatch) -> None:
+    doc = store.add_document(settings, "Report", "Q3 revenue rose 10%.")
+    model = _CountingModel()
+    monkeypatch.setattr(summarize, "build_model", lambda s: model)
+
+    assert summarize.summarize_document(settings, doc.id) == "summary 1"
+    assert len(model.prompts) == 1
+
+
+def test_long_document_is_summarized_map_reduce(tmp_path, monkeypatch) -> None:
+    # A target small enough that the document spans several pieces; a single
+    # prompt carrying the whole text would overflow a real model's context.
+    s = Settings(memory_dir=str(tmp_path / "m"), docs_summarize_chars=20)
+    doc = store.add_document(
+        s, "Report", "Q3 revenue rose.\n\nQ4 revenue fell.\n\nHiring is paused."
+    )
+    model = _CountingModel()
+    monkeypatch.setattr(summarize, "build_model", lambda s: model)
+
+    result = summarize.summarize_document(s, doc.id)
+
+    assert len(model.prompts) > 2  # one per section (map) plus the final fold
+    assert all("one section" in p for p in model.prompts[:-1])
+    assert "Section summaries:" in model.prompts[-1]
+    assert result == f"summary {len(model.prompts)}"  # the reduce output wins

@@ -15,6 +15,9 @@ Security, in layers:
   allowlist fails closed rather than answering the whole workspace.
 * **Bot loop guard.** Messages from bots (including our own) are ignored, so a
   reply can never trigger another reply.
+* **Delivery dedupe.** Slack redelivers a callback it thinks we missed. Each
+  envelope's ``event_id`` is claimed once (see :func:`already_seen`), so a
+  redelivery can't run the turn — and its memory and calendar writes — twice.
 
 Each user maps to a stable thread (``slack:<channel>:<user>``), so the
 conversation — working memory and rolling summary — survives restarts.
@@ -26,9 +29,11 @@ import hashlib
 import hmac
 import json
 import logging
+import threading
 import time
 import urllib.error
 import urllib.request
+from collections import OrderedDict
 from collections.abc import Callable
 
 from langgraph.graph.state import CompiledStateGraph
@@ -43,6 +48,31 @@ _API_URL = "https://slack.com/api/chat.postMessage"
 _TIMEOUT_SECONDS = 10
 # Reject callbacks older than this; Slack's own guidance for replay protection.
 _MAX_SKEW_SECONDS = 60 * 5
+
+# Envelope ids already handled, newest last. Bounded so it can't grow without
+# limit; Slack gives up retrying long before this many events pass through.
+# Guarded by a lock: handle_event runs on FastAPI's threadpool, not the loop.
+_SEEN_MAX = 1024
+_seen_events: OrderedDict[str, None] = OrderedDict()
+_seen_lock = threading.Lock()
+
+
+def already_seen(event_id: str) -> bool:
+    """Claim ``event_id``; True when this callback was already handled.
+
+    Process-local by design: Slack's retry window is minutes, so a restart losing
+    the set costs at most one duplicate reply, and this keeps the hot path free of
+    a database round-trip. An empty id (a payload shape without one) never dedupes.
+    """
+    if not event_id:
+        return False
+    with _seen_lock:
+        if event_id in _seen_events:
+            return True
+        _seen_events[event_id] = None
+        if len(_seen_events) > _SEEN_MAX:
+            _seen_events.popitem(last=False)
+    return False
 
 
 def verify_signature(
@@ -114,6 +144,12 @@ def handle_event(
     if user not in allowed:
         # Fail closed: an empty allowlist answers no one.
         logger.warning("ignoring slack message from unauthorized user %s", user)
+        return None
+
+    # Claim the envelope last, once we know we'd act on it: a redelivered
+    # callback must not answer twice, nor re-run the turn's memory/calendar upkeep.
+    if already_seen(str(payload.get("event_id", ""))):
+        logger.info("ignoring duplicate slack event %s", payload.get("event_id"))
         return None
 
     thread_id = f"slack:{channel}:{user}"

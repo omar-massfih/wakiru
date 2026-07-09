@@ -69,20 +69,50 @@ def _connect(settings: Settings) -> sqlite3.Connection:
     return conn
 
 
-def _ensure_vec_table(conn: sqlite3.Connection, dim: int) -> None:
-    row = conn.execute("SELECT value FROM meta WHERE key = 'dim'").fetchone()
-    if row is not None:
+def _meta_get(conn: sqlite3.Connection, key: str) -> str | None:
+    row = conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+    return row[0] if row else None
+
+
+def _meta_set(conn: sqlite3.Connection, key: str, value: str) -> None:
+    conn.execute(
+        "INSERT INTO meta(key, value) VALUES (?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (key, value),
+    )
+
+
+def _vec_dim(conn: sqlite3.Connection) -> int | None:
+    value = _meta_get(conn, "dim")
+    return int(value) if value else None
+
+
+def _ensure_vec_table(conn: sqlite3.Connection, dim: int, settings: Settings) -> None:
+    if _vec_dim(conn) is not None:
         return
     conn.execute(
         f"CREATE VIRTUAL TABLE {_VEC_TABLE} USING"
         f" vec0(embedding float[{dim}] distance_metric=cosine)"
     )
-    conn.execute("INSERT INTO meta(key, value) VALUES ('dim', ?)", (str(dim),))
+    _meta_set(conn, "dim", str(dim))
+    _meta_set(conn, "embedding_model", settings.embedding_model)
+
+
+def _check_vectors(pieces: list[str], vectors: list[list[float]]) -> None:
+    """Guard against a short embedder result — ``zip`` would silently drop the
+    tail, leaving those chunks stored but never indexed."""
+    if len(vectors) != len(pieces):
+        raise RuntimeError(
+            f"embedder returned {len(vectors)} vectors for {len(pieces)} chunks"
+        )
 
 
 def chunk_text(text: str, target_chars: int) -> list[str]:
     """Split ``text`` into chunks of about ``target_chars``, breaking on blank
     lines first so paragraphs stay intact, then packing them up to the target."""
+    # A non-positive target makes the hard-split loop below slice nothing off
+    # each pass, so it would never terminate.
+    target_chars = max(1, int(target_chars))
     paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
     chunks: list[str] = []
     current = ""
@@ -111,10 +141,7 @@ def add_document(settings: Settings, title: str, text: str) -> Document:
 
         pieces = chunk_text(text, settings.docs_chunk_chars)
         vectors = embed_passages(pieces, settings) if pieces else []
-        if len(vectors) != len(pieces):
-            raise RuntimeError(
-                f"embedder returned {len(vectors)} vectors for {len(pieces)} chunks"
-            )
+        _check_vectors(pieces, vectors)
         return storage_postgres.add_document(settings, title, text, pieces, vectors)
     doc = Document(
         id=uuid.uuid4().hex[:12],
@@ -124,11 +151,12 @@ def add_document(settings: Settings, title: str, text: str) -> Document:
     )
     pieces = chunk_text(text, settings.docs_chunk_chars)
     vectors = embed_passages(pieces, settings) if pieces else []
+    _check_vectors(pieces, vectors)
 
     conn = _connect(settings)
     try:
         if vectors:
-            _ensure_vec_table(conn, len(vectors[0]))
+            _ensure_vec_table(conn, len(vectors[0]), settings)
         conn.execute(
             "INSERT INTO documents(id, title, text, added) VALUES (?, ?, ?, ?)",
             (doc.id, doc.title, doc.text, doc.added),
@@ -213,9 +241,77 @@ def delete_document(settings: Settings, doc_id: str) -> bool:
 
 
 def _vec_table_exists(conn: sqlite3.Connection) -> bool:
-    return conn.execute(
-        "SELECT 1 FROM meta WHERE key = 'dim'"
-    ).fetchone() is not None
+    return _vec_dim(conn) is not None
+
+
+def reindex(settings: Settings) -> int:
+    """Rebuild the chunk vector index from the stored document text.
+
+    ``documents.text`` is this store's source of truth, exactly as the markdown
+    files are for :mod:`assistant.memory.index` — so the chunks and their vectors
+    can always be regenerated from it. Mirrors :func:`assistant.memory.index.reindex`:
+
+    * When the recorded ``embedding_model`` differs from ``settings.embedding_model``
+      the vec table is dropped and everything is re-chunked and re-embedded. Without
+      this a model swap either raises ``Dimension mismatch`` on the next write, or —
+      worse, at equal dimensions — silently compares stale vectors against new-model
+      queries and returns noise.
+    * A model swap also re-chunks, so a changed ``docs_chunk_chars`` self-heals too.
+    * Otherwise this is a no-op, so a routine restart embeds nothing.
+
+    Returns the number of documents indexed.
+    """
+    if settings.storage_backend == "postgres":
+        from .. import storage_postgres
+
+        return storage_postgres.reindex_docs(settings)
+    conn = _connect(settings)
+    try:
+        stored_model = _meta_get(conn, "embedding_model")
+        documents = conn.execute("SELECT id, text FROM documents").fetchall()
+        # A blank stored model means a pre-migration db: rebuild it once so the
+        # model it was embedded under is recorded from here on.
+        model_changed = stored_model != settings.embedding_model
+        if not documents or not model_changed:
+            return len(documents)
+        conn.execute(f"DROP TABLE IF EXISTS {_VEC_TABLE}")
+        conn.execute("DELETE FROM chunks")
+        conn.execute("DELETE FROM meta WHERE key IN ('dim', 'embedding_model')")
+        conn.commit()
+    finally:
+        conn.close()
+
+    for row in documents:
+        pieces = chunk_text(row["text"], settings.docs_chunk_chars)
+        vectors = embed_passages(pieces, settings) if pieces else []
+        _check_vectors(pieces, vectors)
+        conn = _connect(settings)
+        try:
+            if vectors:
+                _ensure_vec_table(conn, len(vectors[0]), settings)
+            for ord_, (piece, vector) in enumerate(zip(pieces, vectors)):
+                cur = conn.execute(
+                    "INSERT INTO chunks(doc_id, ord, text) VALUES (?, ?, ?)",
+                    (row["id"], ord_, piece),
+                )
+                conn.execute(
+                    f"INSERT INTO {_VEC_TABLE}(rowid, embedding) VALUES (?, ?)",
+                    (cur.lastrowid, _serialize(vector)),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+    # An all-empty corpus never creates the vec table, so record the model anyway;
+    # otherwise every startup would see a "changed" model and rebuild nothing.
+    conn = _connect(settings)
+    try:
+        _meta_set(conn, "embedding_model", settings.embedding_model)
+        conn.commit()
+    finally:
+        conn.close()
+
+    return len(documents)
 
 
 def search_chunks(settings: Settings, query: str, top_k: int | None = None) -> list[Chunk]:

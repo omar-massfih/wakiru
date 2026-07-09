@@ -429,6 +429,18 @@ def test_unknown_command_shows_help(tmp_path, calls, monkeypatch) -> None:
     assert "Commands:" in _sends(calls)[0]["text"]
 
 
+def test_slash_with_no_command_shows_help(tmp_path, calls, monkeypatch) -> None:
+    settings = _settings(tmp_path, telegram_allowed_chat_ids=[7])
+    monkeypatch.setattr(telegram, "run_chat", lambda *a, **k: pytest.fail("no model"))
+    # "/" followed by only whitespace has no first word — indexing it used to
+    # raise IndexError, leaving the chat with no reply at all.
+    for text in ("/", "/ ", "/   "):
+        telegram.handle_update(None, settings, _update(chat_id=7, text=text))
+    sends = _sends(calls)
+    assert len(sends) == 3
+    assert all("Commands:" in s["text"] for s in sends)
+
+
 def test_command_with_botname_suffix_is_stripped(tmp_path, calls, monkeypatch) -> None:
     settings = _settings(tmp_path, telegram_allowed_chat_ids=[7])
     monkeypatch.setattr(telegram, "run_chat", lambda *a, **k: pytest.fail("no model"))

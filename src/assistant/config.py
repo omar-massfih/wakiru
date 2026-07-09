@@ -5,6 +5,7 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -211,8 +212,13 @@ class Settings(BaseSettings):
     docs_recall_top_k: int = 3
     # Cosine-similarity floor for a chunk to be injected at all.
     docs_min_similarity: float = 0.35
-    # Target size (characters) for a document chunk when ingesting.
-    docs_chunk_chars: int = 800
+    # Target size (characters) for a document chunk when ingesting. Must be
+    # positive: a zero target makes the chunker's hard-split loop never terminate.
+    docs_chunk_chars: int = Field(800, ge=1)
+    # Chunk size (characters) for the map step when summarizing a long document.
+    # Much larger than docs_chunk_chars — that target is tuned for retrieval, and
+    # reusing it here would mean one model call per 800 characters.
+    docs_summarize_chars: int = Field(8000, ge=1)
 
     # --- Tasks / to-dos ---
     # Master switch: inject open tasks into each turn (the read path) so the model

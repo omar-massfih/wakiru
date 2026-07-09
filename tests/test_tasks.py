@@ -130,6 +130,34 @@ def test_ambiguous_target_is_skipped(settings, monkeypatch) -> None:
     assert len(store.list_tasks(settings)) == 2
 
 
+def test_update_op_never_targets_by_its_new_title(settings, monkeypatch) -> None:
+    # For an "update" the schema's `title` is the REPLACEMENT value. Using it to
+    # look the target up resolves to whichever task already bears that title —
+    # a row the user never named.
+    renamed = store.create_task(settings, "buy milk")
+    bystander = store.create_task(settings, "buy milk and eggs")
+
+    applied = _apply(
+        settings,
+        '[{"op": "update", "title": "buy milk and eggs", "notes": "corner shop"}]',
+        monkeypatch,
+    )
+
+    assert applied == []  # no id and no query, so there is nothing to target
+    assert store.get_task(settings, bystander.id).notes == ""
+    assert store.get_task(settings, renamed.id).title == "buy milk"
+
+
+def test_update_op_by_id_still_renames(settings, monkeypatch) -> None:
+    task = store.create_task(settings, "buy milk")
+    applied = _apply(
+        settings,
+        f'[{{"op": "update", "id": "{task.id}", "title": "buy milk and eggs"}}]',
+        monkeypatch,
+    )
+    assert applied == ["updated task: buy milk and eggs"]
+
+
 def test_auto_tasks_disabled_is_noop(tmp_path, monkeypatch) -> None:
     settings = Settings(memory_dir=str(tmp_path / "m"), enable_auto_tasks=False)
     applied = _apply(settings, '[{"op": "add", "title": "x"}]', monkeypatch)
