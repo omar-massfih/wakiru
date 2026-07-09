@@ -140,6 +140,33 @@ def test_docs_ingest_list_search_and_delete(client, monkeypatch) -> None:
     assert c.delete(f"/documents/{doc_id}").status_code == 404
 
 
+def test_email_endpoints_409_while_disabled(client) -> None:
+    # Email is off by default, so every mail endpoint refuses before touching a socket.
+    c = client(None)
+    assert c.get("/email").status_code == 409
+    assert c.get("/email/1").status_code == 409
+    resp = c.post("/email/draft", json={"to": "b@x.com", "subject": "s", "body": "b"})
+    assert resp.status_code == 409
+    assert "disabled" in resp.json()["detail"].lower()
+
+
+def test_email_draft_does_not_send_by_default(client, monkeypatch) -> None:
+    import assistant.api as api
+
+    calls: list[str] = []
+    monkeypatch.setattr(
+        api.mail_client, "save_draft", lambda s, to, subj, body: calls.append("draft") or "drafted: x"
+    )
+    monkeypatch.setattr(
+        api.mail_client, "send_message", lambda *a, **k: pytest.fail("must not send")
+    )
+    body = client(None).post(
+        "/email/draft", json={"to": "b@x.com", "subject": "s", "body": "b"}
+    ).json()
+    assert body["sent"] is False
+    assert calls == ["draft"]
+
+
 def test_reminders_run_shape_on_empty_store(client) -> None:
     body = client(None).post("/reminders/run").json()
     assert body["count"] == 0

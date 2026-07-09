@@ -36,6 +36,11 @@ Telegram bot  /
 - **`docs/`** — ingested documents, chunked and embedded into their own `docs.db` vector
   index. The most relevant chunks ride in on the `recall` node each turn (so "what did I
   write about X" works), and a whole document can be summarized on demand.
+- **`mail/`** — the only subsystem that talks to an external service, and the only one
+  **off by default** (`ENABLE_EMAIL`). Stdlib IMAP/SMTP with XOAUTH2 or an app password.
+  Reads use `BODY.PEEK` (never marks your mail read) and are surfaced on request only,
+  not injected each turn. Drafting is the default write; **sending** needs a second,
+  independent switch (`ENABLE_EMAIL_SEND`) and never happens in the background.
 - **`telegram.py`** — the Telegram channel (see below): a stdlib-only long-polling
   bridge started alongside the server when a bot token is configured. Free text goes to
   the model; the slash commands `/help`, `/tasks`, `/calendar`, `/memory`, and `/reset`

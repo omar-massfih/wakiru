@@ -24,6 +24,8 @@ from .codex_runner import CodexError
 from .config import get_settings
 from .docs import store as docs_store
 from .docs.summarize import summarize_document
+from .mail import client as mail_client
+from .mail.client import MailDisabledError
 from .memory import consolidate_memory, store
 from .tasks import store as tasks_store
 from .tasks.reminders import run_task_reminders
@@ -128,6 +130,15 @@ class ChatRequest(BaseModel):
 class DocRequest(BaseModel):
     title: str
     text: str
+
+
+class DraftRequest(BaseModel):
+    to: str
+    subject: str
+    body: str
+    # Opt in per-request to actually send. Even then the server-side
+    # `enable_email_send` switch must also be on.
+    send: bool = False
 
 
 class ChatResponse(BaseModel):
@@ -286,6 +297,67 @@ def docs_delete(doc_id: str) -> dict:
     if not docs_store.delete_document(get_settings(), doc_id):
         raise HTTPException(status_code=404, detail="No such document.")
     return {"id": doc_id, "deleted": True}
+
+
+@app.get("/email", dependencies=[Depends(require_token)])
+def email_list(unread_only: bool = True) -> dict:
+    """List recent INBOX messages (headers only; never marks them read)."""
+    try:
+        messages = mail_client.list_recent(get_settings(), unread_only=unread_only)
+    except MailDisabledError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {
+        "total": len(messages),
+        "messages": [
+            {"uid": m.uid, "sender": m.sender, "subject": m.subject, "date": m.date}
+            for m in messages
+        ],
+    }
+
+
+@app.get("/email/{uid}", dependencies=[Depends(require_token)])
+def email_read(uid: str) -> dict:
+    """Read one message with its plain-text body (leaves it unread)."""
+    try:
+        message = mail_client.read_message(get_settings(), uid)
+    except MailDisabledError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    if message is None:
+        raise HTTPException(status_code=404, detail="No such message.")
+    return {
+        "uid": message.uid,
+        "sender": message.sender,
+        "subject": message.subject,
+        "date": message.date,
+        "body": message.body,
+    }
+
+
+@app.post("/email/draft", dependencies=[Depends(require_token)])
+def email_draft(req: DraftRequest) -> dict:
+    """Save a draft — or send it, if the caller AND the server both opt in.
+
+    Drafting is the default. Sending requires ``send=true`` here *and*
+    ``ENABLE_EMAIL_SEND=true`` on the server; otherwise this returns 409 and
+    nothing leaves the mailbox.
+    """
+    settings = get_settings()
+    try:
+        if req.send:
+            result = mail_client.send_message(settings, req.to, req.subject, req.body)
+            return {"sent": True, "summary": result}
+        result = mail_client.save_draft(settings, req.to, req.subject, req.body)
+        return {"sent": False, "summary": result}
+    except MailDisabledError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 @app.get("/tasks", dependencies=[Depends(require_token)])

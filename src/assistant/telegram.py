@@ -386,6 +386,7 @@ _COMMANDS = [
     ("memory", "Show what I remember about you"),
     ("tasks", "Show your open to-do list"),
     ("calendar", "Show upcoming events"),
+    ("email", "Show unread mail (if email is enabled)"),
 ]
 
 _HELP_TEXT = (
@@ -395,6 +396,7 @@ _HELP_TEXT = (
     "/help — this message\n"
     "/tasks — your open to-do list\n"
     "/calendar — upcoming events\n"
+    "/email — unread mail (if enabled)\n"
     "/memory — what I remember about you\n"
     "/reset — forget this conversation's history\n\n"
     'Tip: reply "undo" right after I change your calendar or tasks to revert it.'
@@ -445,6 +447,10 @@ def _command_reply(agent: CompiledStateGraph, settings: Settings, command: str, 
         from .calendar import agenda_context
 
         return agenda_context(settings)
+    if command == "email":
+        from .mail import unread_summary
+
+        return unread_summary(settings)
     if command == "memory":
         from .memory import store as memory_store
 

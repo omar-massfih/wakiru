@@ -165,6 +165,38 @@ class Settings(BaseSettings):
     # Cap on how many upcoming events are injected per turn.
     calendar_max_events: int = 20
 
+    # --- Email (opt-in; the only subsystem that talks to an external service) ---
+    # Master switch. OFF by default: email is the one capability that needs real
+    # external auth (OAuth2 / an app password) and reads private correspondence.
+    # Nothing below is touched — and no connection is ever opened — while this is False.
+    enable_email: bool = False
+    # The mailbox address (also the IMAP/SMTP username).
+    email_address: str | None = None
+    # How to authenticate: "oauth" (XOAUTH2 via a refresh token) or "password"
+    # (an app password / basic LOGIN).
+    email_auth: str = "oauth"
+    # IMAP (read + save-draft) and SMTP (send) endpoints. Defaults are Gmail's.
+    email_imap_host: str = "imap.gmail.com"
+    email_imap_port: int = 993
+    email_smtp_host: str = "smtp.gmail.com"
+    email_smtp_port: int = 587
+    # The IMAP mailbox drafts are appended to (Gmail: "[Gmail]/Drafts").
+    email_drafts_folder: str = "[Gmail]/Drafts"
+    # OAuth2: a long-lived refresh token is exchanged for short-lived access
+    # tokens, cached under the memory dir. Obtain these once, out of band.
+    email_oauth_client_id: str | None = None
+    email_oauth_client_secret: str | None = None
+    email_oauth_refresh_token: str | None = None
+    email_oauth_token_url: str = "https://oauth2.googleapis.com/token"
+    # App password, when email_auth == "password".
+    email_password: str | None = None
+    # Cap on how many messages a listing returns.
+    email_max_messages: int = 10
+    # Second, independent gate for actually SENDING mail. Drafting is always
+    # allowed when email is on; sending is not, unless this is deliberately set.
+    # The assistant never sends in the background — only on an explicit request.
+    enable_email_send: bool = False
+
     # --- Documents / notes ---
     # Master switch: ingest documents (chunked + embedded) and surface the most
     # relevant chunks into the recall context each turn ("what did I write about X").
@@ -251,6 +283,11 @@ class Settings(BaseSettings):
     def docs_db_path(self) -> Path:
         """SQLite file holding ingested documents + their chunk vector index."""
         return self.memory_path / "docs.db"
+
+    @property
+    def mail_token_path(self) -> Path:
+        """Cache file for the short-lived OAuth2 access token (never the refresh token)."""
+        return self.memory_path / "mail_token.json"
 
     @property
     def checkpoints_db_path(self) -> Path:
