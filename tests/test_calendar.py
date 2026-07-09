@@ -418,3 +418,23 @@ def test_weekly_series_keeps_wall_clock_across_dst(settings) -> None:
     occ = store.parse_dt(occurrences[0].start).astimezone(oslo)
     assert (occ.hour, occ.minute) == (9, 0)
     assert occ.utcoffset() == timedelta(hours=2)  # CEST — same wall clock, new offset
+
+
+def test_destructive_op_skips_ambiguous_title(settings) -> None:
+    # Two upcoming events share the title: a fuzzy cancel/reschedule must not
+    # guess (cancelling nothing beats cancelling the wrong appointment).
+    soon = store.create_event(settings, title="Standup", start=_iso_in(settings, days=1))
+    later = store.create_event(settings, title="Standup", start=_iso_in(settings, days=2))
+
+    assert ops.apply_op(settings, {"op": "cancel", "title": "standup"}) is None
+    assert ops.apply_op(
+        settings, {"op": "reschedule", "title": "standup", "start": _iso_in(settings, days=3)}
+    ) is None
+    assert store.get_event(settings, soon.id) is not None
+    assert store.get_event(settings, later.id) is not None
+
+    # An exact id always resolves, even while the title is ambiguous.
+    assert ops.apply_op(settings, {"op": "cancel", "id": soon.id}) is not None
+    # With a single match left, fuzzy targeting works again.
+    assert ops.apply_op(settings, {"op": "cancel", "title": "standup"}) is not None
+    assert store.list_events(settings) == []

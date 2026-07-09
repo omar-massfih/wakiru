@@ -33,6 +33,7 @@ from ..codex_runner import run_codex
 from ..config import Settings, get_settings
 from . import index, store
 from .embeddings import embed_one, embed_query
+from .locks import locked
 from .store import Note, slugify
 
 logger = logging.getLogger(__name__)
@@ -63,6 +64,7 @@ def _write_and_index(settings: Settings, note: Note, vector: list[float]) -> Not
     return note
 
 
+@locked
 def save_memory(
     settings: Settings,
     body: str,
@@ -138,6 +140,7 @@ def save_memory(
     return _write_and_index(settings, note, vector)
 
 
+@locked
 def revise_memory(
     settings: Settings,
     name: str,
@@ -184,8 +187,17 @@ def revise_memory(
     return _write_and_index(settings, existing, vector)
 
 
-def forget_memory(settings: Settings, query: str) -> Note | None:
-    """Delete the memory best matching ``query`` (by name, else by similarity)."""
+@locked
+def forget_memory(
+    settings: Settings, query: str, *, allow_fuzzy: bool = True
+) -> Note | None:
+    """Delete the memory best matching ``query`` (by name, else by similarity).
+
+    ``allow_fuzzy=False`` restricts deletion to an exact name match. Callers
+    applying an LLM ``forget`` op that carries a *name* must pass it: a
+    hallucinated name falling through to the similarity match could delete an
+    unrelated real memory.
+    """
     by_name = store.find_note(settings, query)
     if by_name is not None:
         # Episodes are a log pruned by consolidation, never forgotten by name —
@@ -197,6 +209,10 @@ def forget_memory(settings: Settings, query: str) -> Note | None:
         index.remove(settings, query)
         store.regenerate_index(settings)
         return deleted
+
+    if not allow_fuzzy:
+        logger.warning("forget target %r does not exist; skipping (exact-only)", query)
+        return None
 
     # Fuzzy fallback — never fuzzy-delete an episodic trace (those are a log,
     # pruned by consolidation, not by a loose text match).
@@ -228,6 +244,7 @@ def forget_memory(settings: Settings, query: str) -> Note | None:
     return deleted
 
 
+@locked
 def record_episode(
     settings: Settings, user_msg: str, assistant_msg: str, source: str = ""
 ) -> Note | None:
@@ -413,11 +430,17 @@ def update_memory(
                 else:
                     applied.append(f"updated: {revised.description}")
             elif op["op"] == "forget":
-                target = op.get("name") or op.get("query")
-                if target:
-                    deleted = forget_memory(settings, str(target))
-                    if deleted is not None:
-                        applied.append(f"forgot: {deleted.description}")
+                # A "name" must match exactly — a hallucinated name falling
+                # through to the fuzzy match could delete the wrong memory.
+                # Only an explicit "query" opts into similarity matching.
+                name, fuzzy = op.get("name"), op.get("query")
+                deleted = None
+                if name:
+                    deleted = forget_memory(settings, str(name), allow_fuzzy=False)
+                elif fuzzy:
+                    deleted = forget_memory(settings, str(fuzzy))
+                if deleted is not None:
+                    applied.append(f"forgot: {deleted.description}")
         except Exception:
             logger.exception("failed to apply memory op: %s", op)
 

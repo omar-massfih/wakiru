@@ -8,8 +8,17 @@ default). It needs the model in the HuggingFace cache; the first run downloads i
 
 from __future__ import annotations
 
+import os
+
+import pytest
+
 from assistant.config import Settings
 from assistant.memory import learn, recall
+
+pytestmark = pytest.mark.skipif(
+    not os.environ.get("REAL_EMBEDDINGS"),
+    reason="loads the real ~2GB embedding model; set REAL_EMBEDDINGS=1 to run",
+)
 
 
 def test_semantic_recall_no_shared_words(tmp_path) -> None:

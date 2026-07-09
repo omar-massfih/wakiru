@@ -30,6 +30,7 @@ from datetime import date
 import sqlite_vec
 
 from ..config import Settings
+from .locks import locked
 
 VEC_TABLE = "vec_notes"
 
@@ -149,22 +150,6 @@ def remove(settings: Settings, name: str) -> bool:
         conn.close()
 
 
-def search(
-    settings: Settings, query_vector: list[float], k: int
-) -> list[tuple[str, str, str, float]]:
-    """Top-k nearest notes as ``(name, path, description, similarity)``.
-
-    ``similarity`` is cosine similarity in ``[-1, 1]`` (``1 - distance``). This is
-    the raw vector layer; :mod:`.recall` blends in recency/reuse/salience on top.
-    """
-    return [
-        (name, path, desc, sim)
-        for name, path, desc, _kind, _sal, _rc, _lr, sim in search_ranked(
-            settings, query_vector, k
-        )
-    ]
-
-
 def search_ranked(
     settings: Settings, query_vector: list[float], k: int
 ) -> list[tuple[str, str, str, str, float, int, str, float]]:
@@ -275,6 +260,7 @@ def get_stats(settings: Settings, name: str) -> tuple[int, str] | None:
         conn.close()
 
 
+@locked
 def reindex(settings: Settings) -> int:
     """Rebuild the vector index from the markdown files (the source of truth).
 
@@ -363,6 +349,11 @@ def reindex(settings: Settings) -> int:
         if pending
         else []
     )
+    if len(vectors) != len(pending):
+        # zip would silently drop the tail — those notes would never be indexed.
+        raise RuntimeError(
+            f"embedder returned {len(vectors)} vectors for {len(pending)} notes"
+        )
     for (note, text_hash, rc, lr), vector in zip(pending, vectors):
         upsert(
             settings,

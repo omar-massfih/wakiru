@@ -7,13 +7,15 @@ no open inbound port. Enable it by setting ``TELEGRAM_BOT_TOKEN`` (from
 @BotFather); the API lifespan then runs :func:`poll_loop` alongside the
 reminder ticker.
 
-Security: trust-on-first-use. The first chat to message the bot is *paired* —
-persisted under the memory directory — and answered from then on; every other
-chat gets silence. So setup is just: set the token, message the bot. Pin or add
-chats explicitly via ``TELEGRAM_ALLOWED_CHAT_IDS`` (it is merged with the paired
-set); un-pair by deleting ``telegram_chats.json`` from the memory directory.
-Each chat maps to a stable thread (``telegram:<chat_id>``), so the conversation
-— with its working memory and rolling summary — survives restarts.
+Security: pairing-code handshake. While the bot has no owner, a chat that
+messages it receives a prompt to echo back a short code — which is printed only
+to the *server log*, so only whoever runs the server can complete the pairing.
+The paired chat is persisted under the memory directory and answered from then
+on; every other chat gets silence. Pin or add chats explicitly via
+``TELEGRAM_ALLOWED_CHAT_IDS`` (it is merged with the paired set, and bypasses
+the handshake); un-pair by deleting ``telegram_chats.json`` from the memory
+directory. Each chat maps to a stable thread (``telegram:<chat_id>``), so the
+conversation — with its working memory and rolling summary — survives restarts.
 """
 
 from __future__ import annotations
@@ -22,6 +24,8 @@ import asyncio
 import html
 import json
 import logging
+import os
+import secrets
 import urllib.error
 import urllib.request
 from collections.abc import Callable
@@ -80,12 +84,20 @@ def _paired_chats(settings: Settings) -> list[int]:
 
 
 def _pair(settings: Settings, chat_id: int) -> None:
-    """Persist ``chat_id`` as paired so it survives restarts."""
+    """Persist ``chat_id`` as paired so it survives restarts.
+
+    Written atomically (temp file + ``os.replace``): the reminder ticker reads
+    this file from another thread, and a partial read is swallowed as "no
+    paired chats", which would silently drop a reminder fan-out.
+    """
     settings.memory_path.mkdir(parents=True, exist_ok=True)
     chats = _paired_chats(settings)
     if chat_id not in chats:
         chats.append(chat_id)
-        _paired_path(settings).write_text(json.dumps(chats))
+        path = _paired_path(settings)
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(chats))
+        os.replace(tmp, path)
 
 
 def authorized_chats(settings: Settings) -> list[int]:
@@ -93,6 +105,39 @@ def authorized_chats(settings: Settings) -> list[int]:
     chats = list(settings.telegram_allowed_chat_ids)
     chats.extend(c for c in _paired_chats(settings) if c not in chats)
     return chats
+
+
+# Chats mid-handshake: chat_id -> the code they must echo back. In-memory only;
+# a restart simply restarts the handshake. Only consulted while the bot has no
+# owner, and handle_update runs sequentially in the poll loop, so no lock.
+_pending_pairings: dict[int, str] = {}
+
+
+def _handle_pairing(settings: Settings, token: str, chat_id: int, text: str) -> None:
+    """One step of the pairing handshake for an ownerless bot.
+
+    First contact gets a short code — printed only to the server log, so only
+    whoever runs the server can read it — and the chat is paired when it echoes
+    the code back. This closes the trust-on-first-use window where whoever
+    happened to find the bot first silently became its owner.
+    """
+    code = _pending_pairings.get(chat_id)
+    if code is not None and text.strip() == code:
+        _pending_pairings.pop(chat_id, None)
+        _pair(settings, chat_id)
+        logger.info("paired telegram chat %s (pairing code verified)", chat_id)
+        send_message(token, chat_id, "Paired — this chat now talks to your assistant.")
+        return
+    if code is None:
+        code = secrets.token_hex(3)
+        _pending_pairings[chat_id] = code
+    logger.warning("telegram pairing code for chat %s: %s", chat_id, code)
+    send_message(
+        token,
+        chat_id,
+        "This assistant isn't paired yet. Reply with the pairing code "
+        "printed in its server log to pair this chat.",
+    )
 
 
 def _chunks(text: str) -> list[str]:
@@ -355,11 +400,11 @@ def handle_update(
             # Once anyone is paired/allowlisted, strangers get silence.
             logger.warning("ignoring telegram message from unauthorized chat %s", chat_id)
             return None
-        # Trust-on-first-use: the very first chat to reach the bot becomes its
-        # owner, so setup needs no id copying, no .env edit, no restart.
-        _pair(settings, chat_id)
-        logger.info("paired telegram chat %s (first contact)", chat_id)
-        send_message(token, chat_id, "Paired — this chat now talks to your assistant.")
+        # No owner yet: run the pairing handshake (code round-trip via the
+        # server log) instead of trusting first contact blindly. The handshake
+        # messages themselves never reach the model.
+        _handle_pairing(settings, token, chat_id, text)
+        return None
 
     # Show "typing…" while the model thinks (best-effort; it expires after ~5s).
     try:

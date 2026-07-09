@@ -173,17 +173,38 @@ def test_unauthorized_chat_with_allowlist_is_silent(tmp_path, calls, monkeypatch
     assert calls == []
 
 
-def test_first_contact_pairs_and_answers(tmp_path, calls, monkeypatch) -> None:
+def test_pairing_requires_code_roundtrip(tmp_path, calls, monkeypatch) -> None:
     settings = _settings(tmp_path)  # nobody paired or allowlisted yet
-    monkeypatch.setattr(telegram, "run_chat", lambda agent, text, thread, **kw: "svar")
+    monkeypatch.setattr(telegram, "run_chat", lambda *a, **kw: pytest.fail("must not chat"))
+    telegram._pending_pairings.clear()
 
+    # First contact does NOT pair — the chat is told to fetch the code from the
+    # server log (whoever runs the server is the only one who can read it).
     telegram.handle_update(None, settings, _update(chat_id=7, text="hei"))
+    assert telegram.authorized_chats(settings) == []
+    assert "pairing code" in _sends(calls)[0]["text"]
+    code = telegram._pending_pairings[7]
 
-    sends = _sends(calls)
-    assert len(sends) == 2  # the pairing notice, then the actual answer
-    assert "Paired" in sends[0]["text"]
-    assert sends[1]["text"] == "svar"
+    # A wrong guess re-prompts and still doesn't pair ("not-a-code" can never
+    # collide with the hex code).
+    telegram.handle_update(None, settings, _update(chat_id=7, text="not-a-code"))
+    assert telegram.authorized_chats(settings) == []
+    assert telegram._pending_pairings[7] == code  # same code survives the typo
+
+    # Echoing the logged code completes the handshake.
+    telegram.handle_update(None, settings, _update(chat_id=7, text=f"  {code} "))
     assert telegram.authorized_chats(settings) == [7]
+    assert "Paired" in _sends(calls)[-1]["text"]
+    assert 7 not in telegram._pending_pairings
+
+
+def test_pair_writes_atomically_with_no_leftovers(tmp_path) -> None:
+    settings = _settings(tmp_path)
+    telegram._pair(settings, 7)
+    telegram._pair(settings, 8)
+    assert telegram._paired_chats(settings) == [7, 8]
+    # os.replace leaves no temp file behind for a reader to trip over.
+    assert list(settings.memory_path.glob("*.tmp")) == []
 
 
 def test_pairing_survives_restart_and_locks_out_strangers(tmp_path, calls, monkeypatch) -> None:
@@ -332,3 +353,45 @@ def test_one_failed_chunk_does_not_kill_the_rest(monkeypatch) -> None:
     text = "\n".join(["x" * 100] * 60)  # two chunks
     telegram.send_message("tok", 7, text)  # must not raise
     assert len(delivered) == 2  # plain-text retry of chunk 1, then chunk 2
+
+
+# --- the poll loop ----------------------------------------------------------- #
+
+
+def test_poll_loop_survives_poison_updates_and_outages(tmp_path, monkeypatch) -> None:
+    """One run exercises all three failure paths: a poison update must not be
+    redelivered (offset still advances), a getUpdates outage must be retried,
+    and a turn's upkeep must run off the reply path."""
+    import asyncio
+    import threading
+
+    settings = _settings(tmp_path)
+    upkeep_ran = threading.Event()
+    offsets: list = []
+
+    def fake_handle(agent, s, update):
+        if update["update_id"] == 1:
+            raise ValueError("poison update")
+        return upkeep_ran.set  # the turn's deferred upkeep
+
+    def fake_get_updates(token, offset):
+        offsets.append(offset)
+        if len(offsets) == 1:
+            return [_update(update_id=1), _update(update_id=2)]
+        if len(offsets) == 2:
+            # Runs in a worker thread, so blocking here is fine: prove the
+            # previous turn's upkeep completed in the background, then fail.
+            assert upkeep_ran.wait(timeout=5), "upkeep never ran"
+            raise RuntimeError("network outage")
+        raise asyncio.CancelledError  # end the otherwise-infinite loop
+
+    monkeypatch.setattr(telegram, "handle_update", fake_handle)
+    monkeypatch.setattr(telegram, "get_updates", fake_get_updates)
+    monkeypatch.setattr(telegram, "_RETRY_SECONDS", 0)  # no real back-off sleep
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(telegram.poll_loop(None, settings))
+
+    # First poll starts blank; the poison update advanced the offset to 2 and
+    # the good one to 3 (never redelivered); the outage retried, not died.
+    assert offsets == [None, 3, 3]

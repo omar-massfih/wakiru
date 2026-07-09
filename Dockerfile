@@ -30,7 +30,13 @@ RUN uv sync --frozen --no-dev --no-install-project
 COPY . .
 RUN uv sync --frozen --no-dev
 
-ENV CODEX_HOME=/root/.codex
+# Run as a non-root user. Codex credentials are mounted at its ~/.codex, and the
+# memory store lives under /app/memory (created here so the volume is writable).
+RUN useradd --create-home --uid 1000 assistant \
+    && mkdir -p /app/memory \
+    && chown -R assistant:assistant /app
+USER assistant
+ENV CODEX_HOME=/home/assistant/.codex
 EXPOSE 8000
 
 CMD ["uv", "run", "uvicorn", "assistant.api:app", "--host", "0.0.0.0", "--port", "8000"]

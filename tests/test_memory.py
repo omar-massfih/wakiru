@@ -539,3 +539,78 @@ def test_reindex_preserves_decayed_salience(settings) -> None:
     index.reindex(settings)  # what a restart does
     entries = {name: sal for name, _d, _k, sal, _rc, _lr, _u in index.list_entries(settings)}
     assert entries[note.name] == 0.4
+
+
+# --- soft-delete (trash) + forget hardening + concurrency ------------------ #
+
+
+def test_delete_note_moves_to_trash(settings) -> None:
+    note = learn.save_memory(settings, "The user likes green tea.", description="tea preference")
+    deleted = store.delete_note(settings, note.name)
+    assert deleted is not None
+    assert store.find_note(settings, note.name) is None  # gone from the live store
+    assert store.list_notes(settings) == []  # trash never leaks into listings
+
+    trashed = list((settings.memory_path / store.TRASH_DIRNAME).glob("*.md"))
+    assert len(trashed) == 1 and note.name in trashed[0].name
+    # The trashed file is the intact note — recoverable by hand.
+    assert store.parse_note(trashed[0].read_text()).body == "The user likes green tea."
+
+
+def test_prune_trash_ages_out(settings) -> None:
+    note = learn.save_memory(settings, "The user likes black coffee.", description="coffee")
+    store.delete_note(settings, note.name)
+    assert store.prune_trash(settings, max_age_days=30) == 0  # fresh: kept
+    assert store.prune_trash(settings, max_age_days=0) == 1  # aged out: gone
+    assert list((settings.memory_path / store.TRASH_DIRNAME).glob("*.md")) == []
+
+
+def test_forget_exact_only_skips_nonexistent_name(settings) -> None:
+    learn.save_memory(settings, "The user's name is Omar.", description="user name")
+    # Fuzzy would match this note (thresholds are loose in this fixture); an
+    # exact-only forget for a hallucinated name must not fall through to it.
+    assert (
+        learn.forget_memory(settings, "user name omar hallucinated", allow_fuzzy=False)
+        is None
+    )
+    assert len(store.list_notes(settings)) == 1
+
+
+def test_forget_op_with_hallucinated_name_deletes_nothing(settings, monkeypatch) -> None:
+    auto = settings.model_copy(update={"enable_auto_memory": True})
+    kept = learn.save_memory(auto, "The user's name is Omar.", description="user name")
+    monkeypatch.setattr(
+        learn, "run_codex",
+        lambda prompt, settings=None: '[{"op": "forget", "name": "user-name-omar"}]',
+    )
+    applied = learn.update_memory(auto, "please forget about my name", "Okay.")
+    assert not any(line.startswith("forgot") for line in applied)
+    assert store.find_note(auto, kept.name) is not None
+
+
+def test_concurrent_same_slug_saves_do_not_clobber(settings) -> None:
+    import threading
+
+    # Identical descriptions -> identical name slugs; disjoint bodies -> far
+    # below the dedup threshold. Without serialized name allocation, both
+    # threads would see the slug free and the second save silently overwrites
+    # the first.
+    bodies = [
+        "Enjoys long mountain hikes with panoramic viewpoints every summer.",
+        "Collects rare vintage vinyl records from scandinavian jazz labels.",
+    ]
+    threads = [
+        threading.Thread(
+            target=learn.save_memory, args=(settings, body), kwargs={"description": "Favorite hobby"}
+        )
+        for body in bodies
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    notes = store.list_notes(settings)
+    assert len(notes) == 2
+    assert sorted(n.name for n in notes) == ["favorite-hobby", "favorite-hobby-2"]
+    assert {n.body for n in notes} == set(bodies)

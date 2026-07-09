@@ -90,12 +90,25 @@ def _parse_ops(text: str) -> list[dict]:
 
 
 def _target_id(settings: Settings, op: dict) -> str | None:
-    """Resolve the event an op refers to, by id or a fuzzy title/query fallback."""
+    """Resolve the event an op refers to, by id or a fuzzy title/query fallback.
+
+    Every op that lands here mutates or deletes, so a fuzzy reference matching
+    more than one event is skipped rather than guessed at — cancelling nothing
+    beats cancelling the wrong appointment (the same rule memory's fuzzy forget
+    applies). An exact id always resolves unambiguously.
+    """
     ident = op.get("id") or op.get("query") or op.get("title")
     if not ident:
         return None
-    found = store.find_event(settings, str(ident))
-    return found.id if found else None
+    matches = store.find_events(settings, str(ident))
+    if len(matches) > 1:
+        logger.warning(
+            "calendar %s target %r is ambiguous between %d events (%s); skipping",
+            op.get("op"), ident, len(matches),
+            ", ".join(e.title for e in matches[:5]),
+        )
+        return None
+    return matches[0].id if matches else None
 
 
 def _log_write(

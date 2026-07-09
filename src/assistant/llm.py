@@ -14,9 +14,10 @@ Ready to add (stubs below say exactly what to fill in):
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Callable
 
-from langchain_core.callbacks import CallbackManagerForLLMRun
+from langchain_core.callbacks import AsyncCallbackManagerForLLMRun, CallbackManagerForLLMRun
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
@@ -69,6 +70,17 @@ class CodexChatModel(BaseChatModel):
         text = run_codex(prompt, settings=self.settings)
         generation = ChatGeneration(message=AIMessage(content=text))
         return ChatResult(generations=[generation])
+
+    async def _agenerate(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: AsyncCallbackManagerForLLMRun | None = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        # The subprocess call blocks; without this override, ainvoke would run
+        # it on the event loop's default executor with no clear ownership.
+        return await asyncio.to_thread(self._generate, messages, stop, None, **kwargs)
 
 
 def _build_codex(settings: Settings) -> BaseChatModel:

@@ -86,14 +86,16 @@ Setup:
    TELEGRAM_BOT_TOKEN=123456:ABC-your-token
    ```
 
-2. Start the server and message your new bot. That's it — the first chat to reach the
-   bot is **paired** (trust-on-first-use, persisted in `memory/telegram_chats.json`)
-   and answered from then on; every other chat gets silence.
+2. Start the server and message your new bot. It replies asking for a **pairing
+   code**, which is printed in the server log — send that code back and the chat
+   is paired (persisted in `memory/telegram_chats.json`) and answered from then
+   on; every other chat gets silence.
 
-Since first contact wins, keep the bot's username to yourself until you've paired.
-The cautious can skip pairing entirely and pin chats up front via
-`TELEGRAM_ALLOWED_CHAT_IDS=[...]` in `.env` (merged with the paired set); un-pair by
-deleting `memory/telegram_chats.json`.
+The code round-trip means only whoever can read the server log can claim the bot,
+so a stranger finding the bot first can't hijack it. You can also skip the
+handshake entirely and pin chats up front via `TELEGRAM_ALLOWED_CHAT_IDS=[...]`
+in `.env` (merged with the paired set); un-pair by deleting
+`memory/telegram_chats.json`.
 
 Each chat maps to a stable conversation thread (`telegram:<chat_id>`), so working
 memory and the rolling summary persist across restarts. Proactive reminders are
@@ -168,9 +170,11 @@ codex login
 # 2. Build:
 docker build -t agentic-assistent .
 
-# 3. Run, mounting your Codex credentials read-only:
+# 3. Run, mounting your Codex credentials read-only (the container runs as the
+#    non-root user `assistant`):
 docker run --rm -p 8000:8000 \
-  -v "$HOME/.codex:/root/.codex:ro" \
+  -v "$HOME/.codex:/home/assistant/.codex:ro" \
+  -e API_TOKEN=change-me \
   agentic-assistent
 
 curl localhost:8000/health
@@ -190,10 +194,18 @@ uv run pytest
 
 Smoke tests build the graph and hit `/health` without invoking Codex.
 
+The real-embedder recall tests are skipped by default (they load the ~2GB
+embedding model); run them with `REAL_EMBEDDINGS=1 uv run pytest tests/test_recall_real.py`.
+
 ## Configuration
 
 See `.env.example`. Notably `CODEX_SANDBOX` defaults to `read-only`; widen it deliberately.
 `CODEX_WEB_SEARCH` is similarly off by default; turn it on deliberately too.
+
+Set `API_TOKEN` to require `Authorization: Bearer <token>` on every endpoint except
+`/health`. Unset, the server trusts anyone who can reach the port — fine on the
+default loopback bind, but a must before exposing it to a network (the Docker
+image binds `0.0.0.0`).
 
 ## Adding an API-backed provider later
 
@@ -204,7 +216,7 @@ integration package, add config fields, return the chat model). No other file ch
 ## Roadmap / not yet wired
 
 - OpenAI / Claude providers at the `llm.py` stubs.
-- Additional tools, routing nodes, streaming, and API auth.
+- Additional tools, routing nodes, and streaming.
 
 > **Note on the embedding model:** the default `EMBEDDING_MODEL` is
 > `intfloat/multilingual-e5-large` (1024-dim, strong Norwegian recall). Its first use

@@ -166,3 +166,53 @@ def test_maybe_summarize_trims_thread_in_background(tmp_path, monkeypatch) -> No
     state = graph.get_state(config)
     assert len(state.values["messages"]) == 2  # keep_recent tail, fully folded
     assert state.values["summary"]
+
+
+def test_run_codex_bounds_concurrency(monkeypatch) -> None:
+    """N parallel calls never run more than codex_max_concurrency subprocesses."""
+    import threading
+    import time
+    from types import SimpleNamespace
+
+    from assistant import codex_runner
+
+    monkeypatch.setattr(codex_runner, "_semaphore", None)  # fresh, sized from these settings
+    settings = Settings(codex_max_concurrency=2)
+
+    active = 0
+    peak = 0
+    gauge = threading.Lock()
+
+    def slow_fake_run(cmd, **kwargs):
+        nonlocal active, peak
+        with gauge:
+            active += 1
+            peak = max(peak, active)
+        time.sleep(0.05)
+        with gauge:
+            active -= 1
+        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(codex_runner.subprocess, "run", slow_fake_run)
+
+    threads = [
+        threading.Thread(target=codex_runner.run_codex, args=("hi", settings))
+        for _ in range(6)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert peak <= 2
+
+
+def test_ainvoke_runs_codex_without_blocking_the_loop(monkeypatch) -> None:
+    import asyncio
+
+    from assistant import llm as llm_module
+
+    monkeypatch.setattr(llm_module, "run_codex", lambda prompt, settings=None: "async-svar")
+    model = CodexChatModel(settings=Settings())
+    result = asyncio.run(model.ainvoke([HumanMessage(content="hei")]))
+    assert result.content == "async-svar"

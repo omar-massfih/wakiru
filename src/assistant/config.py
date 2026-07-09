@@ -33,6 +33,9 @@ class Settings(BaseSettings):
     codex_working_dir: str | None = None
     # Hard wall-clock cap (seconds) on a single Codex invocation.
     codex_timeout: int = 300
+    # Max Codex subprocesses running at once (each can block a worker thread
+    # for up to codex_timeout seconds); excess calls queue for a slot.
+    codex_max_concurrency: int = 4
     # Enable Codex's native web_search tool (live internet search, no
     # per-call approval). Off by default — costs extra tokens/latency;
     # widen deliberately, matching codex_sandbox's conservative default.
@@ -125,6 +128,9 @@ class Settings(BaseSettings):
     # Half-life (days) for the effective-salience decay of durable notes that
     # have never been recalled (0 disables). Decay never deletes a note.
     durable_decay_half_life_days: float = 180.0
+    # Deleted notes are moved to memory/.trash (recoverable by hand) rather than
+    # unlinked; consolidation permanently prunes them after this many days.
+    trash_retention_days: int = 30
 
     # --- Working memory (conversation history) ---
     # Summarize + trim history once it exceeds this many messages (0 disables).
@@ -183,6 +189,10 @@ class Settings(BaseSettings):
     # --- HTTP server ---
     host: str = "127.0.0.1"
     port: int = 8000
+    # Bearer token required on every endpoint except /health. None (the default)
+    # keeps the legacy loopback-trust behavior — fine on 127.0.0.1, but set this
+    # before binding to any non-loopback interface (the Docker CMD binds 0.0.0.0).
+    api_token: str | None = None
 
     @property
     def memory_path(self) -> Path:

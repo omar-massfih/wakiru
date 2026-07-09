@@ -16,6 +16,8 @@ from __future__ import annotations
 import json
 import sqlite3
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -57,7 +59,7 @@ class Event:
     updated: str = ""
 
 
-def _connect(settings: Settings) -> sqlite3.Connection:
+def _open(settings: Settings) -> sqlite3.Connection:
     settings.memory_path.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(settings.calendar_db_path)
     conn.row_factory = sqlite3.Row
@@ -72,6 +74,22 @@ def _connect(settings: Settings) -> sqlite3.Connection:
     )
     _ensure_columns(conn)
     return conn
+
+
+@contextmanager
+def _connect(settings: Settings) -> Iterator[sqlite3.Connection]:
+    """One transaction on a fresh connection, closed on exit.
+
+    ``with sqlite3.connect(...)`` alone commits but never closes — cleanup
+    would ride on CPython refcounting. This keeps every call site's
+    ``with _connect(settings) as conn`` shape while closing deterministically.
+    """
+    conn = _open(settings)
+    try:
+        with conn:
+            yield conn
+    finally:
+        conn.close()
 
 
 def _ensure_columns(conn: sqlite3.Connection) -> None:
@@ -141,6 +159,15 @@ def _normalize_stamp(settings: Settings, value: str) -> str:
     return dt.replace(tzinfo=resolve_tz(settings)).isoformat()
 
 
+def _stamp_now(settings: Settings) -> str:
+    """Current time in the assistant's timezone, for created/updated stamps —
+    matching how every other stamp in the system is resolved."""
+    # Lazy import: context imports this module at top level.
+    from .context import resolve_tz
+
+    return datetime.now(resolve_tz(settings)).isoformat(timespec="seconds")
+
+
 def _sort_key(event: Event) -> tuple[int, float, str]:
     """Order by start instant; events with an unparseable start sort last."""
     dt = parse_dt(event.start)
@@ -159,7 +186,7 @@ def create_event(
     rrule: str = "",
 ) -> Event:
     """Insert a new event and return it (with a generated id and timestamps)."""
-    now = datetime.now().astimezone().isoformat(timespec="seconds")
+    now = _stamp_now(settings)
     event = Event(
         id=uuid.uuid4().hex[:12],
         title=title.strip(),
@@ -241,7 +268,7 @@ def update_event(settings: Settings, event_id: str, **fields: str) -> Event | No
     if not updates:
         return existing
 
-    updates["updated"] = datetime.now().astimezone().isoformat(timespec="seconds")
+    updates["updated"] = _stamp_now(settings)
     columns = ", ".join(f"{k} = ?" for k in updates)
     with _connect(settings) as conn:
         conn.execute(
@@ -285,29 +312,35 @@ def delete_event(settings: Settings, event_id: str) -> Event | None:
     return existing
 
 
-def find_event(settings: Settings, query: str) -> Event | None:
-    """Resolve ``query`` to a single event: by exact id, else by title match.
+def find_events(settings: Settings, query: str) -> list[Event]:
+    """All candidate events for ``query``: an exact-id match alone, else every
+    case-insensitive title-substring match, soonest first.
 
-    The title fallback is a case-insensitive substring match; when several match,
-    the soonest upcoming one wins (past events are only considered if nothing
-    upcoming matches), so "move the dentist" targets the next dentist appointment.
+    Upcoming matches shadow past ones (past events are only returned when
+    nothing upcoming matches), so "the dentist" means the next appointment.
     """
     query = query.strip()
     if not query:
-        return None
+        return []
 
     exact = get_event(settings, query)
     if exact is not None:
-        return exact
+        return [exact]
 
     needle = query.lower()
     matches = [e for e in list_events(settings) if needle in e.title.lower()]
     if not matches:
-        return None
+        return []
 
     now = datetime.now().astimezone()
     upcoming = [e for e in matches if (dt := parse_dt(e.start)) and dt >= now]
-    return (upcoming or matches)[0]
+    return upcoming or matches
+
+
+def find_event(settings: Settings, query: str) -> Event | None:
+    """Resolve ``query`` to a single event: by exact id, else the best title match."""
+    matches = find_events(settings, query)
+    return matches[0] if matches else None
 
 
 def load_exdates(event: Event) -> list[str]:

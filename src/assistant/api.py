@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
+import secrets
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime
 from functools import lru_cache
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request
 from pydantic import BaseModel
 
 from . import telegram
@@ -50,9 +52,38 @@ def _log_task_death(task: asyncio.Task) -> None:
         logger.error("background task %r exited unexpectedly", task.get_name())
 
 
+def _is_loopback_host(host: str) -> bool:
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return host == "localhost"
+
+
+def require_token(request: Request) -> None:
+    """Gate every endpoint (except /health) behind ``API_TOKEN`` when it is set.
+
+    Unset (the default) keeps the legacy loopback-trust behavior: anyone who can
+    reach the port is trusted, which is only safe on 127.0.0.1.
+    """
+    token = get_settings().api_token
+    if not token:
+        return
+    header = request.headers.get("authorization", "")
+    scheme, _, credential = header.partition(" ")
+    if scheme.lower() != "bearer" or not secrets.compare_digest(credential.strip(), token):
+        raise HTTPException(status_code=401, detail="Missing or invalid bearer token.")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
+    if not settings.api_token and not _is_loopback_host(settings.host):
+        logger.warning(
+            "API_TOKEN is not set while binding to %s — every endpoint (including "
+            "/memory, which returns personal notes) is open to that network. "
+            "Set API_TOKEN before exposing the server.",
+            settings.host,
+        )
     tasks: list[asyncio.Task] = []
     if settings.enable_reminders and settings.reminder_tick_seconds > 0:
         tasks.append(asyncio.create_task(_reminder_tick_loop(), name="reminder-ticker"))
@@ -98,7 +129,7 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.post("/chat", response_model=ChatResponse)
+@app.post("/chat", response_model=ChatResponse, dependencies=[Depends(require_token)])
 def chat(req: ChatRequest, background: BackgroundTasks) -> ChatResponse:
     thread_id = req.thread_id or str(uuid.uuid4())
     try:
@@ -114,7 +145,7 @@ def chat(req: ChatRequest, background: BackgroundTasks) -> ChatResponse:
     return ChatResponse(reply=reply, thread_id=thread_id)
 
 
-@app.get("/memory")
+@app.get("/memory", dependencies=[Depends(require_token)])
 def memory_stats() -> dict:
     """Introspect the brain: counts by kind and the current note listing."""
     settings = get_settings()
@@ -139,13 +170,13 @@ def memory_stats() -> dict:
     }
 
 
-@app.post("/memory/consolidate")
+@app.post("/memory/consolidate", dependencies=[Depends(require_token)])
 def memory_consolidate() -> dict:
     """Trigger a consolidation pass on demand and return what changed."""
     return consolidate_memory(get_settings())
 
 
-@app.post("/reminders/run")
+@app.post("/reminders/run", dependencies=[Depends(require_token)])
 def reminders_run() -> dict:
     """Fire any reminders now due and return what was sent.
 
@@ -156,7 +187,7 @@ def reminders_run() -> dict:
     return {"count": len(fired), "fired": fired}
 
 
-@app.get("/calendar")
+@app.get("/calendar", dependencies=[Depends(require_token)])
 def calendar() -> dict:
     """List upcoming events (within the configured horizon) and the current time."""
     settings = get_settings()

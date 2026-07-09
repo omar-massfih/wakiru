@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 
 from ..config import Settings, get_settings
@@ -29,10 +31,10 @@ logger = logging.getLogger(__name__)
 _LEDGER_RETENTION_DAYS = 30
 
 
-def _connect(settings: Settings) -> sqlite3.Connection:
+def _open(settings: Settings) -> sqlite3.Connection:
     """Open the calendar DB and ensure the dedupe ledger exists.
 
-    Mirrors :func:`assistant.calendar.store._connect` (WAL + busy timeout, a fresh
+    Mirrors :func:`assistant.calendar.store._open` (WAL + busy timeout, a fresh
     connection per operation) and shares the same ``calendar.db`` file.
     """
     settings.memory_path.mkdir(parents=True, exist_ok=True)
@@ -47,6 +49,17 @@ def _connect(settings: Settings) -> sqlite3.Connection:
         " PRIMARY KEY (event_id, event_start, lead_minutes))"
     )
     return conn
+
+
+@contextmanager
+def _connect(settings: Settings) -> Iterator[sqlite3.Connection]:
+    """One transaction on a fresh connection, closed on exit (see store._connect)."""
+    conn = _open(settings)
+    try:
+        with conn:
+            yield conn
+    finally:
+        conn.close()
 
 
 def _humanize(delta: timedelta) -> str:

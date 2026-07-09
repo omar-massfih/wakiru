@@ -24,25 +24,26 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 import yaml
 
 from ..config import Settings
 
-# kind -> subdirectory. The three cognitive stores.
-_CATEGORY = {
-    "episodic": "episodic",
-    "semantic": "semantic",
-    "procedural": "procedural",
-}
+# The three cognitive stores; each kind lives in a same-named subdirectory.
+_KINDS = frozenset({"episodic", "semantic", "procedural"})
 _DEFAULT_KIND = "semantic"
 
 # Back-compat: the old two-value ``type`` and its directories.
 _LEGACY_KIND = {"fact": "semantic", "learning": "procedural"}
 
 INDEX_FILENAME = "MEMORY.md"
+
+# Deleted notes are moved here (under the memory root) instead of unlinked, so
+# an LLM-driven forget is recoverable by hand until consolidation prunes it.
+TRASH_DIRNAME = ".trash"
+_TRASH_STAMP_FORMAT = "%Y%m%dT%H%M%S"
 
 # Human-friendly order for the grouped MEMORY.md listing.
 _KIND_ORDER = ["semantic", "procedural", "episodic"]
@@ -62,7 +63,7 @@ def normalize_kind(kind: str | None) -> str | None:
     if not kind:
         return None
     kind = _LEGACY_KIND.get(kind, kind)
-    return kind if kind in _CATEGORY else None
+    return kind if kind in _KINDS else None
 
 
 @dataclass
@@ -84,10 +85,6 @@ class Note:
 
     def __post_init__(self) -> None:
         self.kind = normalize_kind(self.kind) or _DEFAULT_KIND
-
-    @property
-    def category(self) -> str:
-        return _CATEGORY.get(self.kind, _CATEGORY[_DEFAULT_KIND])
 
     @property
     def index_text(self) -> str:
@@ -127,7 +124,8 @@ def memory_root(settings: Settings) -> Path:
 
 
 def note_path(settings: Settings, note: Note) -> Path:
-    return memory_root(settings) / note.category / f"{note.name}.md"
+    # note.kind is always a valid kind (normalized in __post_init__).
+    return memory_root(settings) / note.kind / f"{note.name}.md"
 
 
 _FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---\n?(.*)$", re.DOTALL)
@@ -198,11 +196,11 @@ def write_note(settings: Settings, note: Note) -> Path:
 
 
 def list_notes(settings: Settings) -> list[Note]:
-    """All notes on disk, sorted by name."""
+    """All live notes on disk, sorted by name (trashed notes excluded)."""
     root = memory_root(settings)
     notes: list[Note] = []
     for path in root.rglob("*.md"):
-        if path.name == INDEX_FILENAME:
+        if path.name == INDEX_FILENAME or TRASH_DIRNAME in path.parts:
             continue
         try:
             notes.append(read_note(path))
@@ -212,9 +210,20 @@ def list_notes(settings: Settings) -> list[Note]:
 
 
 def find_note(settings: Settings, name: str) -> Note | None:
-    for note in list_notes(settings):
-        if note.name == name:
-            return note
+    """Look up a note by name without scanning the whole store.
+
+    A note's path is deterministic per kind, so probe the three candidate
+    paths directly — this runs several times per save, and a full ``rglob``
+    scan grows linearly with the store.
+    """
+    root = memory_root(settings)
+    for kind_dir in _KINDS:
+        path = root / kind_dir / f"{name}.md"
+        if path.exists():
+            try:
+                return read_note(path)
+            except (ValueError, KeyError):
+                continue  # malformed file — same skip rule as list_notes
     return None
 
 
@@ -226,20 +235,59 @@ def purge_stale_files(settings: Settings, name: str, keep_kind: str) -> None:
     stale duplicate behind.
     """
     root = memory_root(settings)
-    keep_dir = _CATEGORY.get(keep_kind, _CATEGORY[_DEFAULT_KIND])
-    for category in set(_CATEGORY.values()):
-        if category == keep_dir:
+    keep_dir = keep_kind if keep_kind in _KINDS else _DEFAULT_KIND
+    for kind_dir in _KINDS:
+        if kind_dir == keep_dir:
             continue
-        (root / category / f"{name}.md").unlink(missing_ok=True)
+        (root / kind_dir / f"{name}.md").unlink(missing_ok=True)
 
 
 def delete_note(settings: Settings, name: str) -> Note | None:
-    """Delete a note by name; return it if it existed."""
+    """Soft-delete a note by name; return it if it existed.
+
+    The file is moved into ``.trash/`` (timestamp-prefixed) rather than
+    unlinked, so a deletion decided by an LLM op — which happens with no user
+    confirmation — stays recoverable by hand until :func:`prune_trash` ages it
+    out during consolidation.
+    """
     note = find_note(settings, name)
     if note is None:
         return None
-    note_path(settings, note).unlink(missing_ok=True)
+    path = note_path(settings, note)
+    trash = memory_root(settings) / TRASH_DIRNAME
+    trash.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().astimezone().strftime(_TRASH_STAMP_FORMAT)
+    target = trash / f"{stamp}-{note.kind}-{note.name}.md"
+    i = 2
+    while target.exists():
+        target = trash / f"{stamp}-{note.kind}-{note.name}-{i}.md"
+        i += 1
+    try:
+        path.replace(target)
+    except FileNotFoundError:
+        pass  # already gone — the deletion still "happened"
     return note
+
+
+def prune_trash(settings: Settings, max_age_days: int) -> int:
+    """Permanently remove trashed notes older than ``max_age_days``."""
+    trash = memory_root(settings) / TRASH_DIRNAME
+    if not trash.exists():
+        return 0
+    now = datetime.now().astimezone()
+    pruned = 0
+    for path in trash.glob("*.md"):
+        try:
+            deleted_at = datetime.strptime(
+                path.name.split("-", 1)[0], _TRASH_STAMP_FORMAT
+            ).astimezone()
+        except ValueError:
+            # No parseable stamp — fall back to the file's mtime.
+            deleted_at = datetime.fromtimestamp(path.stat().st_mtime).astimezone()
+        if (now - deleted_at).days >= max_age_days:
+            path.unlink(missing_ok=True)
+            pruned += 1
+    return pruned
 
 
 def regenerate_index(settings: Settings) -> Path:

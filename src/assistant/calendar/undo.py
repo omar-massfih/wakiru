@@ -12,6 +12,8 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import timedelta
 
@@ -22,7 +24,7 @@ from .context import format_when, now
 logger = logging.getLogger(__name__)
 
 
-def _connect(settings: Settings) -> sqlite3.Connection:
+def _open(settings: Settings) -> sqlite3.Connection:
     settings.memory_path.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(settings.calendar_db_path)
     conn.row_factory = sqlite3.Row
@@ -36,6 +38,17 @@ def _connect(settings: Settings) -> sqlite3.Connection:
         " undone_at TEXT)"
     )
     return conn
+
+
+@contextmanager
+def _connect(settings: Settings) -> Iterator[sqlite3.Connection]:
+    """One transaction on a fresh connection, closed on exit (see store._connect)."""
+    conn = _open(settings)
+    try:
+        with conn:
+            yield conn
+    finally:
+        conn.close()
 
 
 def record_write(

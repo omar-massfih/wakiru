@@ -55,13 +55,6 @@ def embed_query(text: str, settings: Settings | None = None) -> list[float]:
     return _embed([text], _QUERY_PREFIX, settings)[0]
 
 
-# Back-compat: the plain names default to the passage/document side, which is
-# what note storage and dedup want.
-def embed(texts: list[str], settings: Settings | None = None) -> list[list[float]]:
-    """Embed a batch of stored texts into normalized float vectors."""
-    return embed_passages(texts, settings)
-
-
 def embed_one(text: str, settings: Settings | None = None) -> list[float]:
     """Embed a single stored text (passage side)."""
     return embed_passages([text], settings)[0]
