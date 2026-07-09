@@ -53,6 +53,12 @@ class Settings(BaseSettings):
     # widen deliberately, matching codex_sandbox's conservative default.
     codex_web_search: bool = False
 
+    # --- Storage backend ---
+    # local keeps the original markdown + SQLite stores. postgres is intended
+    # for Vercel Marketplace databases such as Neon with pgvector enabled.
+    storage_backend: str = "local"
+    database_url: str | None = None
+
     # --- Memory (the "brain") ---
     # Root directory for long-term memory notes + the SQLite index. Relative
     # paths resolve against the server's working directory.

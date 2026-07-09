@@ -139,7 +139,23 @@ def maybe_summarize(
         logger.exception("background summarization failed for thread %s", thread_id)
 
 
-def _checkpointer(settings: Settings) -> SqliteSaver:
+def _checkpointer(settings: Settings):
+    if settings.storage_backend == "postgres":
+        if not settings.database_url:
+            raise RuntimeError("DATABASE_URL is required when STORAGE_BACKEND=postgres")
+        try:
+            import psycopg
+            from langgraph.checkpoint.postgres import PostgresSaver
+        except ImportError as exc:  # pragma: no cover - depends on deployment extras
+            raise RuntimeError(
+                "STORAGE_BACKEND=postgres requires psycopg[binary] and "
+                "langgraph-checkpoint-postgres"
+            ) from exc
+        conn = psycopg.connect(settings.database_url, autocommit=True)
+        saver = PostgresSaver(conn)
+        saver.setup()
+        return saver
+
     conn = sqlite3.connect(settings.checkpoints_db_path, check_same_thread=False)
     conn.execute("PRAGMA busy_timeout = 5000")
     conn.execute("PRAGMA journal_mode = WAL")

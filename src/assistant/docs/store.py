@@ -106,6 +106,16 @@ def chunk_text(text: str, target_chars: int) -> list[str]:
 
 def add_document(settings: Settings, title: str, text: str) -> Document:
     """Ingest a document: store it, chunk it, embed each chunk, index the vectors."""
+    if settings.storage_backend == "postgres":
+        from .. import storage_postgres
+
+        pieces = chunk_text(text, settings.docs_chunk_chars)
+        vectors = embed_passages(pieces, settings) if pieces else []
+        if len(vectors) != len(pieces):
+            raise RuntimeError(
+                f"embedder returned {len(vectors)} vectors for {len(pieces)} chunks"
+            )
+        return storage_postgres.add_document(settings, title, text, pieces, vectors)
     doc = Document(
         id=uuid.uuid4().hex[:12],
         title=title.strip() or "(untitled)",
@@ -140,6 +150,10 @@ def add_document(settings: Settings, title: str, text: str) -> Document:
 
 
 def list_documents(settings: Settings) -> list[Document]:
+    if settings.storage_backend == "postgres":
+        from .. import storage_postgres
+
+        return storage_postgres.list_documents(settings)
     conn = _connect(settings)
     try:
         rows = conn.execute(
@@ -156,6 +170,10 @@ def list_documents(settings: Settings) -> list[Document]:
 
 
 def get_document(settings: Settings, doc_id: str) -> Document | None:
+    if settings.storage_backend == "postgres":
+        from .. import storage_postgres
+
+        return storage_postgres.get_document(settings, doc_id)
     conn = _connect(settings)
     try:
         row = conn.execute(
@@ -170,6 +188,10 @@ def get_document(settings: Settings, doc_id: str) -> Document | None:
 
 def delete_document(settings: Settings, doc_id: str) -> bool:
     """Delete a document and its chunks (and their vectors). Returns whether it existed."""
+    if settings.storage_backend == "postgres":
+        from .. import storage_postgres
+
+        return storage_postgres.delete_document(settings, doc_id)
     conn = _connect(settings)
     try:
         chunk_ids = [
@@ -203,6 +225,10 @@ def search_chunks(settings: Settings, query: str, top_k: int | None = None) -> l
     if not query:
         return []
     top_k = top_k or settings.docs_recall_top_k
+    if settings.storage_backend == "postgres":
+        from .. import storage_postgres
+
+        return storage_postgres.search_chunks(settings, embed_query(query, settings), top_k)
     conn = _connect(settings)
     try:
         if not _vec_table_exists(conn):

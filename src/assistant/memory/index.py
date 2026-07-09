@@ -112,6 +112,15 @@ def upsert(
     text_hash: str = "",
 ) -> None:
     """Insert or replace the index entry for ``name`` (preserving its rowid data)."""
+    if settings.storage_backend == "postgres":
+        from .. import storage_postgres
+
+        storage_postgres.upsert_memory_index(
+            settings, name, path, description, vector, kind=kind, salience=salience,
+            updated=updated, last_recalled=last_recalled, recall_count=recall_count,
+            text_hash=text_hash,
+        )
+        return
     conn = _connect(settings)
     try:
         _ensure_vec_table(conn, len(vector), settings)
@@ -136,6 +145,10 @@ def upsert(
 
 def remove(settings: Settings, name: str) -> bool:
     """Drop ``name`` from the index. Returns whether it existed."""
+    if settings.storage_backend == "postgres":
+        from .. import storage_postgres
+
+        return storage_postgres.remove_memory_index(settings, name)
     conn = _connect(settings)
     try:
         row = conn.execute("SELECT id FROM notes WHERE name = ?", (name,)).fetchone()
@@ -156,6 +169,10 @@ def search_ranked(
     """Top-k as ``(name, path, description, kind, salience, recall_count,
     last_recalled, similarity)`` — everything recall needs to re-rank cheaply.
     """
+    if settings.storage_backend == "postgres":
+        from .. import storage_postgres
+
+        return storage_postgres.search_memory_index(settings, query_vector, k)
     conn = _connect(settings)
     try:
         if _vec_dim(conn) is None:
@@ -183,6 +200,10 @@ def list_entries(
     consolidation eviction pass without opening any files. ``salience`` is the
     *effective* value (consolidation may have decayed it below the file's copy).
     """
+    if settings.storage_backend == "postgres":
+        from .. import storage_postgres
+
+        return storage_postgres.list_memory_entries(settings)
     conn = _connect(settings)
     try:
         return conn.execute(
@@ -194,6 +215,10 @@ def list_entries(
 
 
 def bump_turn_counter(settings: Settings) -> int:
+    if settings.storage_backend == "postgres":
+        from .. import storage_postgres
+
+        return storage_postgres.bump_turn_counter(settings)
     """Increment and return the persistent chat-turn counter.
 
     Drives the periodic-consolidation cadence; lives in the ``meta`` table so it
@@ -216,6 +241,11 @@ def bump_turn_counter(settings: Settings) -> int:
 
 
 def bump_recall(settings: Settings, names: list[str]) -> None:
+    if settings.storage_backend == "postgres":
+        from .. import storage_postgres
+
+        storage_postgres.bump_recall(settings, names)
+        return
     """Reinforce: increment ``recall_count`` and stamp ``last_recalled`` = today.
 
     Cheap, index-only — the authoritative counters. Consolidation later mirrors
@@ -238,6 +268,11 @@ def bump_recall(settings: Settings, names: list[str]) -> None:
 
 def set_salience(settings: Settings, name: str, salience: float) -> None:
     """Update the cached salience used for re-ranking (index-only)."""
+    if settings.storage_backend == "postgres":
+        from .. import storage_postgres
+
+        storage_postgres.set_salience(settings, name, salience)
+        return
     conn = _connect(settings)
     try:
         conn.execute(
@@ -250,6 +285,10 @@ def set_salience(settings: Settings, name: str, salience: float) -> None:
 
 def get_stats(settings: Settings, name: str) -> tuple[int, str] | None:
     """Return ``(recall_count, last_recalled)`` for ``name``, or ``None``."""
+    if settings.storage_backend == "postgres":
+        from .. import storage_postgres
+
+        return storage_postgres.get_stats(settings, name)
     conn = _connect(settings)
     try:
         row = conn.execute(
@@ -262,6 +301,10 @@ def get_stats(settings: Settings, name: str) -> tuple[int, str] | None:
 
 @locked
 def reindex(settings: Settings) -> int:
+    if settings.storage_backend == "postgres":
+        from .. import storage_postgres
+
+        return storage_postgres.reindex_memory(settings)
     """Rebuild the vector index from the markdown files (the source of truth).
 
     Self-heals drift from hand-edits and migrates on an embedding-model change:

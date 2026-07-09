@@ -174,7 +174,7 @@ def revise_memory(
     existing.updated = _today()
 
     new_path = store.note_path(settings, existing)
-    if old_path != new_path:  # kind changed -> file moves directories
+    if old_path != new_path and settings.storage_backend != "postgres":
         old_path.unlink(missing_ok=True)
 
     # Preserve reinforcement counters from the authoritative index (the file's

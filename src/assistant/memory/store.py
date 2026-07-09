@@ -124,6 +124,10 @@ def memory_root(settings: Settings) -> Path:
 
 
 def note_path(settings: Settings, note: Note) -> Path:
+    if settings.storage_backend == "postgres":
+        from .. import storage_postgres
+
+        return storage_postgres.virtual_note_path(settings, note)
     # note.kind is always a valid kind (normalized in __post_init__).
     return memory_root(settings) / note.kind / f"{note.name}.md"
 
@@ -171,6 +175,10 @@ def read_note(path: Path) -> Note:
 
 
 def unique_name(settings: Settings, slug: str, keep: str | None = None) -> str:
+    if settings.storage_backend == "postgres":
+        from .. import storage_postgres
+
+        return storage_postgres.unique_name(settings, slug, keep)
     """A note name that won't clobber a *different* existing note.
 
     If ``slug`` is free, or already belongs to ``keep`` (the note we intend to
@@ -188,7 +196,11 @@ def unique_name(settings: Settings, slug: str, keep: str | None = None) -> str:
 
 
 def write_note(settings: Settings, note: Note) -> Path:
-    """Write a note to disk, creating its category directory as needed."""
+    """Write a note to the configured store."""
+    if settings.storage_backend == "postgres":
+        from .. import storage_postgres
+
+        return storage_postgres.write_note(settings, note)
     path = note_path(settings, note)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(note.render(), encoding="utf-8")
@@ -196,7 +208,11 @@ def write_note(settings: Settings, note: Note) -> Path:
 
 
 def list_notes(settings: Settings) -> list[Note]:
-    """All live notes on disk, sorted by name (trashed notes excluded)."""
+    """All live notes, sorted by name (trashed notes excluded)."""
+    if settings.storage_backend == "postgres":
+        from .. import storage_postgres
+
+        return storage_postgres.list_notes(settings)
     root = memory_root(settings)
     notes: list[Note] = []
     for path in root.rglob("*.md"):
@@ -210,6 +226,10 @@ def list_notes(settings: Settings) -> list[Note]:
 
 
 def find_note(settings: Settings, name: str) -> Note | None:
+    if settings.storage_backend == "postgres":
+        from .. import storage_postgres
+
+        return storage_postgres.find_note(settings, name)
     """Look up a note by name without scanning the whole store.
 
     A note's path is deterministic per kind, so probe the three candidate
@@ -228,6 +248,11 @@ def find_note(settings: Settings, name: str) -> Note | None:
 
 
 def purge_stale_files(settings: Settings, name: str, keep_kind: str) -> None:
+    if settings.storage_backend == "postgres":
+        from .. import storage_postgres
+
+        storage_postgres.purge_stale_files(settings, name, keep_kind)
+        return
     """Delete any ``<name>.md`` living under a kind dir other than ``keep_kind``.
 
     Guarantees one file per note name even when a note changes kind (e.g. an
@@ -243,6 +268,10 @@ def purge_stale_files(settings: Settings, name: str, keep_kind: str) -> None:
 
 
 def delete_note(settings: Settings, name: str) -> Note | None:
+    if settings.storage_backend == "postgres":
+        from .. import storage_postgres
+
+        return storage_postgres.delete_note(settings, name)
     """Soft-delete a note by name; return it if it existed.
 
     The file is moved into ``.trash/`` (timestamp-prefixed) rather than
@@ -271,6 +300,10 @@ def delete_note(settings: Settings, name: str) -> Note | None:
 
 def prune_trash(settings: Settings, max_age_days: int) -> int:
     """Permanently remove trashed notes older than ``max_age_days``."""
+    if settings.storage_backend == "postgres":
+        from .. import storage_postgres
+
+        return storage_postgres.prune_trash(settings, max_age_days)
     trash = memory_root(settings) / TRASH_DIRNAME
     if not trash.exists():
         return 0
@@ -291,7 +324,11 @@ def prune_trash(settings: Settings, max_age_days: int) -> int:
 
 
 def regenerate_index(settings: Settings) -> Path:
-    """Rewrite ``MEMORY.md`` from the notes currently on disk, grouped by kind."""
+    """Rewrite/export ``MEMORY.md`` from the configured note store."""
+    if settings.storage_backend == "postgres":
+        from .. import storage_postgres
+
+        return storage_postgres.regenerate_index(settings)
     notes = list_notes(settings)
     lines = ["# Memory index", ""]
     if not notes:
@@ -316,6 +353,10 @@ def regenerate_index(settings: Settings) -> Path:
 
 def read_index(settings: Settings) -> str:
     """Current ``MEMORY.md`` contents, regenerating if absent."""
+    if settings.storage_backend == "postgres":
+        from .. import storage_postgres
+
+        return storage_postgres.read_index(settings)
     path = memory_root(settings) / INDEX_FILENAME
     if not path.exists():
         regenerate_index(settings)

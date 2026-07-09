@@ -64,6 +64,15 @@ def record_write(
     if not thread_id:
         return
     try:
+        if settings.storage_backend == "postgres":
+            from .. import storage_postgres
+
+            storage_postgres.record_calendar_write(
+                settings, thread_id, batch_id, event_id, op, summary,
+                json.dumps(asdict(before)) if before else None,
+                now(settings).isoformat(timespec="seconds"),
+            )
+            return
         with _connect(settings) as conn:
             conn.execute(
                 "INSERT INTO write_log"
@@ -85,6 +94,16 @@ def latest_applied_at(settings: Settings, thread_id: str, window_minutes: int):
     :mod:`assistant.undo` decide whether the calendar or the tasks ledger owns
     the most recent write."""
     cutoff = now(settings) - timedelta(minutes=window_minutes)
+    if settings.storage_backend == "postgres":
+        from .. import storage_postgres
+
+        rows = storage_postgres.calendar_write_rows(settings, thread_id)
+        if not rows:
+            return None
+        applied_at = store.parse_dt(str(rows[0]["applied_at"]))
+        if applied_at is None or applied_at < cutoff:
+            return None
+        return applied_at
     with _connect(settings) as conn:
         latest = conn.execute(
             "SELECT applied_at FROM write_log WHERE thread_id = ? AND undone_at IS NULL"
@@ -126,27 +145,39 @@ def undo_latest(settings: Settings, thread_id: str, window_minutes: int) -> str:
     """
     cutoff = now(settings) - timedelta(minutes=window_minutes)
 
-    with _connect(settings) as conn:
-        latest = conn.execute(
-            "SELECT * FROM write_log WHERE thread_id = ? AND undone_at IS NULL"
-            " ORDER BY id DESC LIMIT 1",
-            (thread_id,),
-        ).fetchone()
-        if latest is None:
+    if settings.storage_backend == "postgres":
+        from .. import storage_postgres
+
+        all_rows = storage_postgres.calendar_write_rows(settings, thread_id)
+        if not all_rows:
             return "Nothing to undo."
-        # Compare as datetimes, not ISO strings: stamps written under different
-        # UTC offsets (a DST change) don't order lexically.
-        applied_at = store.parse_dt(latest["applied_at"])
+        latest = all_rows[0]
+        applied_at = store.parse_dt(str(latest["applied_at"]))
         if applied_at is None or applied_at < cutoff:
             return "Nothing recent enough to undo."
-        rows = [
-            dict(r)
-            for r in conn.execute(
-                "SELECT * FROM write_log WHERE thread_id = ? AND batch_id = ?"
-                " AND undone_at IS NULL ORDER BY id DESC",
-                (thread_id, latest["batch_id"]),
-            ).fetchall()
-        ]
+        rows = [r for r in all_rows if r["batch_id"] == latest["batch_id"]]
+    else:
+        with _connect(settings) as conn:
+            latest = conn.execute(
+                "SELECT * FROM write_log WHERE thread_id = ? AND undone_at IS NULL"
+                " ORDER BY id DESC LIMIT 1",
+                (thread_id,),
+            ).fetchone()
+            if latest is None:
+                return "Nothing to undo."
+            # Compare as datetimes, not ISO strings: stamps written under different
+            # UTC offsets (a DST change) don't order lexically.
+            applied_at = store.parse_dt(latest["applied_at"])
+            if applied_at is None or applied_at < cutoff:
+                return "Nothing recent enough to undo."
+            rows = [
+                dict(r)
+                for r in conn.execute(
+                    "SELECT * FROM write_log WHERE thread_id = ? AND batch_id = ?"
+                    " AND undone_at IS NULL ORDER BY id DESC",
+                    (thread_id, latest["batch_id"]),
+                ).fetchall()
+            ]
 
     summaries: list[str] = []
     reverted_ids: list[int] = []
@@ -160,10 +191,15 @@ def undo_latest(settings: Settings, thread_id: str, window_minutes: int) -> str:
         return "Nothing to undo."
 
     undone_at = now(settings).isoformat(timespec="seconds")
-    with _connect(settings) as conn:
-        conn.executemany(
-            "UPDATE write_log SET undone_at = ? WHERE id = ?",
-            [(undone_at, rid) for rid in reverted_ids],
-        )
+    if settings.storage_backend == "postgres":
+        from .. import storage_postgres
+
+        storage_postgres.mark_calendar_writes_undone(settings, reverted_ids, undone_at)
+    else:
+        with _connect(settings) as conn:
+            conn.executemany(
+                "UPDATE write_log SET undone_at = ? WHERE id = ?",
+                [(undone_at, rid) for rid in reverted_ids],
+            )
 
     return "Undone: " + "; ".join(summaries)

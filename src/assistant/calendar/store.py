@@ -186,6 +186,10 @@ def create_event(
     rrule: str = "",
 ) -> Event:
     """Insert a new event and return it (with a generated id and timestamps)."""
+    if settings.storage_backend == "postgres":
+        from .. import storage_postgres
+
+        return storage_postgres.create_event(settings, title, start, end, location, notes, rrule)
     now = _stamp_now(settings)
     event = Event(
         id=uuid.uuid4().hex[:12],
@@ -212,6 +216,10 @@ def create_event(
 
 
 def get_event(settings: Settings, event_id: str) -> Event | None:
+    if settings.storage_backend == "postgres":
+        from .. import storage_postgres
+
+        return storage_postgres.get_event(settings, event_id)
     with _connect(settings) as conn:
         row = conn.execute(
             "SELECT * FROM events WHERE id = ?", (event_id,)
@@ -229,9 +237,14 @@ def list_events(
     Bounds are optional and inclusive. Events with an unparseable start are
     excluded when either bound is given, and otherwise sorted to the end.
     """
-    with _connect(settings) as conn:
-        rows = conn.execute("SELECT * FROM events").fetchall()
-    events = [_row_to_event(r) for r in rows]
+    if settings.storage_backend == "postgres":
+        from .. import storage_postgres
+
+        events = storage_postgres.list_events(settings)
+    else:
+        with _connect(settings) as conn:
+            rows = conn.execute("SELECT * FROM events").fetchall()
+        events = [_row_to_event(r) for r in rows]
 
     if start_from is not None or start_to is not None:
         bounded: list[Event] = []
@@ -254,6 +267,11 @@ def update_event(settings: Settings, event_id: str, **fields: str) -> Event | No
 
     Only known, non-``None`` fields in :data:`_FIELDS` are applied.
     """
+    if settings.storage_backend == "postgres":
+        from .. import storage_postgres
+
+        updates = {k: str(v).strip() for k, v in fields.items() if k in _FIELDS and v is not None}
+        return storage_postgres.update_event(settings, event_id, updates)
     updates = {
         k: str(v).strip()
         for k, v in fields.items()
@@ -279,6 +297,10 @@ def update_event(settings: Settings, event_id: str, **fields: str) -> Event | No
 
 
 def restore_event(settings: Settings, event: Event) -> Event:
+    if settings.storage_backend == "postgres":
+        from .. import storage_postgres
+
+        return storage_postgres.restore_event(settings, event)
     """Re-insert a full event snapshot verbatim, overwriting any current row
     with the same id.
 
@@ -304,6 +326,10 @@ def restore_event(settings: Settings, event: Event) -> Event:
 
 def delete_event(settings: Settings, event_id: str) -> Event | None:
     """Delete an event by id; return it if it existed."""
+    if settings.storage_backend == "postgres":
+        from .. import storage_postgres
+
+        return storage_postgres.delete_event(settings, event_id)
     existing = get_event(settings, event_id)
     if existing is None:
         return None

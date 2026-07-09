@@ -123,20 +123,25 @@ def run_task_reminders(settings: Settings | None = None) -> list[dict]:
     fired_at = current.isoformat(timespec="seconds")
     due = due_task_reminders(settings, current)
 
-    sent: list[dict] = []
-    with _connect(settings) as conn:
-        _prune_ledger(conn, current)
-        for reminder in due:
-            claimed = 0
-            for lead in reminder["covered_leads"]:
-                cursor = conn.execute(
-                    "INSERT OR IGNORE INTO task_reminders_fired"
-                    " (task_id, due, lead_minutes, fired_at) VALUES (?, ?, ?, ?)",
-                    (reminder["task_id"], reminder["due"], lead, fired_at),
-                )
-                claimed += cursor.rowcount
-            if claimed:
-                sent.append(reminder)
+    if settings.storage_backend == "postgres":
+        from .. import storage_postgres
+
+        sent = storage_postgres.claim_task_reminders(settings, due, fired_at, current)
+    else:
+        sent: list[dict] = []
+        with _connect(settings) as conn:
+            _prune_ledger(conn, current)
+            for reminder in due:
+                claimed = 0
+                for lead in reminder["covered_leads"]:
+                    cursor = conn.execute(
+                        "INSERT OR IGNORE INTO task_reminders_fired"
+                        " (task_id, due, lead_minutes, fired_at) VALUES (?, ?, ?, ?)",
+                        (reminder["task_id"], reminder["due"], lead, fired_at),
+                    )
+                    claimed += cursor.rowcount
+                if claimed:
+                    sent.append(reminder)
 
     for reminder in sent:
         try:

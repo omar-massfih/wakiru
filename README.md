@@ -20,7 +20,7 @@ Telegram bot  /
   by `LLM_PROVIDER`. `codex` (default), `openai`, and `anthropic` are all wired; the API-backed
   providers read `LLM_API_KEY` / `LLM_MODEL` (and `LLM_BASE_URL` for openai).
 - **`agent.py`** — the LangGraph graph: `START -> recall -> agenda -> tasks -> codex -> END`, with a
-  SQLite checkpointer for conversation history. Working-memory summarization runs off the reply path
+  SQLite checkpointer for conversation history by default, or Postgres checkpoints when `STORAGE_BACKEND=postgres`. Working-memory summarization runs off the reply path
   (in the background), not as a graph node.
 - **`chat.py`** — the channel-agnostic core: one turn of conversation plus its
   post-reply upkeep (memory, summary folding, calendar, consolidation), shared by
@@ -60,7 +60,7 @@ Responses `web_search` tool (off by default — extra tokens/latency per turn).
 
 ## The brain (memory)
 
-Memory lives in `memory/` and has two layers:
+Memory lives in `memory/` by default. In deployment, set `STORAGE_BACKEND=postgres` with `DATABASE_URL` from a Vercel Marketplace Postgres provider such as Neon to store conversation checkpoints, long-term memory, and document vectors in Postgres/pgvector. It has two layers:
 
 - **Working memory** — the conversation, persisted per `thread_id` by the LangGraph
   SQLite checkpointer. Once it grows past a threshold, older turns are folded into a
@@ -193,10 +193,10 @@ codex login
 # 2. Build:
 docker build -t agentic-assistent .
 
-# 3. Run, mounting your Codex credentials read-only (the container runs as the
-#    non-root user `assistant`):
+# 3. Run, mounting your Codex credentials (Codex needs a writable CODEX_HOME at
+#    runtime for its app-server client; auth still lives on the host):
 docker run --rm -p 8000:8000 \
-  -v "$HOME/.codex:/home/assistant/.codex:ro" \
+  -v "$HOME/.codex:/home/assistant/.codex" \
   -e API_TOKEN=change-me \
   agentic-assistent
 
@@ -219,6 +219,27 @@ Smoke tests build the graph and hit `/health` without invoking Codex.
 
 The real-embedder recall tests are skipped by default (they load the ~2GB
 embedding model); run them with `REAL_EMBEDDINGS=1 uv run pytest tests/test_recall_real.py`.
+
+## Vercel / Neon storage
+
+For durable deployment storage, provision Neon from Vercel Marketplace and expose
+its connection string as `DATABASE_URL`:
+
+```sh
+vercel install neon
+```
+
+Then run the assistant with:
+
+```sh
+STORAGE_BACKEND=postgres
+DATABASE_URL=postgres://...
+```
+
+The local backend remains the default for development. The Postgres backend stores
+LangGraph checkpoints, long-term memory notes, memory embeddings, documents, and
+document chunk embeddings in Postgres using `pgvector`; `memory/MEMORY.md` becomes
+an export artifact instead of the source of truth.
 
 ## Configuration
 

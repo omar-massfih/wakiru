@@ -123,6 +123,10 @@ def create_task(
     settings: Settings, title: str, due: str = "", notes: str = ""
 ) -> Task:
     """Insert a new open task and return it (with a generated id and timestamps)."""
+    if settings.storage_backend == "postgres":
+        from .. import storage_postgres
+
+        return storage_postgres.create_task(settings, title, due, notes)
     now = _stamp_now(settings)
     task = Task(
         id=uuid.uuid4().hex[:12],
@@ -143,6 +147,10 @@ def create_task(
 
 
 def get_task(settings: Settings, task_id: str) -> Task | None:
+    if settings.storage_backend == "postgres":
+        from .. import storage_postgres
+
+        return storage_postgres.get_task(settings, task_id)
     with _connect(settings) as conn:
         row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
     return _row_to_task(row) if row else None
@@ -151,9 +159,14 @@ def get_task(settings: Settings, task_id: str) -> Task | None:
 def list_tasks(settings: Settings, include_done: bool = False) -> list[Task]:
     """Open tasks (soonest due first, undated last). ``include_done`` adds
     completed ones after the open ones."""
-    with _connect(settings) as conn:
-        rows = conn.execute("SELECT * FROM tasks").fetchall()
-    tasks = [_row_to_task(r) for r in rows]
+    if settings.storage_backend == "postgres":
+        from .. import storage_postgres
+
+        tasks = storage_postgres.list_tasks(settings)
+    else:
+        with _connect(settings) as conn:
+            rows = conn.execute("SELECT * FROM tasks").fetchall()
+        tasks = [_row_to_task(r) for r in rows]
     open_tasks = sorted((t for t in tasks if not t.done), key=_sort_key)
     if not include_done:
         return open_tasks
@@ -165,6 +178,11 @@ def list_tasks(settings: Settings, include_done: bool = False) -> list[Task]:
 
 def update_task(settings: Settings, task_id: str, **fields: str) -> Task | None:
     """Update the given columns on a task; return it, or ``None`` if absent."""
+    if settings.storage_backend == "postgres":
+        from .. import storage_postgres
+
+        updates = {k: str(v).strip() for k, v in fields.items() if k in _FIELDS and v is not None}
+        return storage_postgres.update_task(settings, task_id, updates)
     updates = {
         k: str(v).strip()
         for k, v in fields.items()
@@ -189,6 +207,10 @@ def update_task(settings: Settings, task_id: str, **fields: str) -> Task | None:
 
 def complete_task(settings: Settings, task_id: str) -> Task | None:
     """Mark a task done (idempotent); return it, or ``None`` if absent."""
+    if settings.storage_backend == "postgres":
+        from .. import storage_postgres
+
+        return storage_postgres.complete_task(settings, task_id)
     existing = get_task(settings, task_id)
     if existing is None:
         return None
@@ -204,6 +226,10 @@ def complete_task(settings: Settings, task_id: str) -> Task | None:
 
 
 def restore_task(settings: Settings, task: Task) -> Task:
+    if settings.storage_backend == "postgres":
+        from .. import storage_postgres
+
+        return storage_postgres.restore_task(settings, task)
     """Re-insert a full task snapshot verbatim, overwriting any current row with
     the same id. Used by the undo path (see :mod:`.undo`); never bumps ``updated``."""
     with _connect(settings) as conn:
@@ -221,6 +247,10 @@ def restore_task(settings: Settings, task: Task) -> Task:
 
 def delete_task(settings: Settings, task_id: str) -> Task | None:
     """Delete a task by id; return it if it existed."""
+    if settings.storage_backend == "postgres":
+        from .. import storage_postgres
+
+        return storage_postgres.delete_task(settings, task_id)
     existing = get_task(settings, task_id)
     if existing is None:
         return None

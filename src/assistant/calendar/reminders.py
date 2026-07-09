@@ -168,23 +168,28 @@ def run_reminders(settings: Settings | None = None) -> list[dict]:
     # transaction, where it would hold SQLite's single writer slot past other
     # writers' busy timeouts. The cost is at-most-once delivery: a claimed
     # reminder whose push fails is not retried.
-    sent: list[dict] = []
-    with _connect(settings) as conn:
-        _prune_ledger(conn, current)
-        for reminder in due:
+    if settings.storage_backend == "postgres":
+        from .. import storage_postgres
+
+        sent = storage_postgres.claim_calendar_reminders(settings, due, fired_at, current)
+    else:
+        sent: list[dict] = []
+        with _connect(settings) as conn:
+            _prune_ledger(conn, current)
+            for reminder in due:
             # Claim every lead window the event is currently inside, so the
             # larger leads can't fire a duplicate nudge on a later tick.
-            claimed = 0
-            for lead in reminder["covered_leads"]:
-                cursor = conn.execute(
-                    "INSERT OR IGNORE INTO reminders_fired"
-                    " (event_id, event_start, lead_minutes, fired_at)"
-                    " VALUES (?, ?, ?, ?)",
-                    (reminder["event_id"], reminder["start"], lead, fired_at),
-                )
-                claimed += cursor.rowcount
-            if claimed:
-                sent.append(reminder)
+                claimed = 0
+                for lead in reminder["covered_leads"]:
+                    cursor = conn.execute(
+                        "INSERT OR IGNORE INTO reminders_fired"
+                        " (event_id, event_start, lead_minutes, fired_at)"
+                        " VALUES (?, ?, ?, ?)",
+                        (reminder["event_id"], reminder["start"], lead, fired_at),
+                    )
+                    claimed += cursor.rowcount
+                if claimed:
+                    sent.append(reminder)
 
     for reminder in sent:
         try:
