@@ -37,11 +37,9 @@ RUN useradd --create-home --uid 1000 assistant \
     && chown -R assistant:assistant /app
 USER assistant
 ENV CODEX_HOME=/home/assistant/.codex
-# Keep settings.host in lockstep with the uvicorn bind below: the startup check
-# in api.lifespan reads HOST and refuses non-loopback serving without API_TOKEN.
+# api.lifespan reads HOST to gate non-loopback serving on API_TOKEN.
 ENV HOST=0.0.0.0
 EXPOSE 8000
 
-# --no-dev matches the build's `uv sync --no-dev`; without it, `uv run` re-syncs
-# the dev group (mypy, ruff, pytest) from PyPI on every container start.
+# --no-dev: match the build, or `uv run` re-syncs mypy/ruff/pytest on every start.
 CMD ["uv", "run", "--no-dev", "uvicorn", "assistant.api:app", "--host", "0.0.0.0", "--port", "8000"]

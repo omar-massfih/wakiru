@@ -155,9 +155,8 @@ def _checkpointer(settings: Settings):
                 "langgraph-checkpoint-postgres"
             ) from exc
         # A pool, not a single connection: serverless Postgres (Neon) drops idle
-        # connections, so a lone long-lived one dies between turns and the next
-        # chat fails with "SSL error: unexpected eof". check= revalidates each
-        # connection on checkout and replaces dead ones transparently.
+        # connections, killing a lone long-lived one between turns. check=
+        # revalidates on checkout and replaces dead connections transparently.
         pool = ConnectionPool(
             settings.database_url,
             min_size=0,
@@ -167,9 +166,7 @@ def _checkpointer(settings: Settings):
             # Match PostgresSaver.from_conn_string's connection settings.
             kwargs={"autocommit": True, "prepare_threshold": 0, "row_factory": dict_row},
         )
-        # The pool's worker threads outlive the interpreter's shutdown grace
-        # period unless closed explicitly.
-        atexit.register(pool.close)
+        atexit.register(pool.close)  # its worker threads outlive shutdown otherwise
         saver = PostgresSaver(pool)
         saver.setup()
         return saver

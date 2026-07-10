@@ -140,8 +140,7 @@ def _agent():
     return build_agent()
 
 
-# Size caps on everything that flows into the embedder or an LLM call: generous
-# for legitimate use, but a single request can no longer queue unbounded work.
+# max_length caps keep a single request from queuing unbounded embedder/LLM work.
 class ChatRequest(BaseModel):
     message: str = Field(max_length=100_000)
     # Continue an existing conversation by passing the id returned earlier.

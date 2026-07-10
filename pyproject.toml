@@ -66,9 +66,8 @@ warn_redundant_casts = true
 warn_unused_ignores = true
 no_implicit_optional = true
 
-# Burn-down list: langchain/langgraph-adjacent modules whose errors are dominated
-# by loosely-typed third-party surfaces (RunnableConfig-as-dict, psycopg row
-# factories, ChatOpenAI/ChatAnthropic kwargs). Remove entries as they are cleaned up.
+# Burn-down list: langchain/langgraph-adjacent modules with loosely-typed
+# third-party surfaces. Remove entries as they're cleaned up.
 [[tool.mypy.overrides]]
 module = [
     "assistant.agent",

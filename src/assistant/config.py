@@ -284,9 +284,8 @@ class Settings(BaseSettings):
     # keeps the legacy loopback-trust behavior — fine on 127.0.0.1, but set this
     # before binding to any non-loopback interface (the Docker CMD binds 0.0.0.0).
     api_token: str | None = None
-    # Escape hatch: deliberately serve without a bearer token on a non-loopback
-    # bind (e.g. behind a reverse proxy or VPN that does its own auth). Without
-    # this, startup refuses that combination outright.
+    # Escape hatch: without this, startup refuses a non-loopback bind with no
+    # token. Set it only when something in front (proxy, VPN) does the auth.
     allow_unauthenticated: bool = False
 
     @property
