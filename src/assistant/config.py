@@ -32,7 +32,7 @@ class Settings(BaseSettings):
     # Ignored by the anthropic provider.
     llm_base_url: str | None = None
     # Model name for the selected provider. None => a sensible per-provider
-    # default (see llm.py: gpt-4o for openai, claude-sonnet-4-5 for anthropic).
+    # default (see llm.py: gpt-4o for openai, claude-opus-4-8 for anthropic).
     llm_model: str | None = None
 
     # --- Codex CLI ---
@@ -284,6 +284,10 @@ class Settings(BaseSettings):
     # keeps the legacy loopback-trust behavior — fine on 127.0.0.1, but set this
     # before binding to any non-loopback interface (the Docker CMD binds 0.0.0.0).
     api_token: str | None = None
+    # Escape hatch: deliberately serve without a bearer token on a non-loopback
+    # bind (e.g. behind a reverse proxy or VPN that does its own auth). Without
+    # this, startup refuses that combination outright.
+    allow_unauthenticated: bool = False
 
     @property
     def memory_path(self) -> Path:

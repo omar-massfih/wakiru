@@ -204,6 +204,9 @@ curl localhost:8000/health
 ```
 
 Notes:
+- `API_TOKEN` is required in the container: the image binds `0.0.0.0`, and the server
+  refuses to start on a non-loopback bind without a token. Set `ALLOW_UNAUTHENTICATED=1`
+  only if something in front (reverse proxy, VPN) does the authentication.
 - The default `CODEX_SANDBOX=read-only` is safest in a container. If Codex needs to run shell
   commands and the container can't apply its OS sandbox, either widen the sandbox via
   `-e CODEX_SANDBOX=workspace-write` or give the container the privileges Codex's sandbox needs.
@@ -248,8 +251,9 @@ See `.env.example`. Notably `CODEX_SANDBOX` defaults to `read-only`; widen it de
 
 Set `API_TOKEN` to require `Authorization: Bearer <token>` on every endpoint except
 `/health`. Unset, the server trusts anyone who can reach the port — fine on the
-default loopback bind, but a must before exposing it to a network (the Docker
-image binds `0.0.0.0`).
+default loopback bind, but on any non-loopback bind (the Docker image binds
+`0.0.0.0`) startup fails without a token. `ALLOW_UNAUTHENTICATED=1` overrides the
+refusal for deployments where a reverse proxy or VPN does the authentication.
 
 ## Using an API-backed provider
 

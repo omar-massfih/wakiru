@@ -8,6 +8,10 @@ services:
       - "8000:8000"
     env_file:
       - .env
+    # STORAGE_BACKEND=postgres is forced here, but this compose file bundles NO
+    # Postgres service — .env must provide DATABASE_URL pointing at an external
+    # database (e.g. Neon; see README "Postgres storage"). API_TOKEN must also
+    # be set in .env: the server refuses to start unauthenticated on 0.0.0.0.
     environment:
       STORAGE_BACKEND: postgres
     volumes:

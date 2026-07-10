@@ -12,9 +12,9 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from functools import lru_cache
 
-from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from . import slack, telegram, webui
 from .agent import build_agent
@@ -87,11 +87,29 @@ def require_token(request: Request) -> None:
 async def lifespan(app: FastAPI):
     settings = get_settings()
     if not settings.api_token and not _is_loopback_host(settings.host):
+        if not settings.allow_unauthenticated:
+            raise RuntimeError(
+                f"Refusing to serve on {settings.host} without API_TOKEN: every "
+                "endpoint (including /memory, which returns personal notes) would "
+                "be open to that network. Set API_TOKEN, or set "
+                "ALLOW_UNAUTHENTICATED=1 to accept the exposure deliberately."
+            )
         logger.warning(
-            "API_TOKEN is not set while binding to %s — every endpoint (including "
-            "/memory, which returns personal notes) is open to that network. "
-            "Set API_TOKEN before exposing the server.",
+            "ALLOW_UNAUTHENTICATED=1: serving on %s with no API_TOKEN — every "
+            "endpoint (including /memory, which returns personal notes) is open "
+            "to that network.",
             settings.host,
+        )
+    if settings.codex_sandbox != "read-only" and (
+        settings.telegram_bot_token
+        or settings.slack_bot_token
+        or not _is_loopback_host(settings.host)
+    ):
+        logger.warning(
+            "CODEX_SANDBOX=%s while a remote channel is reachable (telegram/slack/"
+            "non-loopback bind) — anyone who can message the assistant can make "
+            "Codex write to the filesystem.",
+            settings.codex_sandbox,
         )
     tasks: list[asyncio.Task] = []
     if settings.enable_reminders and settings.reminder_tick_seconds > 0:
@@ -122,21 +140,24 @@ def _agent():
     return build_agent()
 
 
+# Size caps on everything that flows into the embedder or an LLM call: generous
+# for legitimate use, but a single request can no longer queue unbounded work.
 class ChatRequest(BaseModel):
-    message: str
+    message: str = Field(max_length=100_000)
     # Continue an existing conversation by passing the id returned earlier.
-    thread_id: str | None = None
+    thread_id: str | None = Field(default=None, max_length=200)
 
 
 class DocRequest(BaseModel):
-    title: str
-    text: str
+    title: str = Field(max_length=500)
+    # Ingesting whole documents is the point — roomy enough for a book.
+    text: str = Field(max_length=2_000_000)
 
 
 class DraftRequest(BaseModel):
-    to: str
-    subject: str
-    body: str
+    to: str = Field(max_length=1_000)
+    subject: str = Field(max_length=1_000)
+    body: str = Field(max_length=100_000)
     # Opt in per-request to actually send. Even then the server-side
     # `enable_email_send` switch must also be on.
     send: bool = False
@@ -345,7 +366,7 @@ def docs_list() -> dict:
 
 
 @app.get("/documents/search", dependencies=[Depends(require_token)])
-def docs_search(q: str) -> dict:
+def docs_search(q: str = Query(max_length=1_000)) -> dict:
     """Return the document chunks most relevant to ``q``."""
     chunks = docs_store.search_chunks(get_settings(), q)
     return {

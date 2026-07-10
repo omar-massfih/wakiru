@@ -462,3 +462,88 @@ def test_chat_stream_emits_sse_frames_and_done(client, monkeypatch) -> None:
     assert "data: lo\n\n" in body
     # Terminal frame carries the thread id.
     assert "event: done\ndata: t1\n\n" in body
+
+
+# --- startup checks (run inside lifespan, i.e. only under `with TestClient`) -- #
+
+
+@pytest.fixture
+def startup(tmp_path, monkeypatch):
+    """Build settings for lifespan tests; reminders off so no background tasks start."""
+
+    def make(**overrides):
+        settings = Settings(
+            memory_dir=str(tmp_path / "memory"), enable_reminders=False, **overrides
+        )
+        monkeypatch.setattr("assistant.api.get_settings", lambda: settings)
+        return TestClient(app)
+
+    return make
+
+
+def test_startup_refuses_non_loopback_bind_without_token(startup) -> None:
+    with pytest.raises(RuntimeError, match="API_TOKEN"), startup(host="0.0.0.0"):
+        pass
+
+
+def test_allow_unauthenticated_overrides_the_refusal(startup, caplog) -> None:
+    with (
+        caplog.at_level("WARNING", logger="assistant.api"),
+        startup(host="0.0.0.0", allow_unauthenticated=True),
+    ):
+        pass
+    assert any("ALLOW_UNAUTHENTICATED" in r.message for r in caplog.records)
+
+
+def test_loopback_bind_without_token_starts_silently(startup, caplog) -> None:
+    with caplog.at_level("WARNING", logger="assistant.api"), startup(host="127.0.0.1"):
+        pass
+    assert not caplog.records
+
+
+def test_startup_warns_on_writable_sandbox_with_remote_channel(startup, caplog) -> None:
+    # Slack (not Telegram) so lifespan starts no polling task.
+    with (
+        caplog.at_level("WARNING", logger="assistant.api"),
+        startup(codex_sandbox="workspace-write", slack_bot_token="xoxb-test"),
+    ):
+        pass
+    assert any("CODEX_SANDBOX" in r.message for r in caplog.records)
+
+
+def test_writable_sandbox_alone_on_loopback_does_not_warn(startup, caplog) -> None:
+    with (
+        caplog.at_level("WARNING", logger="assistant.api"),
+        startup(codex_sandbox="workspace-write"),
+    ):
+        pass
+    assert not caplog.records
+
+
+# --- request size limits ---------------------------------------------------- #
+
+
+def test_oversized_chat_message_is_rejected(client) -> None:
+    resp = client(None).post("/chat", json={"message": "x" * 100_001})
+    assert resp.status_code == 422
+
+
+def test_oversized_doc_text_is_rejected(client) -> None:
+    resp = client(None).post(
+        "/documents", json={"title": "big", "text": "x" * 2_000_001}
+    )
+    assert resp.status_code == 422
+
+
+def test_doc_under_the_limit_ingests(client, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "assistant.memory.embeddings._embed",
+        lambda texts, prefix="", settings=None: [[1.0] + [0.0] * 63 for _ in texts],
+    )
+    resp = client(None).post("/documents", json={"title": "ok", "text": "short doc"})
+    assert resp.status_code == 200
+
+
+def test_oversized_search_query_is_rejected(client) -> None:
+    resp = client(None).get("/documents/search", params={"q": "x" * 1_001})
+    assert resp.status_code == 422

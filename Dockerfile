@@ -37,6 +37,9 @@ RUN useradd --create-home --uid 1000 assistant \
     && chown -R assistant:assistant /app
 USER assistant
 ENV CODEX_HOME=/home/assistant/.codex
+# Keep settings.host in lockstep with the uvicorn bind below: the startup check
+# in api.lifespan reads HOST and refuses non-loopback serving without API_TOKEN.
+ENV HOST=0.0.0.0
 EXPOSE 8000
 
 CMD ["uv", "run", "uvicorn", "assistant.api:app", "--host", "0.0.0.0", "--port", "8000"]
