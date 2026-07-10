@@ -42,4 +42,6 @@ ENV CODEX_HOME=/home/assistant/.codex
 ENV HOST=0.0.0.0
 EXPOSE 8000
 
-CMD ["uv", "run", "uvicorn", "assistant.api:app", "--host", "0.0.0.0", "--port", "8000"]
+# --no-dev matches the build's `uv sync --no-dev`; without it, `uv run` re-syncs
+# the dev group (mypy, ruff, pytest) from PyPI on every container start.
+CMD ["uv", "run", "--no-dev", "uvicorn", "assistant.api:app", "--host", "0.0.0.0", "--port", "8000"]
