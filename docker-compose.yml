@@ -14,9 +14,13 @@ services:
     # be set in .env: the server refuses to start unauthenticated on 0.0.0.0.
     environment:
       STORAGE_BACKEND: postgres
+      # Persist the ~2GB embedding model on the host (./models) so container
+      # rebuilds don't re-download it from HF Hub on first use.
+      FASTEMBED_CACHE_PATH: /app/models/fastembed
     volumes:
       - ${HOME}/.codex:/home/assistant/.codex
       - ./memory:/app/memory
+      - ./models:/app/models
     logging:
       driver: json-file
       options:
