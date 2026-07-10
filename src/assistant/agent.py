@@ -28,6 +28,7 @@ the API layer, off the reply path.
 
 from __future__ import annotations
 
+import atexit
 import logging
 import sqlite3
 
@@ -145,15 +146,31 @@ def _checkpointer(settings: Settings):
         if not settings.database_url:
             raise RuntimeError("DATABASE_URL is required when STORAGE_BACKEND=postgres")
         try:
-            import psycopg
             from langgraph.checkpoint.postgres import PostgresSaver
+            from psycopg.rows import dict_row
+            from psycopg_pool import ConnectionPool
         except ImportError as exc:  # pragma: no cover - depends on deployment extras
             raise RuntimeError(
                 "STORAGE_BACKEND=postgres requires psycopg[binary] and "
                 "langgraph-checkpoint-postgres"
             ) from exc
-        conn = psycopg.connect(settings.database_url, autocommit=True)
-        saver = PostgresSaver(conn)
+        # A pool, not a single connection: serverless Postgres (Neon) drops idle
+        # connections, so a lone long-lived one dies between turns and the next
+        # chat fails with "SSL error: unexpected eof". check= revalidates each
+        # connection on checkout and replaces dead ones transparently.
+        pool = ConnectionPool(
+            settings.database_url,
+            min_size=0,
+            max_size=4,
+            open=True,
+            check=ConnectionPool.check_connection,
+            # Match PostgresSaver.from_conn_string's connection settings.
+            kwargs={"autocommit": True, "prepare_threshold": 0, "row_factory": dict_row},
+        )
+        # The pool's worker threads outlive the interpreter's shutdown grace
+        # period unless closed explicitly.
+        atexit.register(pool.close)
+        saver = PostgresSaver(pool)
         saver.setup()
         return saver
 

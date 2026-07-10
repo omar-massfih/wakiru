@@ -77,6 +77,46 @@ def test_postgres_checkpointer_requires_database_url() -> None:
         _checkpointer(Settings(storage_backend="postgres", database_url=None))
 
 
+def test_postgres_checkpointer_uses_a_health_checked_pool(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The checkpointer must ride a pool that revalidates connections on checkout —
+    a single long-lived connection dies when serverless Postgres suspends."""
+    import langgraph.checkpoint.postgres as lg_postgres
+    import psycopg_pool
+
+    captured: dict = {}
+
+    class FakePool:
+        def __init__(self, conninfo: str, **kwargs):
+            captured["conninfo"] = conninfo
+            captured.update(kwargs)
+
+        @staticmethod
+        def check_connection(conn) -> None:  # referenced as check=
+            pass
+
+        def close(self) -> None:  # registered via atexit
+            pass
+
+    class FakeSaver:
+        def __init__(self, conn):
+            captured["conn"] = conn
+
+        def setup(self) -> None:
+            captured["setup"] = True
+
+    monkeypatch.setattr(psycopg_pool, "ConnectionPool", FakePool)
+    monkeypatch.setattr(lg_postgres, "PostgresSaver", FakeSaver)
+
+    saver = _checkpointer(Settings(storage_backend="postgres", database_url="postgres://example"))
+
+    assert isinstance(saver, FakeSaver)
+    assert isinstance(captured["conn"], FakePool)
+    assert captured["setup"] is True
+    assert captured["check"] is FakePool.check_connection
+    assert captured["kwargs"]["autocommit"] is True
+    assert captured["kwargs"]["row_factory"] is not None
+
+
 
 def test_postgres_calendar_and_task_stores_delegate(monkeypatch: pytest.MonkeyPatch) -> None:
     settings = Settings(storage_backend="postgres", database_url="postgres://example")
