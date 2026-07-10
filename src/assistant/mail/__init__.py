@@ -23,10 +23,10 @@ from .context import unread_summary
 from .oauth import MailAuthError
 
 __all__ = [
-    "client",
-    "Message",
     "MailAuthError",
     "MailDisabledError",
+    "Message",
+    "client",
     "list_recent",
     "read_message",
     "save_draft",

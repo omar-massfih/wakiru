@@ -10,12 +10,11 @@ I write about X" is answered from the closest chunks rather than the whole corpu
 
 from __future__ import annotations
 
+import sqlite3
 import struct
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
-
-import sqlite3
+from datetime import UTC, datetime
 
 import sqlite_vec
 
@@ -147,7 +146,7 @@ def add_document(settings: Settings, title: str, text: str) -> Document:
         id=uuid.uuid4().hex[:12],
         title=title.strip() or "(untitled)",
         text=text,
-        added=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        added=datetime.now(UTC).isoformat(timespec="seconds"),
     )
     pieces = chunk_text(text, settings.docs_chunk_chars)
     vectors = embed_passages(pieces, settings) if pieces else []
@@ -161,7 +160,7 @@ def add_document(settings: Settings, title: str, text: str) -> Document:
             "INSERT INTO documents(id, title, text, added) VALUES (?, ?, ?, ?)",
             (doc.id, doc.title, doc.text, doc.added),
         )
-        for ord_, (piece, vector) in enumerate(zip(pieces, vectors)):
+        for ord_, (piece, vector) in enumerate(zip(pieces, vectors, strict=True)):
             cur = conn.execute(
                 "INSERT INTO chunks(doc_id, ord, text) VALUES (?, ?, ?)",
                 (doc.id, ord_, piece),
@@ -289,7 +288,7 @@ def reindex(settings: Settings) -> int:
         try:
             if vectors:
                 _ensure_vec_table(conn, len(vectors[0]), settings)
-            for ord_, (piece, vector) in enumerate(zip(pieces, vectors)):
+            for ord_, (piece, vector) in enumerate(zip(pieces, vectors, strict=True)):
                 cur = conn.execute(
                     "INSERT INTO chunks(doc_id, ord, text) VALUES (?, ?, ?)",
                     (row["id"], ord_, piece),

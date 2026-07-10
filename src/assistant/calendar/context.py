@@ -17,7 +17,6 @@ from ..config import Settings, get_settings
 from . import recurrence, store
 from .store import Event
 
-
 # Assumed duration for an event that has no explicit end, when reasoning about
 # overlaps / availability. An hour is a sensible default appointment length.
 _DEFAULT_EVENT_MINUTES = 60
@@ -120,7 +119,7 @@ def event_interval(settings: Settings, event: Event) -> tuple[datetime, datetime
 def busy_events(settings: Settings, start: datetime, end: datetime) -> list[Event]:
     """Events (expanding recurring series into occurrences) that overlap the
     half-open interval ``[start, end)``, soonest first — the "busy" set for an
-    availability question like "am I free Thursday 2–4pm?"."""
+    availability question like "am I free Thursday 2-4pm?"."""
     # Pad the scan window so an event starting just before `start` but running
     # into it (or a recurring occurrence near the edge) is still considered.
     pad = timedelta(days=1)

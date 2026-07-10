@@ -9,9 +9,9 @@ can target existing tasks by id.
 
 from __future__ import annotations
 
-from ..config import Settings, get_settings
 from ..calendar.context import format_when, now
 from ..calendar.store import parse_dt
+from ..config import Settings, get_settings
 from . import store
 from .store import Task
 

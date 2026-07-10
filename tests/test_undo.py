@@ -6,7 +6,7 @@ in the write path (via ops.update_calendar) is faked, matching test_calendar.py.
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import UTC, timedelta
 
 import pytest
 
@@ -254,10 +254,9 @@ def test_undo_window_survives_offset_change(settings) -> None:
     # A stamp written under another UTC offset (a DST flip) is lexically far from
     # the cutoff string even when the instant is minutes old; the window check
     # must compare instants, not strings.
-    from datetime import timezone
 
     event = store.create_event(settings, title="Dentist", start=_iso_in(settings, days=1))
-    applied_utc = (context.now(settings) - timedelta(minutes=5)).astimezone(timezone.utc)
+    applied_utc = (context.now(settings) - timedelta(minutes=5)).astimezone(UTC)
     with undo._connect(settings) as conn:
         conn.execute(
             "INSERT INTO write_log"

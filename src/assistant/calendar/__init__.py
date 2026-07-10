@@ -31,15 +31,15 @@ from .undo import undo_latest
 
 __all__ = [
     "Event",
-    "store",
     "agenda_context",
     "busy_events",
+    "due_reminders",
     "now",
     "overlapping_events",
     "resolve_tz",
+    "run_reminders",
+    "store",
+    "undo_latest",
     "upcoming_events",
     "update_calendar",
-    "due_reminders",
-    "run_reminders",
-    "undo_latest",
 ]

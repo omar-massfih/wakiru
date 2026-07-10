@@ -22,11 +22,11 @@ import re
 import uuid
 
 from .. import notify
+from ..calendar.context import now
 from ..codex_runner import run_codex
 from ..config import Settings, get_settings
 from . import store, undo
 from .context import render_tasks
-from ..calendar.context import now
 
 logger = logging.getLogger(__name__)
 

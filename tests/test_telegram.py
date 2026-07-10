@@ -7,8 +7,9 @@ monkeypatched, so these stay fast and offline.
 
 from __future__ import annotations
 
-import pytest
 from urllib.error import HTTPError, URLError
+
+import pytest
 
 from assistant import notify, telegram
 from assistant.codex_runner import CodexError

@@ -18,9 +18,9 @@ from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import datetime, timedelta
 
-from ..config import Settings
 from ..calendar.context import now
 from ..calendar.store import parse_dt
+from ..config import Settings
 from . import store
 
 logger = logging.getLogger(__name__)

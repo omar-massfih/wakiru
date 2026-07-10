@@ -11,13 +11,13 @@ import psycopg
 from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.checkpoint.sqlite import SqliteSaver
 
+from . import storage_postgres
 from .calendar import store as calendar_store
 from .config import Settings, get_settings
 from .docs import store as docs_store
 from .memory import store as memory_store
 from .memory.embeddings import embed_passages
 from .tasks import store as task_store
-from . import storage_postgres
 
 logger = logging.getLogger(__name__)
 
@@ -103,7 +103,7 @@ def import_documents(local: Settings, pg: Settings) -> int:
                 (doc.id, doc.title, doc.text, doc.added),
             )
             conn.execute("DELETE FROM assistant_document_chunks WHERE doc_id = %s", (doc.id,))
-            for ord_, (piece, vector) in enumerate(zip(pieces, vectors)):
+            for ord_, (piece, vector) in enumerate(zip(pieces, vectors, strict=True)):
                 conn.execute(
                     "INSERT INTO assistant_document_chunks(doc_id, ord, text, embedding) "
                     "VALUES (%s, %s, %s, %s::vector)",

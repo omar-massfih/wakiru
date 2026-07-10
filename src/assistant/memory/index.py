@@ -23,8 +23,8 @@ frontmatter on consolidation.
 from __future__ import annotations
 
 import hashlib
-import struct
 import sqlite3
+import struct
 from datetime import date
 
 import sqlite_vec
@@ -397,7 +397,7 @@ def reindex(settings: Settings) -> int:
         raise RuntimeError(
             f"embedder returned {len(vectors)} vectors for {len(pending)} notes"
         )
-    for (note, text_hash, rc, lr), vector in zip(pending, vectors):
+    for (note, text_hash, rc, lr), vector in zip(pending, vectors, strict=True):
         upsert(
             settings,
             note.name,

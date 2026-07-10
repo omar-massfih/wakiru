@@ -22,6 +22,7 @@ touch them.
 
 from __future__ import annotations
 
+import contextlib
 import re
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -291,10 +292,9 @@ def delete_note(settings: Settings, name: str) -> Note | None:
     while target.exists():
         target = trash / f"{stamp}-{note.kind}-{note.name}-{i}.md"
         i += 1
-    try:
+    # FileNotFoundError => already gone — the deletion still "happened".
+    with contextlib.suppress(FileNotFoundError):
         path.replace(target)
-    except FileNotFoundError:
-        pass  # already gone — the deletion still "happened"
     return note
 
 

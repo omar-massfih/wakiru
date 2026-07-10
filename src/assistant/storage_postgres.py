@@ -8,10 +8,10 @@ APIs used by the rest of the assistant.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Sequence
 
 from .config import Settings
 from .memory.store import INDEX_FILENAME, Note
@@ -57,7 +57,7 @@ def vector_literal(vector: Sequence[float]) -> str:
 
 def _rows(cur) -> list[dict]:
     cols = [col.name for col in cur.description or []]
-    return [dict(zip(cols, row)) for row in cur.fetchall()]
+    return [dict(zip(cols, row, strict=True)) for row in cur.fetchall()]
 
 
 def _executemany(conn, sql: str, params: list) -> None:
@@ -452,7 +452,7 @@ def bump_turn_counter(settings: Settings) -> int:
 def bump_recall(settings: Settings, names: list[str]) -> None:
     if not names:
         return
-    today = datetime.now(timezone.utc).date().isoformat()
+    today = datetime.now(UTC).date().isoformat()
     ensure_memory_schema(settings)
     with connect(settings) as conn:
         _executemany(
@@ -530,7 +530,7 @@ def reindex_memory(settings: Settings) -> int:
     vectors = embed_passages([n.index_text for n, _h, _rc, _lr in pending], settings) if pending else []
     if len(vectors) != len(pending):
         raise RuntimeError(f"embedder returned {len(vectors)} vectors for {len(pending)} notes")
-    for (note, text_hash, rc, lr), vector in zip(pending, vectors):
+    for (note, text_hash, rc, lr), vector in zip(pending, vectors, strict=True):
         upsert_memory_index(
             settings,
             note.name,
@@ -626,7 +626,7 @@ def reindex_docs(settings: Settings) -> int:
             if vectors and docs_meta_get(conn, "dim") is None:
                 docs_meta_set(conn, "dim", str(len(vectors[0])))
                 docs_meta_set(conn, "embedding_model", settings.embedding_model)
-            for ord_, (piece, vector) in enumerate(zip(pieces, vectors)):
+            for ord_, (piece, vector) in enumerate(zip(pieces, vectors, strict=True)):
                 conn.execute(
                     "INSERT INTO assistant_document_chunks(doc_id, ord, text, embedding) "
                     "VALUES (%s, %s, %s, %s::vector)",
@@ -641,27 +641,27 @@ def reindex_docs(settings: Settings) -> int:
 
 
 def add_document(settings: Settings, title: str, text: str, pieces: list[str], vectors: list[list[float]]):
-    from .docs.store import Document
     import uuid
+
+    from .docs.store import Document
 
     ensure_docs_schema(settings)
     doc = Document(
         id=uuid.uuid4().hex[:12],
         title=title.strip() or "(untitled)",
         text=text,
-        added=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        added=datetime.now(UTC).isoformat(timespec="seconds"),
         chunks=len(pieces),
     )
     with connect(settings) as conn:
-        if vectors:
-            if docs_meta_get(conn, "dim") is None:
-                docs_meta_set(conn, "dim", str(len(vectors[0])))
-                docs_meta_set(conn, "embedding_model", settings.embedding_model)
+        if vectors and docs_meta_get(conn, "dim") is None:
+            docs_meta_set(conn, "dim", str(len(vectors[0])))
+            docs_meta_set(conn, "embedding_model", settings.embedding_model)
         conn.execute(
             "INSERT INTO assistant_documents(id, title, text, added) VALUES (%s, %s, %s, %s)",
             (doc.id, doc.title, doc.text, doc.added),
         )
-        for ord_, (piece, vector) in enumerate(zip(pieces, vectors)):
+        for ord_, (piece, vector) in enumerate(zip(pieces, vectors, strict=True)):
             conn.execute(
                 "INSERT INTO assistant_document_chunks(doc_id, ord, text, embedding) "
                 "VALUES (%s, %s, %s, %s::vector)",
@@ -764,7 +764,7 @@ def reindex_documents(settings: Settings, chunker, embedder) -> int:
             if vectors and docs_meta_get(conn, "dim") is None:
                 docs_meta_set(conn, "dim", str(len(vectors[0])))
                 docs_meta_set(conn, "embedding_model", settings.embedding_model)
-            for ord_, (piece, vector) in enumerate(zip(pieces, vectors)):
+            for ord_, (piece, vector) in enumerate(zip(pieces, vectors, strict=True)):
                 conn.execute(
                     "INSERT INTO assistant_document_chunks(doc_id, ord, text, embedding) "
                     "VALUES (%s, %s, %s, %s::vector)",
@@ -840,8 +840,9 @@ def _event_from_row(row: dict):
 
 
 def create_event(settings: Settings, title: str, start: str, end: str = "", location: str = "", notes: str = "", rrule: str = ""):
-    from .calendar import store as calendar_store
     import uuid
+
+    from .calendar import store as calendar_store
 
     ensure_calendar_schema(settings)
     now = calendar_store._stamp_now(settings)
@@ -998,8 +999,9 @@ def _task_from_row(row: dict):
 
 
 def create_task(settings: Settings, title: str, due: str = "", notes: str = ""):
-    from .tasks import store as task_store
     import uuid
+
+    from .tasks import store as task_store
 
     ensure_tasks_schema(settings)
     now = task_store._stamp_now(settings)
@@ -1147,9 +1149,10 @@ def mark_task_writes_undone(settings: Settings, ids: list[int], undone_at: str) 
 
 
 def claim_calendar_reminders(settings: Settings, reminders: list[dict], fired_at: str, current) -> list[dict]:
+    from datetime import timedelta
+
     from .calendar import reminders as calendar_reminders
     from .calendar import store as calendar_store
-    from datetime import timedelta
 
     ensure_calendar_schema(settings)
     cutoff = current - timedelta(days=calendar_reminders._LEDGER_RETENTION_DAYS)
@@ -1180,9 +1183,10 @@ def claim_calendar_reminders(settings: Settings, reminders: list[dict], fired_at
 
 
 def claim_task_reminders(settings: Settings, reminders: list[dict], fired_at: str, current) -> list[dict]:
-    from .tasks import reminders as task_reminders
-    from .calendar.store import parse_dt
     from datetime import timedelta
+
+    from .calendar.store import parse_dt
+    from .tasks import reminders as task_reminders
 
     ensure_tasks_schema(settings)
     cutoff = current - timedelta(days=task_reminders._LEDGER_RETENTION_DAYS)

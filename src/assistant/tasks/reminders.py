@@ -17,11 +17,11 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 
-from ..config import Settings, get_settings
-from ..notify import deliver_reminder
 from ..calendar.context import now
 from ..calendar.reminders import _humanize
 from ..calendar.store import parse_dt
+from ..config import Settings, get_settings
+from ..notify import deliver_reminder
 from . import store
 
 logger = logging.getLogger(__name__)

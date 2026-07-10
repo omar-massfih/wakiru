@@ -150,7 +150,9 @@ def test_run_chat_stream_undo_short_circuits(settings, monkeypatch) -> None:
 def test_run_upkeep_skips_all_upkeep_for_undo_turn(settings, monkeypatch) -> None:
     for name in ("update_memory", "maybe_summarize", "update_calendar"):
         monkeypatch.setattr(
-            chat, name, lambda *a, **k: pytest.fail(f"{name} must not run for an undo turn")
+            chat,
+            name,
+            lambda *a, _name=name, **k: pytest.fail(f"{_name} must not run for an undo turn"),
         )
     chat.run_upkeep(_FailingAgent(), settings, "undo", "Undone: removed Dentist.", THREAD)
 

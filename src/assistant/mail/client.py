@@ -13,11 +13,12 @@ from any background path — only from an explicit user request.
 
 from __future__ import annotations
 
+import contextlib
 import imaplib
 import logging
 import smtplib
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from email import message_from_bytes
 from email.header import decode_header, make_header
 from email.message import EmailMessage
@@ -191,7 +192,7 @@ def save_draft(settings: Settings, to: str, subject: str, body: str) -> str:
     message = _build(settings, to, subject, body)
     conn = imap_connect(settings)
     try:
-        stamp = imaplib.Time2Internaldate(datetime.now(timezone.utc).timestamp())
+        stamp = imaplib.Time2Internaldate(datetime.now(UTC).timestamp())
         conn.append(settings.email_drafts_folder, r"\Draft", stamp, message.as_bytes())
     finally:
         _close(conn)
@@ -218,10 +219,8 @@ def send_message(settings: Settings, to: str, subject: str, body: str) -> str:
     try:
         conn.send_message(message)
     finally:
-        try:
+        with contextlib.suppress(Exception):
             conn.quit()
-        except Exception:
-            pass
     return f"sent: “{subject}” to {to}"
 
 

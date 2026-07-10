@@ -21,15 +21,15 @@ from .store import Note
 
 __all__ = [
     "Note",
-    "index",
-    "store",
+    "build_context_message",
+    "consolidate_memory",
     "forget_memory",
+    "index",
+    "recall_context",
     "record_episode",
     "revise_memory",
     "save_memory",
-    "update_memory",
-    "consolidate_memory",
-    "build_context_message",
-    "recall_context",
     "search_memory",
+    "store",
+    "update_memory",
 ]

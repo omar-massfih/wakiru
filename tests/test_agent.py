@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from fastapi.testclient import TestClient
-
 import pytest
+from fastapi.testclient import TestClient
 from langchain_core.language_models.fake_chat_models import FakeListChatModel
 from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage
 

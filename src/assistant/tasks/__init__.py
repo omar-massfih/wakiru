@@ -24,11 +24,11 @@ from .store import Task
 
 __all__ = [
     "Task",
-    "store",
+    "due_task_reminders",
     "open_tasks",
     "render_tasks",
+    "run_task_reminders",
+    "store",
     "tasks_context",
     "update_tasks",
-    "due_task_reminders",
-    "run_task_reminders",
 ]

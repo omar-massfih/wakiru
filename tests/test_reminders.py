@@ -6,7 +6,7 @@ the outbound webhook POST, so these stay fast and offline.
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import UTC, timedelta
 
 import pytest
 
@@ -268,9 +268,8 @@ def test_event_inside_several_lead_windows_fires_once(tmp_path) -> None:
 def test_ledger_prune_compares_instants_not_strings(settings) -> None:
     # A fresh row stamped under another UTC offset sorts lexically before the
     # cutoff string; pruning must compare instants and keep it.
-    from datetime import timezone
 
-    fresh_other_offset = (context.now(settings) - timedelta(days=1)).astimezone(timezone.utc)
+    fresh_other_offset = (context.now(settings) - timedelta(days=1)).astimezone(UTC)
     with reminders._connect(settings) as conn:
         conn.execute(
             "INSERT INTO reminders_fired (event_id, event_start, lead_minutes, fired_at)"

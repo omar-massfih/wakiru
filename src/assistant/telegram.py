@@ -21,6 +21,7 @@ conversation — with its working memory and rolling summary — survives restar
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import html
 import json
 import logging
@@ -531,10 +532,8 @@ def handle_update(
         return None
 
     # Show "typing…" while the model thinks (best-effort; it expires after ~5s).
-    try:
+    with contextlib.suppress(urllib.error.URLError, OSError, RuntimeError):
         _call(token, "sendChatAction", {"chat_id": chat_id, "action": "typing"})
-    except (urllib.error.URLError, OSError, RuntimeError):
-        pass
 
     try:
         reply = run_chat(agent, text, thread_id, settings=settings)
@@ -559,6 +558,8 @@ async def poll_loop(agent: CompiledStateGraph, settings: Settings) -> None:
     the reminder ticker) free.
     """
     token = settings.telegram_bot_token
+    if not token:  # the lifespan only starts this loop when the token is set
+        raise ValueError("poll_loop requires TELEGRAM_BOT_TOKEN")
     offset: int | None = None
     # Strong refs so fire-and-forget upkeep tasks are never garbage-collected.
     upkeep_tasks: set[asyncio.Task] = set()

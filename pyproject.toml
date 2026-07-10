@@ -28,6 +28,9 @@ dev = [
     "pytest>=8.3",
     "ruff>=0.8",
     "httpx>=0.28",
+    "mypy>=1.14",
+    "types-pyyaml>=6.0.12.20260518",
+    "types-python-dateutil>=2.9.0.20260518",
 ]
 
 [project.scripts]
@@ -48,3 +51,45 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 100
 src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+ignore = [
+    "E501",  # long lines predate the lint config; line-length=100 stays the format target
+]
+
+[tool.mypy]
+python_version = "3.13"
+files = ["src/assistant"]
+plugins = ["pydantic.mypy"]
+warn_redundant_casts = true
+warn_unused_ignores = true
+no_implicit_optional = true
+
+# Burn-down list: langchain/langgraph-adjacent modules whose errors are dominated
+# by loosely-typed third-party surfaces (RunnableConfig-as-dict, psycopg row
+# factories, ChatOpenAI/ChatAnthropic kwargs). Remove entries as they are cleaned up.
+[[tool.mypy.overrides]]
+module = [
+    "assistant.agent",
+    "assistant.chat",
+    "assistant.llm",
+    "assistant.telegram",
+    "assistant.import_local",
+    "assistant.mail.client",
+    "assistant.config",
+    "assistant.calendar.*",
+    "assistant.tasks.*",
+]
+disable_error_code = [
+    "arg-type",
+    "return-value",
+    "call-arg",
+    "call-overload",
+    "no-redef",
+    "assignment",
+]
+
+[[tool.mypy.overrides]]
+module = ["sqlite_vec"]
+ignore_missing_imports = true  # ships no py.typed marker

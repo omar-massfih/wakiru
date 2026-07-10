@@ -16,11 +16,11 @@ from .store import Chunk, Document, add_document, search_chunks
 from .summarize import summarize_document
 
 __all__ = [
-    "store",
     "Chunk",
     "Document",
     "add_document",
-    "search_chunks",
     "docs_context",
+    "search_chunks",
+    "store",
     "summarize_document",
 ]

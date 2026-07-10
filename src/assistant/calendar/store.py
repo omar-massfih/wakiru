@@ -262,7 +262,7 @@ def list_events(
     return sorted(events, key=_sort_key)
 
 
-def update_event(settings: Settings, event_id: str, **fields: str) -> Event | None:
+def update_event(settings: Settings, event_id: str, **fields: str | None) -> Event | None:
     """Update the given columns on an event; return it, or ``None`` if absent.
 
     Only known, non-``None`` fields in :data:`_FIELDS` are applied.

@@ -20,8 +20,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 
-from ..config import Settings
 from ..calendar.store import parse_dt  # shared tz-aware ISO parsing
+from ..config import Settings
 
 # Columns a caller may set on create/update (id + timestamps + done_at managed here).
 _FIELDS = ("title", "due", "notes")
