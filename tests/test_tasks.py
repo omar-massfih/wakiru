@@ -234,6 +234,50 @@ def test_reminder_ignores_undated_and_done(settings) -> None:
     assert reminders.run_task_reminders(settings) == []
 
 
+def test_repeat_nags_overdue_then_stops(settings, monkeypatch) -> None:
+    settings = settings.model_copy(
+        update={
+            "reminder_lead_minutes": [60],
+            "reminder_repeat_minutes": 15,
+            "reminder_overdue_max_minutes": 30,
+        }
+    )
+    base = context.now(settings).replace(second=0, microsecond=0)
+    due = (base + timedelta(minutes=15)).isoformat(timespec="seconds")
+    store.create_task(settings, "submit form", due=due)
+
+    messages: list[str] = []
+    for step in range(0, 61, 15):
+        monkeypatch.setattr(reminders, "now", lambda s, t=base + timedelta(minutes=step): t)
+        messages += [r["message"] for r in reminders.run_task_reminders(settings)]
+
+    # Nudges at due-15, due, then overdue every 15 min up to the 30-min window;
+    # the due+45 step is past reminder_overdue_max_minutes, so it stays silent.
+    assert messages == [
+        "Task due: submit form in 15 min",
+        "Task due: submit form now",
+        "Task overdue: submit form (15 min ago)",
+        "Task overdue: submit form (30 min ago)",
+    ]
+
+
+def test_repeat_overdue_stops_once_done(settings, monkeypatch) -> None:
+    settings = settings.model_copy(
+        update={"reminder_lead_minutes": [60], "reminder_repeat_minutes": 15}
+    )
+    base = context.now(settings).replace(second=0, microsecond=0)
+    task = store.create_task(
+        settings, "submit form", due=(base + timedelta(minutes=15)).isoformat(timespec="seconds")
+    )
+
+    monkeypatch.setattr(reminders, "now", lambda s: base + timedelta(minutes=30))
+    assert len(reminders.run_task_reminders(settings)) == 1  # overdue nag fires
+
+    store.complete_task(settings, task.id)
+    monkeypatch.setattr(reminders, "now", lambda s: base + timedelta(minutes=45))
+    assert reminders.run_task_reminders(settings) == []  # done → no longer listed
+
+
 def test_undo_arbiter_reverts_most_recent_across_ledgers(settings, monkeypatch) -> None:
     import time
 

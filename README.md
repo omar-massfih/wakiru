@@ -139,6 +139,12 @@ again for its new time).
 REMINDER_WEBHOOK_URL=https://ntfy.sh/your-private-topic
 ```
 
+By default each configured lead fires once. Set `REMINDER_REPEAT_MINUTES` (e.g. `15`)
+to instead re-nudge on that cadence from the outermost lead onward, until the event
+starts — so an event no longer goes quiet after the first "in 1 hour". Dated tasks
+also keep nagging *past* their due time ("Task overdue: … (30 min ago)") until you
+mark them done, bounded by `REMINDER_OVERDUE_MAX_MINUTES` (default 24h).
+
 Delivery fans out to every configured channel: the webhook (any endpoint that accepts
 a plain POST — ntfy, a Discord/Slack webhook, … — the message is the body, the event
 title the `Title` header) and, when the Telegram channel is set up, every allowed

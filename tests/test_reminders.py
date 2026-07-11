@@ -265,6 +265,75 @@ def test_event_inside_several_lead_windows_fires_once(tmp_path) -> None:
     assert reminders.run_reminders(settings) == []
 
 
+# --- repeat mode ---------------------------------------------------------- #
+
+
+def test_humanize_ago() -> None:
+    assert reminders._humanize_ago(timedelta(seconds=10)) == "just now"
+    assert reminders._humanize_ago(timedelta(minutes=15)) == "15 min ago"
+    assert reminders._humanize_ago(timedelta(minutes=60)) == "1 hour ago"
+    assert reminders._humanize_ago(timedelta(hours=2)) == "2 hours ago"
+
+
+def test_repeat_fires_each_band_until_start(tmp_path, monkeypatch) -> None:
+    settings = Settings(
+        memory_dir=str(tmp_path / "memory"),
+        timezone="Europe/Oslo",
+        reminder_lead_minutes=[60],
+        reminder_repeat_minutes=15,
+    )
+    base = context.now(settings).replace(second=0, microsecond=0)
+    start = (base + timedelta(minutes=60)).isoformat(timespec="seconds")
+    store.create_event(settings, title="Dentist", start=start)
+
+    messages: list[str] = []
+    # Walk wall-clock from 60 min out to the start in 15-min steps.
+    for step in range(0, 61, 15):
+        monkeypatch.setattr(reminders, "now", lambda s, t=base + timedelta(minutes=step): t)
+        messages += [r["message"] for r in reminders.run_reminders(settings)]
+
+    # One nudge per 15-min band: 60, 45, 30, 15, 0 min out.
+    assert messages == [
+        "Dentist in 1 hour",
+        "Dentist in 45 min",
+        "Dentist in 30 min",
+        "Dentist in 15 min",
+        "Dentist now",
+    ]
+    assert {r["lead_minutes"] for r in _ledger_rows(settings)} == {60, 45, 30, 15, 0}
+
+
+def test_repeat_same_band_is_idempotent(tmp_path, monkeypatch) -> None:
+    settings = Settings(
+        memory_dir=str(tmp_path / "memory"),
+        timezone="Europe/Oslo",
+        reminder_lead_minutes=[60],
+        reminder_repeat_minutes=15,
+    )
+    base = context.now(settings).replace(second=0, microsecond=0)
+    start = (base + timedelta(minutes=40)).isoformat(timespec="seconds")
+    store.create_event(settings, title="Call", start=start)
+
+    monkeypatch.setattr(reminders, "now", lambda s: base)
+    assert len(reminders.run_reminders(settings)) == 1  # remaining 40 -> slot 30
+    assert reminders.run_reminders(settings) == []  # same band, already claimed
+
+
+def test_repeat_silent_after_start(tmp_path, monkeypatch) -> None:
+    settings = Settings(
+        memory_dir=str(tmp_path / "memory"),
+        timezone="Europe/Oslo",
+        reminder_lead_minutes=[60],
+        reminder_repeat_minutes=15,
+    )
+    base = context.now(settings).replace(second=0, microsecond=0)
+    start = (base + timedelta(minutes=10)).isoformat(timespec="seconds")
+    store.create_event(settings, title="Gone", start=start)
+
+    monkeypatch.setattr(reminders, "now", lambda s: base + timedelta(minutes=25))
+    assert reminders.run_reminders(settings) == []  # 15 min past start -> nothing
+
+
 def test_ledger_prune_compares_instants_not_strings(settings) -> None:
     # A fresh row stamped under another UTC offset sorts lexically before the
     # cutoff string; pruning must compare instants and keep it.

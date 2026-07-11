@@ -251,6 +251,15 @@ class Settings(BaseSettings):
     # How often the in-process ticker fires run_reminders (seconds). 0 disables the
     # built-in ticker; POST /reminders/run still works for manual/external triggering.
     reminder_tick_seconds: int = 60
+    # When > 0, repeat reminders every N minutes once an item is inside its lead
+    # window, instead of firing each lead once. reminder_lead_minutes then defines
+    # only when reminders BEGIN (its max); the repeats fill the countdown until the
+    # event starts / a task is done. 0 keeps the legacy one-shot-per-lead path.
+    reminder_repeat_minutes: int = 0
+    # How long past its due time an open task keeps nagging (minutes). Bounds the
+    # overdue repeat so a forgotten task can't nudge forever. Only used when
+    # reminder_repeat_minutes > 0.
+    reminder_overdue_max_minutes: int = 1440  # 24h
 
     # --- Telegram channel ---
     # Bot token from @BotFather. Set => the server long-polls Telegram and each

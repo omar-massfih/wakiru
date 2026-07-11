@@ -18,7 +18,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta
 
 from ..calendar.context import now
-from ..calendar.reminders import _humanize
+from ..calendar.reminders import _humanize, _humanize_ago, _repeat_slot
 from ..calendar.store import parse_dt
 from ..config import Settings, get_settings
 from ..notify import deliver_reminder
@@ -62,18 +62,49 @@ def due_task_reminders(settings: Settings, current: datetime | None = None) -> l
     Returns one dict per task: ``{task_id, title, due, lead_minutes, covered_leads,
     message}`` — the same shape the calendar's ``due_reminders`` returns, so the
     delivery path is shared.
+
+    When :attr:`Settings.reminder_repeat_minutes` is set, a dated task instead
+    re-nudges every ``repeat`` minutes from its outermost lead onward, and keeps
+    nagging past its due time (up to ``reminder_overdue_max_minutes``) until it is
+    marked done — ``store.list_tasks`` only returns open tasks, so completing one
+    stops the nagging on the next tick.
     """
     leads = settings.reminder_lead_minutes
     if not leads:
         return []
 
     current = current or now(settings)
+    repeat = settings.reminder_repeat_minutes
+    max_lead = max(leads)
+    overdue_floor = timedelta(minutes=-settings.reminder_overdue_max_minutes)
     reminders: list[dict] = []
     for task in store.list_tasks(settings):  # open tasks only
         due = parse_dt(task.due)
         if due is None:
             continue
         remaining = due - current
+        if repeat > 0:
+            # Repeat mode: nudge every `repeat` minutes from the outermost lead
+            # onward, and keep nagging while overdue until the task is done or the
+            # overdue window is exhausted. Each countdown band is a distinct slot.
+            if not (overdue_floor <= remaining <= timedelta(minutes=max_lead)):
+                continue
+            slot = _repeat_slot(remaining, repeat)
+            if remaining < timedelta(0):
+                message = f"Task overdue: {task.title} ({_humanize_ago(-remaining)})"
+            else:
+                message = f"Task due: {task.title} {_humanize(remaining)}"
+            reminders.append(
+                {
+                    "task_id": task.id,
+                    "title": task.title,
+                    "due": task.due,
+                    "lead_minutes": slot,
+                    "covered_leads": [slot],
+                    "message": message,
+                }
+            )
+            continue
         due_leads = sorted(
             lead for lead in leads
             if timedelta(0) <= remaining <= timedelta(minutes=lead)

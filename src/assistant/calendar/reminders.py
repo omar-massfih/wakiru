@@ -14,6 +14,7 @@ in-process ticker and a manual ``POST /reminders/run`` can both drive it safely.
 from __future__ import annotations
 
 import logging
+import math
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -76,6 +77,31 @@ def _humanize(delta: timedelta) -> str:
     return f"in {days} day{'s' if days != 1 else ''}"
 
 
+def _humanize_ago(delta: timedelta) -> str:
+    """Render a positive time-since as a short phrase: '30 min ago' / '1 hour ago'."""
+    minutes = round(delta.total_seconds() / 60)
+    if minutes < 1:
+        return "just now"
+    if minutes < 60:
+        return f"{minutes} min ago"
+    if minutes < 1440:
+        hours = round(minutes / 60)
+        return f"{hours} hour{'s' if hours != 1 else ''} ago"
+    days = round(minutes / 1440)
+    return f"{days} day{'s' if days != 1 else ''} ago"
+
+
+def _repeat_slot(remaining: timedelta, repeat_minutes: int) -> int:
+    """Bucket a countdown into a stable per-interval slot (floored whole minutes).
+
+    Successive ``repeat_minutes``-wide bands map to distinct integers, so each band
+    claims the dedupe ledger exactly once (the ledger's ``lead_minutes`` column
+    doubles as the slot key). Negative values are overdue bands, used only for
+    tasks that keep nagging past their due time.
+    """
+    return math.floor(remaining.total_seconds() / 60 / repeat_minutes) * repeat_minutes
+
+
 def due_reminders(settings: Settings, current: datetime | None = None) -> list[dict]:
     """Reminders that should fire as of ``current`` (defaults to the assistant's now).
 
@@ -87,6 +113,12 @@ def due_reminders(settings: Settings, current: datetime | None = None) -> list[d
     them together instead of pushing duplicates. Returns one dict per event:
     ``{event_id, title, start, lead_minutes, covered_leads, message}``. Pure — it
     does not touch the ledger or deliver anything.
+
+    When :attr:`Settings.reminder_repeat_minutes` is set, the leads instead only
+    mark when reminders *begin* (their max); the event then re-nudges every
+    ``repeat`` minutes until it starts. Each countdown band is a distinct slot
+    carried in ``lead_minutes``/``covered_leads``, so the same claim-once ledger
+    path fires each band exactly once.
     """
     leads = settings.reminder_lead_minutes
     if not leads:
@@ -98,12 +130,33 @@ def due_reminders(settings: Settings, current: datetime | None = None) -> list[d
     # keys on the occurrence start, so a weekly standup fires once per week.
     events = recurrence.occurrences_in(settings, current, horizon)
 
+    repeat = settings.reminder_repeat_minutes
+    max_lead = max(leads)
     reminders: list[dict] = []
     for event in events:
         start = store.parse_dt(event.start)
         if start is None:
             continue
         remaining = start - current
+        if repeat > 0:
+            # Repeat mode: begin at the outermost lead, then re-notify every
+            # `repeat` minutes until the event starts. Each countdown band is a
+            # distinct slot, claimed (and pushed) exactly once. Nothing fires once
+            # the event has started (remaining < 0).
+            if not (timedelta(0) <= remaining <= timedelta(minutes=max_lead)):
+                continue
+            slot = _repeat_slot(remaining, repeat)
+            reminders.append(
+                {
+                    "event_id": event.id,
+                    "title": event.title,
+                    "start": event.start,
+                    "lead_minutes": slot,
+                    "covered_leads": [slot],
+                    "message": f"{event.title} {_humanize(remaining)}",
+                }
+            )
+            continue
         due_leads = sorted(
             lead for lead in leads
             if timedelta(0) <= remaining <= timedelta(minutes=lead)
