@@ -275,13 +275,28 @@ provider, these support token streaming (see below).
 `POST /chat/stream` returns the reply as Server-Sent Events: `data: <text>` frames
 as the model produces the reply, a final `event: done` frame with the `thread_id`,
 and `event: error` if the model fails mid-stream. Post-reply upkeep runs once, after
-the stream closes, exactly as `POST /chat` does. The `codex` provider can't stream
-token-by-token, so it emits the whole reply as a single `data:` frame — the endpoint
-works regardless of backend.
+the stream closes, exactly as `POST /chat` does. Every provider streams: the `codex`
+provider parses the CLI's `--json` event stream and emits each agent message as it
+completes (the CLI does not expose token deltas, so granularity is per message).
+
+## Newer capabilities
+
+- **Daily briefing** — one digest per day (agenda + due tasks + unread mail) pushed
+  through the reminder channels at `BRIEFING_TIME`; `POST /briefing/run` on demand.
+- **Personalization** — durable memories tagged `profile` (working hours, locations,
+  quiet hours, tone) are injected every turn, and stated quiet hours hold
+  reminders/briefings until morning.
+- **External calendar sync** — `CALENDAR_ICS_URLS` mirrors Google/Outlook/CalDAV
+  ICS feeds into the local calendar (read-only, one-way) every
+  `CALENDAR_SYNC_MINUTES`; agenda, conflicts, and reminders see the real calendar.
+- **Richer document ingest** — `POST /documents/upload` accepts PDF/DOCX/text
+  files; `POST /documents` can also take a `url` (opt-in, `ENABLE_DOCS_URL_INGEST`).
+- **Voice notes** — with `ENABLE_VOICE=true`, Telegram voice messages are
+  transcribed locally (faster-whisper) and answered like typed text.
 
 ## Roadmap / not yet wired
 
-- Additional tools and routing nodes.
+- Two-way calendar sync (CalDAV writes) — the current sync is deliberately pull-only.
 
 > **Note on the embedding model:** the default `EMBEDDING_MODEL` is
 > `intfloat/multilingual-e5-large` (1024-dim, strong Norwegian recall). Its first use
