@@ -178,3 +178,64 @@ def test_codex_error_posts_apology(posted, monkeypatch) -> None:
     monkeypatch.setattr(slack, "run_chat", boom)
     assert slack.handle_event(None, settings, _event()) is None
     assert "hit an error" in posted[0][1]
+
+
+# --- socket mode -------------------------------------------------------------- #
+
+
+def test_socket_mode_acks_then_dispatches_on_a_thread(monkeypatch) -> None:
+    import threading
+
+    import slack_sdk.socket_mode.builtin as builtin
+    from slack_sdk.socket_mode.request import SocketModeRequest
+
+    created: dict = {"acks": []}
+
+    class FakeClient:
+        def __init__(self, app_token=None, web_client=None):
+            created["app_token"] = app_token
+            created["client"] = self
+            self.socket_mode_request_listeners = []
+
+        def connect(self):
+            created["connected"] = True
+
+        def close(self):
+            created["closed"] = True
+
+        def send_socket_mode_response(self, resp):
+            created["acks"].append(resp.envelope_id)
+
+    monkeypatch.setattr(builtin, "SocketModeClient", FakeClient)
+
+    handled: list[dict] = []
+    done = threading.Event()
+
+    def fake_handle(agent, s, payload):
+        handled.append(payload)
+        done.set()
+        return None
+
+    monkeypatch.setattr(slack, "handle_event", fake_handle)
+
+    settings = _settings(slack_app_token="xapp-tok", slack_allowed_user_ids=["U1"])
+    stop = slack.start_socket_mode(None, settings)
+    assert created["connected"] and created["app_token"] == "xapp-tok"
+
+    listener = created["client"].socket_mode_request_listeners[0]
+    listener(
+        created["client"],
+        SocketModeRequest(type="events_api", envelope_id="env1", payload={"event_id": "E1"}),
+    )
+    assert done.wait(2), "dispatch thread never ran handle_event"
+    assert created["acks"] == ["env1"] and handled == [{"event_id": "E1"}]
+
+    # Non-events envelopes (hello, interactive, …) are acked but never dispatched.
+    listener(
+        created["client"],
+        SocketModeRequest(type="hello", envelope_id="env2", payload={}),
+    )
+    assert created["acks"] == ["env1", "env2"] and len(handled) == 1
+
+    stop()
+    assert created.get("closed")

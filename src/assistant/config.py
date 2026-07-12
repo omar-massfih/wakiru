@@ -280,6 +280,10 @@ class Settings(BaseSettings):
     # Signing secret from the Slack app config; every callback's HMAC is verified
     # against it. Required whenever slack_bot_token is set.
     slack_signing_secret: str | None = None
+    # App-level token (xapp-…) with connections:write. Set (with slack_bot_token)
+    # => events arrive over a Socket Mode websocket instead of requiring a public
+    # HTTPS URL for POST /slack/events — works behind NAT, like Telegram polling.
+    slack_app_token: str | None = None
     # Explicit allowlist of Slack user ids (e.g. ["U0123ABC"]) the bot answers.
     # Empty => the bot answers nobody: unlike Telegram there is no pairing
     # handshake, so an unconfigured allowlist must fail closed, not open.

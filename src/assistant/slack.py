@@ -1,9 +1,14 @@
-"""Slack channel — the Events API bridge, over the shared chat core.
+"""Slack channel — Events API and Socket Mode bridges, over the shared chat core.
 
-Stdlib-only (``urllib`` + ``hmac``), like :mod:`assistant.telegram` and
-:mod:`assistant.notify`. Slack pushes events to ``POST /slack/events`` (wired in
-:mod:`assistant.api`), so unlike Telegram's long polling this one needs a public
-HTTPS URL.
+Two transports feed the same :func:`handle_event` core:
+
+* **Events API** (stdlib-only, ``urllib`` + ``hmac``): Slack pushes events to
+  ``POST /slack/events`` (wired in :mod:`assistant.api`) — needs a public HTTPS
+  URL.
+* **Socket Mode** (:func:`start_socket_mode`, via ``slack-sdk``'s builtin
+  websocket client): the app opens an outbound websocket, so it works behind
+  NAT with no public URL, like Telegram's long polling. Enabled by setting
+  ``slack_app_token`` (an xapp- token with ``connections:write``).
 
 Security, in layers:
 
@@ -161,3 +166,48 @@ def handle_event(
         return None
     post_message(token, channel, reply)
     return lambda: run_upkeep(agent, settings, text, reply, thread_id)
+
+
+def start_socket_mode(
+    agent: CompiledStateGraph, settings: Settings
+) -> Callable[[], None]:
+    """Connect a Socket Mode websocket and dispatch events; returns a stop callable.
+
+    Every envelope is acked immediately (Slack redelivers after ~3s otherwise) and
+    the turn itself runs on its own thread, so a slow model reply neither stalls
+    the websocket's ping/pong nor delays the next event. Authenticity comes from
+    the transport — only our app token can open the socket — so there is no HMAC
+    step here; the allowlist and dedupe in :func:`handle_event` still apply.
+    """
+    # Imported lazily: slack-sdk is only needed when Socket Mode is configured.
+    from slack_sdk.socket_mode.builtin import SocketModeClient
+    from slack_sdk.socket_mode.request import SocketModeRequest
+    from slack_sdk.socket_mode.response import SocketModeResponse
+    from slack_sdk.web import WebClient
+
+    client = SocketModeClient(
+        app_token=settings.slack_app_token,
+        web_client=WebClient(token=settings.slack_bot_token),
+    )
+
+    def _turn(payload: dict) -> None:
+        try:
+            upkeep = handle_event(agent, settings, payload)
+            if upkeep is not None:
+                upkeep()
+        except Exception:
+            logger.exception("socket-mode slack turn failed")
+
+    def _listener(client_: SocketModeClient, request: SocketModeRequest) -> None:
+        client_.send_socket_mode_response(
+            SocketModeResponse(envelope_id=request.envelope_id)
+        )
+        if request.type != "events_api":
+            return
+        threading.Thread(
+            target=_turn, args=(request.payload,), daemon=True, name="slack-turn"
+        ).start()
+
+    client.socket_mode_request_listeners.append(_listener)
+    client.connect()  # the builtin client reconnects on its own after drops
+    return client.close

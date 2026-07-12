@@ -119,11 +119,25 @@ async def lifespan(app: FastAPI):
         tasks.append(
             asyncio.create_task(telegram.poll_loop(_agent(), settings), name="telegram-poll")
         )
+    stop_socket_mode = None
+    if settings.slack_app_token and settings.slack_bot_token:
+        # A failed websocket connect must not take the whole server down —
+        # the HTTP channels still work without Slack.
+        try:
+            # to_thread: connect() blocks on the websocket handshake.
+            stop_socket_mode = await asyncio.to_thread(
+                slack.start_socket_mode, _agent(), settings
+            )
+            logger.info("slack socket mode connected")
+        except Exception:
+            logger.exception("slack socket mode failed to start; continuing without it")
     for task in tasks:
         task.add_done_callback(_log_task_death)
     try:
         yield
     finally:
+        if stop_socket_mode is not None:
+            stop_socket_mode()
         for task in tasks:
             task.cancel()
         # Wait for cancellation to land so shutdown doesn't strand mid-operation
