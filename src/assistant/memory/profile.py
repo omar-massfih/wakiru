@@ -21,7 +21,8 @@ from __future__ import annotations
 import logging
 import re
 import time
-from datetime import datetime, time as dtime
+from datetime import datetime
+from datetime import time as dtime
 
 from ..config import Settings
 from . import store
@@ -33,7 +34,7 @@ _PROFILE_TAG = "profile"
 
 # "22-07", "22:00-07:00", "10 pm to 7 am" — first time wins as start, second as end.
 _TIME_RANGE_RE = re.compile(
-    r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s*(?:-|–|—|to|until)\s*"
+    r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s*(?:-|–|—|to|until)\s*"  # noqa: RUF001 - the en/em dashes are deliberate range separators
     r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)?",
     re.IGNORECASE,
 )
@@ -130,7 +131,7 @@ def _parse_quiet_hours(settings: Settings) -> tuple[dtime, dtime] | None:
 def in_quiet_hours(settings: Settings, current: datetime) -> bool:
     """Whether ``current`` falls inside the user's stated quiet window.
 
-    A window that crosses midnight (22:00–07:00) is the common case and handled
+    A window that crosses midnight (22:00-07:00) is the common case and handled
     explicitly. No profile / no quiet note => never quiet (fail open: pushes flow).
     """
     window = quiet_hours(settings)
