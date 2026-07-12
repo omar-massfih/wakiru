@@ -19,12 +19,22 @@ Telegram bot  /
 - **`llm.py`** — the **provider abstraction**. `build_model()` selects a LangChain `BaseChatModel`
   by `LLM_PROVIDER`. `codex` (default), `openai`, and `anthropic` are all wired; the API-backed
   providers read `LLM_API_KEY` / `LLM_MODEL` (and `LLM_BASE_URL` for openai).
-- **`agent.py`** — the LangGraph graph: `START -> recall -> agenda -> tasks -> codex -> END`, with a
-  SQLite checkpointer for conversation history by default, or Postgres checkpoints when `STORAGE_BACKEND=postgres`. Working-memory summarization runs off the reply path
-  (in the background), not as a graph node.
+- **`agent.py`** — the LangGraph graph: `START -> recall -> agenda -> tasks -> profile -> agent`,
+  then an `agent <-> tools` loop (bounded by `TOOL_MAX_ROUNDS`) until the model answers in plain
+  text. Conversation history persists via a SQLite checkpointer by default, or Postgres
+  checkpoints when `STORAGE_BACKEND=postgres`. Working-memory summarization runs off the reply
+  path (in the background), not as a graph node.
+- **`tools.py`** — the tool registry the model acts through: calendar
+  (create/reschedule/cancel/skip/move), tasks (add/complete/update/remove), memory
+  (remember/forget/search), document search, and email (list/read/draft; `send_email` exists
+  only when `ENABLE_EMAIL_SEND` is on). Each tool wraps the same guarded write path the old
+  background extractors used, so ambiguity guards, conflict notes, and the undo ledger all
+  still apply. `ENABLE_TOOL_LOOP=false` restores the previous extractor architecture.
 - **`chat.py`** — the channel-agnostic core: one turn of conversation plus its
-  post-reply upkeep (memory, summary folding, calendar, consolidation), shared by
-  every channel so they all behave identically.
+  post-reply upkeep (memory learning, summary folding, consolidation), shared by
+  every channel so they all behave identically. Calendar/task writes happen through
+  the tool loop during the turn; the legacy post-reply extractors run only with
+  `ENABLE_TOOL_LOOP=false`.
 - **`api.py`** — FastAPI app: `GET /health`, `POST /chat`, `POST /chat/stream` (SSE),
   `GET /memory` and `POST /memory/consolidate` for inspecting and consolidating the brain,
   `GET /calendar`, `GET /tasks` for the to-do list, `POST|GET /documents` (+ `/documents/search`,
@@ -55,9 +65,12 @@ Telegram bot  /
 - **`webui.py`** — a single self-contained HTML page at `GET /ui` that streams replies from
   `/chat/stream`. No build step, no CDN. Prompts for `API_TOKEN` when one is configured.
 
-Codex is itself an autonomous agent (its own model, tools, and sandbox), so tool-use happens
-inside Codex rather than as LangChain tools. Live web search is one such tool: set
-`CODEX_WEB_SEARCH=true` to pass Codex's global `--search` flag, which turns on the native
+The assistant's own tools work uniformly across providers: the API-backed providers use
+native function calling, while the Codex provider emulates `bind_tools` over plain text —
+tool schemas ride in the prompt and the model marks calls with a fenced ` ```tool_call `
+block that is parsed back into structured calls (and never leaks to the user; streaming
+withholds it). Codex is additionally an autonomous agent of its own (model, tools, sandbox):
+set `CODEX_WEB_SEARCH=true` to pass its global `--search` flag, which turns on the native
 Responses `web_search` tool (off by default — extra tokens/latency per turn).
 
 ## The brain (memory)
@@ -130,7 +143,11 @@ Replies longer than Telegram's 4096-char limit are split at newline boundaries.
 ## Proactive reminders
 
 The calendar can nudge you *before* an event, unprompted — "Dentist in 1 hour" —
-instead of only answering when you ask. A ticker inside the server (no cron needed)
+instead of only answering when you ask. Every delivered push (reminders and the
+daily briefing) is also recorded into each paired Telegram chat's working memory
+(`ENABLE_PROACTIVE_LOOP_IN`, on by default), so the conversation knows what it
+already sent you — "what was that reminder about?" just works, and the assistant
+can follow up on its own nudges. A ticker inside the server (no cron needed)
 checks the calendar every `REMINDER_TICK_SECONDS` and, for each event entering the
 `REMINDER_LEAD_MINUTES` window, pushes one message to `REMINDER_WEBHOOK_URL`. A small
 SQLite ledger guarantees each reminder fires exactly once (a rescheduled event nudges
