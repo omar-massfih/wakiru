@@ -211,6 +211,12 @@ def run_reminders(settings: Settings | None = None) -> list[dict]:
         return []
 
     current = now(settings)
+    # Honor stated quiet hours (profile): nothing is claimed, so a reminder whose
+    # window survives the night fires on the first tick after quiet ends.
+    from ..memory.profile import in_quiet_hours
+
+    if in_quiet_hours(settings, current):
+        return []
     fired_at = current.isoformat(timespec="seconds")
     # Compute the due list first, with its own (store) connections, so the ledger
     # write transaction below never overlaps a nested connection to the same DB.

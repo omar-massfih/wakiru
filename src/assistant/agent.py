@@ -2,7 +2,7 @@
 
 Graph shape::
 
-    START -> recall -> agenda -> tasks -> codex -> END
+    START -> recall -> agenda -> tasks -> profile -> codex -> END
 
 * **recall** — semantic memory lookup for the latest user turn; the retrieved
   context is stashed ephemerally (overwritten each turn, never accumulated) and
@@ -11,7 +11,10 @@ Graph shape::
   ephemerally so the model has a clock and knows what's scheduled.
 * **tasks** — the open to-do list, stashed ephemerally so the model knows what's
   outstanding.
-* **codex** — feed ``[recall context] + [agenda] + [tasks] + history`` to the Codex model.
+* **profile** — the user's durable preferences (notes tagged ``profile``:
+  working hours, locations, quiet hours, tone), so replies and scheduling
+  suggestions fit the person.
+* **codex** — feed ``[recall] + [profile] + [agenda] + [tasks] + history`` to the Codex model.
 
 Working memory is bounded *off* the reply path: after the reply is sent, the API
 layer runs :func:`maybe_summarize` in the background, which folds older turns
@@ -48,6 +51,7 @@ from .docs import docs_context
 from .docs import store as docs_store
 from .llm import build_model
 from .memory import index, recall_context
+from .memory.profile import profile_context
 from .tasks import tasks_context
 
 logger = logging.getLogger(__name__)
@@ -59,6 +63,7 @@ class BrainState(MessagesState):
     recall: str
     agenda: str
     tasks: str
+    profile: str
     summary: str
 
 
@@ -232,10 +237,20 @@ def build_agent(settings: Settings | None = None) -> CompiledStateGraph:
             logger.exception("building tasks context failed; continuing without it")
             return {"tasks": ""}
 
+    def profile(state: BrainState) -> dict:
+        """Give the model the user's durable preferences (ephemeral, per turn)."""
+        try:
+            return {"profile": profile_context(settings)}
+        except Exception:
+            logger.exception("building profile context failed; continuing without it")
+            return {"profile": ""}
+
     def call_codex(state: BrainState) -> dict:
         prefix: list[BaseMessage] = []
         if state.get("recall"):
             prefix.append(SystemMessage(content=state["recall"]))
+        if state.get("profile"):
+            prefix.append(SystemMessage(content=state["profile"]))
         if state.get("agenda"):
             prefix.append(SystemMessage(content=state["agenda"]))
         if state.get("tasks"):
@@ -251,10 +266,12 @@ def build_agent(settings: Settings | None = None) -> CompiledStateGraph:
     graph.add_node("recall", recall)
     graph.add_node("agenda", agenda)
     graph.add_node("tasks", tasks)
+    graph.add_node("profile", profile)
     graph.add_node("codex", call_codex)
     graph.add_edge(START, "recall")
     graph.add_edge("recall", "agenda")
     graph.add_edge("agenda", "tasks")
-    graph.add_edge("tasks", "codex")
+    graph.add_edge("tasks", "profile")
+    graph.add_edge("profile", "codex")
     graph.add_edge("codex", END)
     return graph.compile(checkpointer=_checkpointer(settings))

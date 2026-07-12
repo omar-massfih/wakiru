@@ -151,6 +151,12 @@ def run_task_reminders(settings: Settings | None = None) -> list[dict]:
         return []
 
     current = now(settings)
+    # Same quiet-hours hold as calendar reminders: nothing is claimed, so the
+    # nag resumes on the first tick after quiet ends (within the overdue bound).
+    from ..memory.profile import in_quiet_hours
+
+    if in_quiet_hours(settings, current):
+        return []
     fired_at = current.isoformat(timespec="seconds")
     due = due_task_reminders(settings, current)
 

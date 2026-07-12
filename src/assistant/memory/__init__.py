@@ -16,6 +16,7 @@ from __future__ import annotations
 from . import index, store
 from .consolidate import consolidate_memory
 from .learn import forget_memory, record_episode, revise_memory, save_memory, update_memory
+from .profile import in_quiet_hours, profile_context
 from .recall import build_context_message, recall_context, search_memory
 from .store import Note
 
@@ -24,7 +25,9 @@ __all__ = [
     "build_context_message",
     "consolidate_memory",
     "forget_memory",
+    "in_quiet_hours",
     "index",
+    "profile_context",
     "recall_context",
     "record_episode",
     "revise_memory",

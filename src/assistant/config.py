@@ -75,6 +75,10 @@ class Settings(BaseSettings):
     # Master switch for long-term memory upkeep. When True, an LLM extraction
     # runs after each turn (in the background) to save/update/forget notes.
     enable_auto_memory: bool = True
+    # Personalization: inject durable notes tagged "profile" (working hours,
+    # locations, quiet hours, tone) into every turn, and let the reminder/briefing
+    # tickers honor stated quiet hours. Degrades to a no-op with no such notes.
+    enable_profile: bool = True
     # Cap per kind on how many index entries are injected into the prompt each
     # turn (-1 = unlimited, 0 = omit the kind entirely). Bounds the per-turn
     # context as notes accumulate; MEMORY.md on disk is never trimmed. Episodic

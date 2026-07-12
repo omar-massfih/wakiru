@@ -73,6 +73,7 @@ def save_memory(
     salience: float | None = None,
     confidence: float | None = None,
     source: str = "",
+    tags: list[str] | None = None,
 ) -> Note:
     """Persist a memory, deduping against existing notes.
 
@@ -91,6 +92,7 @@ def save_memory(
         kind=kind or "semantic",
         salience=0.5 if salience is None else float(salience),
         confidence=0.8 if confidence is None else float(confidence),
+        tags=[str(t) for t in tags] if tags else [],
         source=source,
         updated=_today(),
     )
@@ -101,8 +103,8 @@ def save_memory(
         """Take over an existing note's identity (name/created/tags/counters)."""
         note.name = existing.name
         note.created = existing.created
-        if not note.tags:
-            note.tags = list(existing.tags)
+        # Union, not replace: a restatement must not strip e.g. the profile tag.
+        note.tags += [t for t in existing.tags if t not in note.tags]
         stats = index.get_stats(settings, existing.name)
         note.recall_count, note.last_recalled = stats or (
             existing.recall_count,
@@ -148,6 +150,7 @@ def revise_memory(
     description: str | None = None,
     kind: str | None = None,
     salience: float | None = None,
+    tags: list[str] | None = None,
 ) -> Note | None:
     """Supersede an existing note in place, keeping its identity and counters.
 
@@ -171,6 +174,8 @@ def revise_memory(
         existing.kind = kind
     if salience is not None:
         existing.salience = float(salience)
+    if tags:  # additive only — an update never strips e.g. the profile tag
+        existing.tags += [str(t) for t in tags if str(t) not in existing.tags]
     existing.updated = _today()
 
     new_path = store.note_path(settings, existing)
@@ -306,9 +311,14 @@ Choose a kind for each saved/updated memory:
 - "semantic"   — durable facts, preferences, goals about the user or world.
 - "procedural" — how-to knowledge, methods, the way the user likes things done.
 
+Additionally, when a memory describes how the user LIVES or WORKS — working
+hours, home/work locations, quiet hours ("don't ping me after 22:00"), commute,
+or preferred tone/format of replies — add "tags": ["profile"] to the operation.
+These profile memories personalize scheduling, reminders, and tone every turn.
+
 Return a JSON array of operations, each one of:
-  {{"op": "save", "kind": "semantic|procedural", "description": "<short summary>", "body": "<one clear sentence>", "salience": <0..1>}}
-  {{"op": "update", "name": "<existing memory name>", "description": "<short summary>", "body": "<the corrected sentence>"}}
+  {{"op": "save", "kind": "semantic|procedural", "description": "<short summary>", "body": "<one clear sentence>", "salience": <0..1>, "tags": ["profile"]?}}
+  {{"op": "update", "name": "<existing memory name>", "description": "<short summary>", "body": "<the corrected sentence>", "tags": ["profile"]?}}
   {{"op": "forget", "name": "<existing memory name>"}}   (or {{"op": "forget", "query": "<what to drop>"}})
 For "forget", always use the exact name when the memory appears in the known
 list; only use "query" for memories not shown.
@@ -400,6 +410,7 @@ def update_memory(
     for op in _parse_ops(raw):
         try:
             if op["op"] == "save" and op.get("body"):
+                tags = op.get("tags")
                 note = save_memory(
                     settings,
                     body=str(op["body"]),
@@ -407,15 +418,19 @@ def update_memory(
                     kind=op.get("kind"),
                     salience=op.get("salience"),
                     source=source,
+                    tags=tags if isinstance(tags, list) else None,
                 )
                 applied.append(f"saved: {note.description}")
             elif op["op"] == "update" and op.get("name"):
+                tags = op.get("tags")
+                tags = tags if isinstance(tags, list) else None
                 revised = revise_memory(
                     settings,
                     name=str(op["name"]),
                     body=op.get("body"),
                     description=op.get("description"),
                     kind=op.get("kind"),
+                    tags=tags,
                 )
                 if revised is None:  # name didn't exist — treat as a save
                     if op.get("body"):
@@ -425,6 +440,7 @@ def update_memory(
                             description=op.get("description"),
                             kind=op.get("kind"),
                             source=source,
+                            tags=tags,
                         )
                         applied.append(f"saved: {note.description}")
                 else:
