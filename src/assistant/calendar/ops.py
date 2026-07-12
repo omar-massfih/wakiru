@@ -25,7 +25,7 @@ import uuid
 from .. import notify
 from ..codex_runner import run_codex
 from ..config import Settings, get_settings
-from . import recurrence, store, undo
+from . import recurrence, store, sync, undo
 from .context import (
     format_when,
     now,
@@ -121,6 +121,15 @@ def _target_id(settings: Settings, op: dict) -> str | None:
             "calendar %s target %r is ambiguous between %d events (%s); skipping",
             op.get("op"), ident, len(matches),
             ", ".join(e.title for e in matches[:5]),
+        )
+        return None
+    if matches and sync.is_synced_id(matches[0].id):
+        # Mirrored from an external calendar (one-way sync): the feed is the
+        # source of truth, and the next pull would silently revert any local
+        # change — so refuse rather than pretend.
+        logger.warning(
+            "calendar %s target %r is synced from an external calendar; skipping",
+            op.get("op"), matches[0].title,
         )
         return None
     return matches[0].id if matches else None

@@ -29,6 +29,7 @@ from . import slack, telegram, webui
 from .agent import build_agent
 from .briefing import run_briefing
 from .calendar import run_reminders
+from .calendar import sync as calendar_sync
 from .calendar.context import resolve_tz, upcoming_events
 from .chat import run_chat, run_chat_stream, run_upkeep
 from .codex_runner import CodexError
@@ -62,6 +63,20 @@ async def _reminder_tick_loop() -> None:
         except Exception:
             logger.exception("reminder tick failed")
         await asyncio.sleep(get_settings().reminder_tick_seconds)
+
+
+async def _calendar_sync_loop() -> None:
+    """Mirror the configured ICS feeds on their own (slower) cadence.
+
+    Same best-effort discipline as the reminder ticker; the upsert is idempotent
+    so an overlapping manual POST /calendar/sync is harmless.
+    """
+    while True:
+        try:
+            await asyncio.to_thread(calendar_sync.pull_feeds, get_settings())
+        except Exception:
+            logger.exception("calendar sync tick failed")
+        await asyncio.sleep(get_settings().calendar_sync_minutes * 60)
 
 
 def _log_task_death(task: asyncio.Task) -> None:
@@ -129,6 +144,12 @@ async def lifespan(app: FastAPI):
     if settings.enable_reminders and settings.reminder_tick_seconds > 0:
         tasks.append(asyncio.create_task(_reminder_tick_loop(), name="reminder-ticker"))
         logger.info("reminder ticker started (every %ss)", settings.reminder_tick_seconds)
+    if settings.calendar_ics_urls and settings.calendar_sync_minutes > 0:
+        tasks.append(asyncio.create_task(_calendar_sync_loop(), name="calendar-sync"))
+        logger.info(
+            "calendar sync started (%d feed(s), every %d min)",
+            len(settings.calendar_ics_urls), settings.calendar_sync_minutes,
+        )
     if settings.telegram_bot_token:
         tasks.append(
             asyncio.create_task(telegram.poll_loop(_agent(), settings), name="telegram-poll")
@@ -373,6 +394,12 @@ def reminders_run() -> dict:
     settings = get_settings()
     fired = run_reminders(settings) + run_task_reminders(settings)
     return {"count": len(fired), "fired": fired}
+
+
+@app.post("/calendar/sync", dependencies=[Depends(require_token)])
+def calendar_sync_run() -> dict:
+    """Pull every configured ICS feed now and return per-feed stats."""
+    return {"feeds": calendar_sync.pull_feeds(get_settings())}
 
 
 @app.post("/briefing/run", dependencies=[Depends(require_token)])

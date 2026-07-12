@@ -176,6 +176,13 @@ class Settings(BaseSettings):
     calendar_upcoming_days: int = 14
     # Cap on how many upcoming events are injected per turn.
     calendar_max_events: int = 20
+    # ICS subscription URLs (Google's "secret iCal address", Outlook, any CalDAV
+    # export) mirrored into the local calendar, read-only, on the sync cadence
+    # below. Empty => no external sync.
+    calendar_ics_urls: list[str] = []
+    # Minutes between feed pulls (the sync rides the reminder ticker). 0 disables
+    # the automatic pull; POST /calendar/sync still works.
+    calendar_sync_minutes: int = 15
 
     # --- Email (opt-in; the only subsystem that talks to an external service) ---
     # Master switch. OFF by default: email is the one capability that needs real
