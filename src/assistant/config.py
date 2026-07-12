@@ -224,6 +224,10 @@ class Settings(BaseSettings):
     # Much larger than docs_chunk_chars — that target is tuned for retrieval, and
     # reusing it here would mean one model call per 800 characters.
     docs_summarize_chars: int = Field(8000, ge=1)
+    # Allow POST /documents to ingest a URL (fetched server-side, HTML reduced to
+    # prose). Off by default: on a server others can reach, fetching arbitrary
+    # URLs on request is an SSRF primitive.
+    enable_docs_url_ingest: bool = False
 
     # --- Tasks / to-dos ---
     # Master switch: inject open tasks into each turn (the read path) so the model

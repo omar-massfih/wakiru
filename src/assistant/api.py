@@ -12,7 +12,16 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from functools import lru_cache
 
-from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request
+from fastapi import (
+    BackgroundTasks,
+    Depends,
+    FastAPI,
+    Form,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+)
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -24,6 +33,7 @@ from .calendar.context import resolve_tz, upcoming_events
 from .chat import run_chat, run_chat_stream, run_upkeep
 from .codex_runner import CodexError
 from .config import get_settings
+from .docs import extract as docs_extract
 from .docs import store as docs_store
 from .docs.summarize import summarize_document
 from .mail import client as mail_client
@@ -166,9 +176,12 @@ class ChatRequest(BaseModel):
 
 
 class DocRequest(BaseModel):
-    title: str = Field(max_length=500)
+    title: str = Field("", max_length=500)
     # Ingesting whole documents is the point — roomy enough for a book.
-    text: str = Field(max_length=2_000_000)
+    text: str | None = Field(None, max_length=2_000_000)
+    # Alternative to text: a page to fetch server-side (requires
+    # ENABLE_DOCS_URL_INGEST). Exactly one of text/url must be given.
+    url: str | None = Field(None, max_length=2_000)
 
 
 class DraftRequest(BaseModel):
@@ -374,8 +387,40 @@ def briefing_run() -> dict:
 
 @app.post("/documents", dependencies=[Depends(require_token)])
 def docs_add(req: DocRequest) -> dict:
-    """Ingest a document (chunked + embedded) so it can be recalled and summarized."""
-    doc = docs_store.add_document(get_settings(), req.title, req.text)
+    """Ingest a document (chunked + embedded) so it can be recalled and summarized.
+
+    Give either ``text`` (with a ``title``) or — when ``ENABLE_DOCS_URL_INGEST``
+    is on — a ``url`` fetched server-side (HTML reduced to prose; the page's
+    ``<title>`` becomes the title unless one is given).
+    """
+    settings = get_settings()
+    if (req.text is None) == (req.url is None):
+        raise HTTPException(status_code=422, detail="Give exactly one of 'text' or 'url'.")
+    title, text = req.title, req.text
+    if req.url is not None:
+        if not settings.enable_docs_url_ingest:
+            raise HTTPException(
+                status_code=403,
+                detail="URL ingestion is off. Set ENABLE_DOCS_URL_INGEST=true to allow it.",
+            )
+        try:
+            fetched_title, text = docs_extract.fetch_url_text(req.url)
+        except docs_extract.ExtractionError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        title = title or fetched_title
+    doc = docs_store.add_document(settings, title, text)
+    return {"id": doc.id, "title": doc.title, "chunks": doc.chunks, "added": doc.added}
+
+
+@app.post("/documents/upload", dependencies=[Depends(require_token)])
+async def docs_upload(file: UploadFile, title: str = Form("")) -> dict:
+    """Ingest an uploaded file (PDF, DOCX, or any text-like format)."""
+    content = await file.read()
+    try:
+        text = docs_extract.extract_text(file.filename or "", content)
+    except docs_extract.ExtractionError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    doc = docs_store.add_document(get_settings(), title or file.filename or "", text)
     return {"id": doc.id, "title": doc.title, "chunks": doc.chunks, "added": doc.added}
 
 
