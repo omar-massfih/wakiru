@@ -70,9 +70,9 @@ async def run_chat_stream(
     """Run one turn on ``thread_id``, yielding the reply incrementally.
 
     Yields text chunks as the model produces them (via ``agent.astream`` in
-    ``"messages"`` mode). Providers that can't stream token-by-token — the Codex
-    CLI, whose subprocess only returns a finished message — still work: LangGraph
-    emits the whole reply as a single chunk, so a consumer sees one yield.
+    ``"messages"`` mode). Every provider streams: the Codex provider parses the
+    CLI's ``--json`` event stream (:func:`assistant.codex_runner.run_codex_stream`);
+    worst case a provider emits the whole reply as one chunk.
 
     An "undo" command short-circuits exactly like :func:`run_chat` and yields the
     deterministic ledger result as a single chunk. The caller is responsible for

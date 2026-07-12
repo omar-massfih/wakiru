@@ -218,8 +218,8 @@ def sse_frame(data: str, event: str | None = None) -> str:
 async def chat_stream(req: ChatRequest, background: BackgroundTasks) -> StreamingResponse:
     """Stream a reply as Server-Sent Events, then run upkeep once, off-path.
 
-    Emits ``data:`` frames as the model produces the reply (a single frame for
-    the Codex provider, which can't stream token-by-token), a final
+    Emits ``data:`` frames as the model produces the reply (incrementally for
+    every provider, including Codex via its ``--json`` event stream), a final
     ``event: done`` frame carrying the ``thread_id``, and ``event: error`` if the
     model fails mid-stream. Post-reply maintenance runs after the stream closes,
     exactly as the buffered ``/chat`` endpoint does.

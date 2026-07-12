@@ -20,12 +20,14 @@ import asyncio
 from collections.abc import Callable
 from typing import Any
 
+from collections.abc import Iterator
+
 from langchain_core.callbacks import AsyncCallbackManagerForLLMRun, CallbackManagerForLLMRun
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import AIMessage, BaseMessage
-from langchain_core.outputs import ChatGeneration, ChatResult
+from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage
+from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
 
-from .codex_runner import run_codex
+from .codex_runner import run_codex, run_codex_stream
 from .config import Settings, get_settings
 
 # --------------------------------------------------------------------------- #
@@ -84,6 +86,24 @@ class CodexChatModel(BaseChatModel):
         # The subprocess call blocks; without this override, ainvoke would run
         # it on the event loop's default executor with no clear ownership.
         return await asyncio.to_thread(self._generate, messages, stop, None, **kwargs)
+
+    def _stream(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: CallbackManagerForLLMRun | None = None,
+        **kwargs: Any,
+    ) -> Iterator[ChatGenerationChunk]:
+        # Having this override is what makes invoke() stream: BaseChatModel's
+        # _should_stream routes through here whenever a streaming callback
+        # handler (e.g. LangGraph's messages mode) is attached. The async side
+        # needs no override — astream falls back to running this in an executor.
+        prompt = _render_prompt(messages)
+        for delta in run_codex_stream(prompt, settings=self.settings):
+            chunk = ChatGenerationChunk(message=AIMessageChunk(content=delta))
+            if run_manager:
+                run_manager.on_llm_new_token(delta, chunk=chunk)
+            yield chunk
 
 
 def _build_codex(settings: Settings) -> BaseChatModel:

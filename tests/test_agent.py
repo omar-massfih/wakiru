@@ -72,6 +72,118 @@ def test_run_codex_pipes_prompt_on_stdin(monkeypatch) -> None:
     assert long_prompt not in seen["cmd"]
 
 
+def test_build_command_json_events_flag() -> None:
+    cmd = build_command("/tmp/o.txt", Settings(), json_events=True)
+    assert "--json" in cmd
+    assert "--json" not in build_command("/tmp/o.txt", Settings())
+
+
+# --- run_codex_stream (fake codex binary emitting JSONL) --------------------- #
+
+
+def _fake_codex(tmp_path, body: str) -> Settings:
+    """A stand-in ``codex`` executable; ``body`` is its Python source."""
+    script = tmp_path / "fake-codex"
+    script.write_text("#!/usr/bin/env python3\nimport json, sys\nsys.stdin.read()\n" + body)
+    script.chmod(0o755)
+    return Settings(codex_bin=str(script))
+
+
+def test_run_codex_stream_yields_increments(tmp_path) -> None:
+    from assistant.codex_runner import run_codex_stream
+
+    settings = _fake_codex(
+        tmp_path,
+        """
+events = [
+    {"type": "thread.started", "thread_id": "t1"},
+    {"type": "turn.started"},
+    {"type": "item.updated", "item": {"id": "m1", "type": "agent_message", "text": "Hel"}},
+    {"type": "item.updated", "item": {"id": "m1", "type": "agent_message", "text": "Hello"}},
+    {"type": "item.completed", "item": {"id": "m1", "type": "agent_message", "text": "Hello world"}},
+    {"type": "turn.completed"},
+]
+for e in events:
+    print(json.dumps(e))
+""",
+    )
+    assert list(run_codex_stream("hi", settings=settings)) == ["Hel", "lo", " world"]
+
+
+def test_run_codex_stream_separates_message_items(tmp_path) -> None:
+    from assistant.codex_runner import run_codex_stream
+
+    settings = _fake_codex(
+        tmp_path,
+        """
+events = [
+    {"type": "item.completed", "item": {"id": "m1", "type": "agent_message", "text": "first"}},
+    {"type": "item.completed", "item": {"id": "m2", "type": "agent_message", "text": "second"}},
+]
+for e in events:
+    print(json.dumps(e))
+""",
+    )
+    assert "".join(run_codex_stream("hi", settings=settings)) == "first\n\nsecond"
+
+
+def test_run_codex_stream_turn_failed_raises(tmp_path) -> None:
+    from assistant.codex_runner import CodexError, run_codex_stream
+
+    settings = _fake_codex(
+        tmp_path,
+        """
+print(json.dumps({"type": "turn.failed", "error": {"message": "usage limit hit"}}))
+""",
+    )
+    with pytest.raises(CodexError, match="usage limit hit"):
+        list(run_codex_stream("hi", settings=settings))
+
+
+def test_run_codex_stream_nonzero_exit_raises(tmp_path) -> None:
+    from assistant.codex_runner import CodexError, run_codex_stream
+
+    settings = _fake_codex(tmp_path, "sys.exit(3)\n")
+    with pytest.raises(CodexError, match="code 3"):
+        list(run_codex_stream("hi", settings=settings))
+
+
+def test_run_codex_stream_falls_back_to_output_file(tmp_path) -> None:
+    from assistant.codex_runner import run_codex_stream
+
+    # No agent_message events at all — the -o file is the only reply source.
+    settings = _fake_codex(
+        tmp_path,
+        """
+out = sys.argv[sys.argv.index("-o") + 1]
+open(out, "w").write("from the file")
+print(json.dumps({"type": "turn.completed"}))
+""",
+    )
+    assert list(run_codex_stream("hi", settings=settings)) == ["from the file"]
+
+
+def test_run_codex_stream_timeout_kills_process(tmp_path) -> None:
+    from assistant.codex_runner import CodexError, run_codex_stream
+
+    settings = _fake_codex(tmp_path, "import time\ntime.sleep(30)\n")
+    settings.codex_timeout = 1
+    with pytest.raises(CodexError, match="timed out"):
+        list(run_codex_stream("hi", settings=settings))
+
+
+def test_codex_chat_model_stream_emits_chunks(monkeypatch) -> None:
+    from assistant import llm as llm_module
+
+    monkeypatch.setattr(
+        llm_module, "run_codex_stream", lambda prompt, settings=None: iter(["a", "b"])
+    )
+    model = CodexChatModel(settings=Settings())
+    # langchain appends a final empty metadata chunk; consumers filter empties.
+    chunks = [c.content for c in model.stream([HumanMessage(content="hi")]) if c.content]
+    assert chunks == ["a", "b"]
+
+
 def test_build_model_defaults_to_codex() -> None:
     model = build_model(Settings())
     assert isinstance(model, CodexChatModel)
