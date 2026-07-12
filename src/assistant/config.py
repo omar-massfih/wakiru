@@ -78,12 +78,13 @@ class Settings(BaseSettings):
     # Cap per kind on how many index entries are injected into the prompt each
     # turn (-1 = unlimited, 0 = omit the kind entirely). Bounds the per-turn
     # context as notes accumulate; MEMORY.md on disk is never trimmed. Episodic
-    # defaults to 0: raw traces are recalled semantically when relevant, and a
-    # listing of them is noise.
+    # is kept small: raw traces are recalled semantically when relevant, but a
+    # couple of high-retention episodes in the listing let the model know what
+    # recent sessions it can draw on.
     context_index_max_per_kind: dict[str, int] = {
         "semantic": 20,
         "procedural": 10,
-        "episodic": 0,
+        "episodic": 2,
     }
 
     # --- Dedup / forget thresholds (cosine; model-dependent!) ---

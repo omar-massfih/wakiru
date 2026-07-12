@@ -342,7 +342,16 @@ def test_index_view_caps_per_kind(settings) -> None:
     assert "Showing the most valuable" in view
 
 
-def test_index_view_omits_episodic_but_recall_still_finds_them(settings) -> None:
+def test_index_view_lists_episodic_under_default_cap(settings) -> None:
+    learn.record_episode(settings, "went hiking with Torvald in the hills", "Nice!")
+    view = recall.build_index_view(settings)
+    assert "1 episodic" in view  # counted in the stats line…
+    assert "hiking" in view.lower()  # …and listed under the default cap of 2
+    assert recall.search_memory(settings, "hiking Torvald hills")
+
+
+def test_index_view_zero_cap_omits_episodic_but_recall_still_finds_them(settings) -> None:
+    settings.context_index_max_per_kind = {"semantic": 20, "procedural": 10, "episodic": 0}
     learn.record_episode(settings, "went hiking with Torvald in the hills", "Nice!")
     view = recall.build_index_view(settings)
     assert "1 episodic" in view  # counted in the stats line…
