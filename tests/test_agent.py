@@ -276,7 +276,9 @@ def test_maybe_summarize_trims_thread_in_background(tmp_path, monkeypatch) -> No
         "assistant.memory.embeddings._embed",
         lambda texts, prefix="", settings=None: [[1.0] + [0.0] * 63 for _ in texts],
     )
-    settings = _wm_settings(tmp_path)
+    # Legacy graph: FakeListChatModel has no bind_tools, and this test is about
+    # summarization, not the tool loop.
+    settings = _wm_settings(tmp_path, enable_tool_loop=False)
     graph = build_agent(settings)
     config = {"configurable": {"thread_id": "t1"}}
     for i in range(3):
@@ -339,3 +341,187 @@ def test_ainvoke_runs_codex_without_blocking_the_loop(monkeypatch) -> None:
     model = CodexChatModel(settings=Settings())
     result = asyncio.run(model.ainvoke([HumanMessage(content="hei")]))
     assert result.content == "async-svar"
+
+
+# --- tool loop ---------------------------------------------------------------- #
+
+
+def _fake_embed_patch(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "assistant.memory.embeddings._embed",
+        lambda texts, prefix="", settings=None: [[1.0] + [0.0] * 63 for _ in texts],
+    )
+
+
+class _ScriptedToolModel:
+    """A fake chat model that emits scripted tool calls, tracking bind state."""
+
+    def __init__(self, always_call: bool = False) -> None:
+        self.always_call = always_call
+        self.invocations: list[bool] = []  # True = the tools-bound copy was used
+        self.bound_schemas: list[dict] = []
+
+    def bind_tools(self, tools):
+        self.bound_schemas = list(tools)
+        parent = self
+
+        class _Bound:
+            def invoke(self, messages):
+                return parent._invoke(bound=True)
+
+        return _Bound()
+
+    def invoke(self, messages):
+        return self._invoke(bound=False)
+
+    def _invoke(self, bound: bool):
+        self.invocations.append(bound)
+        wants_call = bound and (self.always_call or len(self.invocations) == 1)
+        if wants_call:
+            return AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "add_task",
+                        "args": {"title": f"task-{len(self.invocations)}"},
+                        "id": "call_1",
+                    }
+                ],
+            )
+        return AIMessage(content="Done — added to your list.")
+
+
+def _build_tool_agent(tmp_path, monkeypatch, model, **overrides):
+    from assistant.agent import build_agent
+
+    _fake_embed_patch(monkeypatch)
+    monkeypatch.setattr("assistant.agent.build_model", lambda s=None: model)
+    settings = Settings(memory_dir=str(tmp_path / "memory"), **overrides)
+    return build_agent(settings), settings
+
+
+def test_tool_loop_executes_call_then_replies(tmp_path, monkeypatch) -> None:
+    from assistant.chat import run_chat
+    from assistant.tasks import store as tasks_store
+
+    model = _ScriptedToolModel()
+    agent, settings = _build_tool_agent(tmp_path, monkeypatch, model)
+    reply = run_chat(agent, "add a task", "t1", settings=settings)
+
+    assert reply == "Done — added to your list."
+    assert model.invocations == [True, True]  # one tool round, then the reply
+    assert [t.title for t in tasks_store.list_tasks(settings)] == ["task-1"]
+    assert {s["function"]["name"] for s in model.bound_schemas} >= {"add_task", "remember"}
+
+    history = agent.get_state({"configurable": {"thread_id": "t1"}}).values["messages"]
+    assert [m.type for m in history] == ["human", "ai", "tool", "ai"]
+
+
+def test_tool_loop_cap_forces_plain_reply(tmp_path, monkeypatch) -> None:
+    from assistant.chat import run_chat
+
+    model = _ScriptedToolModel(always_call=True)
+    agent, settings = _build_tool_agent(
+        tmp_path, monkeypatch, model, tool_max_rounds=2
+    )
+    reply = run_chat(agent, "go wild", "t1", settings=settings)
+
+    assert reply == "Done — added to your list."
+    # Bound passes until the cap, then exactly one unbound (tool-less) pass.
+    assert model.invocations[-1] is False
+    assert all(model.invocations[:-1])
+
+    history = agent.get_state({"configurable": {"thread_id": "t1"}}).values["messages"]
+    assert not getattr(history[-1], "tool_calls", None)  # no dangling calls
+    assert any(
+        m.type == "tool" and "budget exhausted" in str(m.content).lower()
+        for m in history
+    )
+
+
+def test_tool_loop_disabled_binds_nothing(tmp_path, monkeypatch) -> None:
+    from assistant.chat import run_chat
+
+    model = _ScriptedToolModel()
+    agent, settings = _build_tool_agent(
+        tmp_path, monkeypatch, model, enable_tool_loop=False
+    )
+    reply = run_chat(agent, "hello", "t1", settings=settings)
+    assert model.bound_schemas == []  # legacy graph: the model is never bound
+    assert model.invocations == [False]
+    assert reply == "Done — added to your list."
+
+
+def test_unknown_tool_call_gets_error_tool_message(tmp_path, monkeypatch) -> None:
+    from assistant.chat import run_chat
+
+    class _UnknownToolModel(_ScriptedToolModel):
+        def _invoke(self, bound: bool):
+            self.invocations.append(bound)
+            if bound and len(self.invocations) == 1:
+                return AIMessage(
+                    content="",
+                    tool_calls=[{"name": "launch_rocket", "args": {}, "id": "c1"}],
+                )
+            return AIMessage(content="Sorry, I can't do that.")
+
+    model = _UnknownToolModel()
+    agent, settings = _build_tool_agent(tmp_path, monkeypatch, model)
+    run_chat(agent, "launch it", "t1", settings=settings)
+    history = agent.get_state({"configurable": {"thread_id": "t1"}}).values["messages"]
+    tool_msgs = [m for m in history if m.type == "tool"]
+    assert len(tool_msgs) == 1 and "Unknown tool" in str(tool_msgs[0].content)
+
+
+# --- expanded recall query ------------------------------------------------------ #
+
+
+def test_expanded_recall_query_carries_recent_context(tmp_path) -> None:
+    from assistant.agent import expanded_recall_query
+
+    settings = Settings(memory_dir=str(tmp_path / "memory"))
+    messages = [
+        HumanMessage(content="Tell me about the Bergen trip"),
+        AIMessage(content="You leave Friday morning and stay two nights."),
+        HumanMessage(content="when is it?"),
+    ]
+    query = expanded_recall_query(messages, "Planning a work trip.", settings)
+    assert query.startswith("when is it?")  # the live turn leads
+    assert "Bergen" in query
+    assert "Planning a work trip." in query
+
+
+def test_expanded_recall_query_disabled_is_latest_only(tmp_path) -> None:
+    from assistant.agent import expanded_recall_query
+
+    settings = Settings(
+        memory_dir=str(tmp_path / "memory"), recall_context_extra_chars=0
+    )
+    messages = [
+        HumanMessage(content="Tell me about Bergen"),
+        AIMessage(content="It rains."),
+        HumanMessage(content="when?"),
+    ]
+    assert expanded_recall_query(messages, "summary text", settings) == "when?"
+
+
+# --- summarize_fold with tool messages ------------------------------------------ #
+
+
+def test_summarize_fold_never_orphans_a_tool_message(tmp_path) -> None:
+    from langchain_core.messages import ToolMessage
+
+    from assistant.agent import summarize_fold
+
+    settings = _wm_settings(tmp_path)  # max=4, keep_recent=2
+    messages = [
+        *_history(4),
+        ToolMessage(content="added task: x", tool_call_id="c1", id="4"),
+        AIMessage(content="done", id="5"),
+    ]
+    update = summarize_fold(settings, FakeListChatModel(responses=["sum"]), messages, "")
+    assert update is not None
+    removed = {m.id for m in update["messages"]}
+    # The boundary slides past the ToolMessage so the kept tail can't open on one.
+    assert "4" in removed
+    assert removed == {"0", "1", "2", "3", "4"}

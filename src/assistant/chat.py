@@ -91,10 +91,14 @@ async def run_chat_stream(
         config=config,
         stream_mode="messages",
     ):
-        # Only the codex node's model output is user-facing; other nodes (recall,
-        # agenda) don't emit message chunks in this mode. Skip non-AI chunks and
+        # Only the agent node's model output is user-facing; other nodes (recall,
+        # agenda) don't emit message chunks in this mode. Skip non-AI chunks,
+        # tool-call chunks (structured intent, not reply text — the codex shim
+        # withholds them and the native providers emit them content-free), and
         # empty deltas so the consumer sees only reply text.
         if isinstance(chunk, AIMessageChunk):
+            if chunk.tool_call_chunks or chunk.tool_calls:
+                continue
             text = chunk.content if isinstance(chunk.content, str) else str(chunk.content)
             if text:
                 yield text
@@ -131,19 +135,23 @@ def run_upkeep(
     except Exception:
         logger.exception("summarization upkeep failed for thread %s", thread_id)
 
-    # Calendar: a reconciling extraction that creates/reschedules/cancels events.
-    if settings.enable_calendar and settings.enable_auto_schedule:
-        try:
-            update_calendar(settings, message, reply, thread_id)
-        except Exception:
-            logger.exception("calendar upkeep failed for thread %s", thread_id)
+    # Calendar/tasks extraction is the legacy write path: under the tool loop
+    # the model already applied its writes via tool calls, and re-extracting
+    # from the transcript would double-apply them.
+    if not settings.enable_tool_loop:
+        # Calendar: a reconciling extraction that creates/reschedules/cancels events.
+        if settings.enable_calendar and settings.enable_auto_schedule:
+            try:
+                update_calendar(settings, message, reply, thread_id)
+            except Exception:
+                logger.exception("calendar upkeep failed for thread %s", thread_id)
 
-    # Tasks: a reconciling extraction that adds/completes/updates/removes to-dos.
-    if settings.enable_tasks and settings.enable_auto_tasks:
-        try:
-            update_tasks(settings, message, reply, thread_id)
-        except Exception:
-            logger.exception("task upkeep failed for thread %s", thread_id)
+        # Tasks: a reconciling extraction that adds/completes/updates/removes to-dos.
+        if settings.enable_tasks and settings.enable_auto_tasks:
+            try:
+                update_tasks(settings, message, reply, thread_id)
+            except Exception:
+                logger.exception("task upkeep failed for thread %s", thread_id)
 
     # Periodic consolidation ("sleep"); the counter persists across restarts.
     try:

@@ -306,6 +306,9 @@ CRITICAL — reconcile against what is already known:
 - If a known memory is now WRONG, OUTDATED, or REFINED by this exchange, emit an
   "update" for it (use its exact name) instead of saving a near-duplicate.
 - Only "save" genuinely new information not already covered below.
+- If the exchange shows a memory was already saved, updated, or forgotten via a
+  tool this turn (e.g. the assistant reports it remembered/forgot something),
+  do not repeat that operation.
 
 Choose a kind for each saved/updated memory:
 - "semantic"   — durable facts, preferences, goals about the user or world.

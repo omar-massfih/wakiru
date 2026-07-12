@@ -157,12 +157,50 @@ def test_run_upkeep_skips_all_upkeep_for_undo_turn(settings, monkeypatch) -> Non
     chat.run_upkeep(_FailingAgent(), settings, "undo", "Undone: removed Dentist.", THREAD)
 
 
-def test_run_upkeep_runs_calendar_for_normal_turn(settings, monkeypatch) -> None:
+def test_run_upkeep_runs_calendar_for_normal_turn_legacy_mode(settings, monkeypatch) -> None:
+    legacy = settings.model_copy(update={"enable_tool_loop": False})
     called = {}
     monkeypatch.setattr(chat, "update_memory", lambda *a, **k: called.setdefault("memory", True))
     monkeypatch.setattr(chat, "maybe_summarize", lambda *a, **k: called.setdefault("summary", True))
     monkeypatch.setattr(
         chat, "update_calendar", lambda *a, **k: called.setdefault("calendar", True)
     )
-    chat.run_upkeep(_FailingAgent(), settings, "book a dentist", "Done!", THREAD)
+    chat.run_upkeep(_FailingAgent(), legacy, "book a dentist", "Done!", THREAD)
     assert called == {"memory": True, "summary": True, "calendar": True}
+
+
+def test_run_upkeep_skips_extractors_under_tool_loop(settings, monkeypatch) -> None:
+    """With the tool loop on, the model already applied its writes — the legacy
+    calendar/task extractors must not run again and double-apply them."""
+    called = {}
+    monkeypatch.setattr(chat, "update_memory", lambda *a, **k: called.setdefault("memory", True))
+    monkeypatch.setattr(chat, "maybe_summarize", lambda *a, **k: called.setdefault("summary", True))
+    for name in ("update_calendar", "update_tasks"):
+        monkeypatch.setattr(
+            chat,
+            name,
+            lambda *a, _name=name, **k: pytest.fail(f"{_name} must not run under the tool loop"),
+        )
+    assert settings.enable_tool_loop  # the default
+    chat.run_upkeep(_FailingAgent(), settings, "book a dentist", "Done!", THREAD)
+    assert called == {"memory": True, "summary": True}
+
+
+def test_run_chat_stream_filters_tool_call_chunks(settings) -> None:
+    tool_chunk = AIMessageChunk(
+        content="",
+        tool_call_chunks=[
+            {"name": "add_task", "args": '{"title": "x"}', "id": "c1", "index": 0}
+        ],
+    )
+
+    class _ToolStreamingAgent(_StreamingAgent):
+        async def astream(self, _input, config=None, stream_mode=None):
+            self.streamed = True
+            yield tool_chunk, {"langgraph_node": "agent"}
+            for text in self.chunks:
+                yield AIMessageChunk(content=text), {"langgraph_node": "agent"}
+
+    agent = _ToolStreamingAgent(["all ", "done"])
+    chunks = _collect(chat.run_chat_stream(agent, "hi", THREAD, settings=settings))
+    assert chunks == ["all ", "done"]  # the structured call never reaches the wire

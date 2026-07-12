@@ -54,6 +54,16 @@ class Settings(BaseSettings):
     # widen deliberately, matching codex_sandbox's conservative default.
     codex_web_search: bool = False
 
+    # --- Tool loop ---
+    # Master switch: bind the tool registry (calendar, tasks, memory, docs,
+    # email) to the reply model so it acts through structured tool calls in a
+    # bounded agent<->tools loop. False restores the previous architecture:
+    # no tools, and the background calendar/task extractors take over again.
+    enable_tool_loop: bool = True
+    # Max tool rounds per turn; past it, pending calls get a budget-exhausted
+    # result and the model must answer with what it has.
+    tool_max_rounds: int = 6
+
     # --- Storage backend ---
     # local keeps the original markdown + SQLite stores. postgres is intended
     # for Vercel Marketplace databases such as Neon with pgvector enabled.
@@ -70,6 +80,11 @@ class Settings(BaseSettings):
     embedding_model: str = "intfloat/multilingual-e5-large"
     # How many notes to recall and inject per turn.
     recall_top_k: int = 5
+    # Recall query expansion: how many recent turns (besides the latest message)
+    # contribute snippets to the embedding query, and the total budget (chars)
+    # for that supplement (0 disables — the latest message alone is the query).
+    recall_context_messages: int = 4
+    recall_context_extra_chars: int = 600
     # Cosine-similarity floor for a candidate note to be considered at all.
     recall_min_similarity: float = 0.35
     # Master switch for long-term memory upkeep. When True, an LLM extraction
@@ -287,6 +302,10 @@ class Settings(BaseSettings):
     # Rewrite the raw digest into a short natural-language morning note with one
     # LLM call. False sends the assembled sections verbatim (no LLM cost).
     briefing_llm_polish: bool = True
+    # Record proactive pushes (reminders, the briefing) into each authorized
+    # chat's working memory, so the conversation knows what was already sent
+    # ("what was that reminder about?" works). No extra LLM cost.
+    enable_proactive_loop_in: bool = True
 
     # --- Telegram channel ---
     # Bot token from @BotFather. Set => the server long-polls Telegram and each

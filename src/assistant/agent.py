@@ -2,9 +2,12 @@
 
 Graph shape::
 
-    START -> recall -> agenda -> tasks -> profile -> codex -> END
+    START -> recall -> agenda -> tasks -> profile -> agent
+    agent  -> tools -> agent   (while the model calls tools, up to a cap)
+    agent  -> END              (a plain-text reply ends the turn)
 
-* **recall** — semantic memory lookup for the latest user turn; the retrieved
+* **recall** — semantic memory lookup for the current turn (the latest message
+  expanded with recent context, so follow-ups retrieve well); the retrieved
   context is stashed ephemerally (overwritten each turn, never accumulated) and
   the recalled notes are reinforced.
 * **agenda** — the current time plus upcoming calendar events, stashed
@@ -14,7 +17,18 @@ Graph shape::
 * **profile** — the user's durable preferences (notes tagged ``profile``:
   working hours, locations, quiet hours, tone), so replies and scheduling
   suggestions fit the person.
-* **codex** — feed ``[recall] + [profile] + [agenda] + [tasks] + history`` to the Codex model.
+* **agent** — feed ``[recall] + [profile] + [agenda] + [tasks] + history`` to
+  the model with the tool registry bound (:mod:`assistant.tools`).
+* **tools** — execute the model's tool calls (calendar, tasks, memory, docs,
+  email) through the same guarded write paths the old background extractors
+  used, so the undo ledger and ambiguity guards keep working. The loop is
+  bounded by ``tool_max_rounds``; past it, pending calls are answered with a
+  budget-exhausted result and the next model pass runs tool-less, so history
+  never ends on a dangling tool call.
+
+``ENABLE_TOOL_LOOP=false`` restores the previous behavior: no tools are bound,
+the graph is effectively the old linear shape, and the background calendar/task
+extractors in :mod:`assistant.chat` take over again.
 
 Working memory is bounded *off* the reply path: after the reply is sent, the API
 layer runs :func:`maybe_summarize` in the background, which folds older turns
@@ -34,13 +48,17 @@ from __future__ import annotations
 import atexit
 import logging
 import sqlite3
+import uuid
 
 from langchain_core.messages import (
+    AIMessage,
     BaseMessage,
     HumanMessage,
     RemoveMessage,
     SystemMessage,
+    ToolMessage,
 )
+from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.graph.state import CompiledStateGraph
@@ -53,6 +71,7 @@ from .llm import build_model
 from .memory import index, recall_context
 from .memory.profile import profile_context
 from .tasks import tasks_context
+from .tools import ToolContext, available_tools, execute_tool
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +84,9 @@ class BrainState(MessagesState):
     tasks: str
     profile: str
     summary: str
+    batch_id: str
+    tool_rounds: int
+    tools_exhausted: bool
 
 
 def _latest_human_text(messages: list[BaseMessage]) -> str:
@@ -73,6 +95,49 @@ def _latest_human_text(messages: list[BaseMessage]) -> str:
             content = message.content
             return content if isinstance(content, str) else str(content)
     return ""
+
+
+def expanded_recall_query(
+    messages: list[BaseMessage], summary: str, settings: Settings
+) -> str:
+    """The embedding query for recall: the latest message plus recent context.
+
+    A pronoun-only follow-up ("what about the second one?") embeds poorly on
+    its own; folding in snippets of the last few turns and the tail of the
+    rolling summary carries the referent into the query. Bounded by
+    ``recall_context_extra_chars`` so the query stays a query, not a transcript.
+    """
+    latest = _latest_human_text(messages)
+    remaining = settings.recall_context_extra_chars
+    if remaining <= 0:
+        return latest
+
+    supplement: list[str] = []
+    seen_latest = False
+    for message in reversed(messages):
+        if len(supplement) >= max(settings.recall_context_messages, 0):
+            break
+        if isinstance(message, HumanMessage) and not seen_latest:
+            seen_latest = True  # the latest human turn already leads the query
+            continue
+        if not isinstance(message, (HumanMessage, AIMessage)):
+            continue
+        content = message.content if isinstance(message.content, str) else str(message.content)
+        snippet = content.strip()[:160]
+        if not snippet or len(snippet) > remaining:
+            continue
+        supplement.append(snippet)
+        remaining -= len(snippet)
+    supplement.reverse()
+
+    if summary and remaining > 0:
+        tail = summary.strip()[-min(300, remaining):]
+        if tail:
+            supplement.append(tail)
+
+    if not supplement:
+        return latest
+    return "\n".join([latest, *supplement]) if latest else "\n".join(supplement)
 
 
 def summarize_fold(
@@ -92,7 +157,18 @@ def summarize_fold(
         return None
     keep = settings.working_memory_keep_recent
     # keep<=0 means summarize everything; messages[:-0] would wrongly be empty.
-    older = messages if keep <= 0 else messages[:-keep]
+    if keep <= 0:
+        older = messages
+    else:
+        split = len(messages) - keep
+        # Never let the kept history open on a ToolMessage: its calling
+        # AIMessage would be folded away, leaving an orphaned tool result
+        # (which the native providers reject outright on the next turn).
+        while split < len(messages) and isinstance(messages[split], ToolMessage):
+            split += 1
+        older = messages[:split]
+    if not older:
+        return None
     transcript = "\n".join(
         f"{m.type}: {m.content if isinstance(m.content, str) else str(m.content)}"
         for m in older
@@ -141,7 +217,7 @@ def maybe_summarize(
             snapshot.values.get("summary", ""),
         )
         if update is not None:
-            agent.update_state(config, update, as_node="codex")
+            agent.update_state(config, update, as_node="agent")
     except Exception:
         logger.exception("background summarization failed for thread %s", thread_id)
 
@@ -202,9 +278,16 @@ def build_agent(settings: Settings | None = None) -> CompiledStateGraph:
             logger.exception("startup docs reindex failed; continuing with existing index")
 
     model = build_model(settings)
+    specs = available_tools(settings) if settings.enable_tool_loop else []
+    by_name = {spec.name: spec for spec in specs}
+    bound_model = (
+        model.bind_tools([spec.to_openai_tool() for spec in specs]) if specs else model
+    )
 
     def recall(state: BrainState) -> dict:
-        query = _latest_human_text(state["messages"])
+        query = expanded_recall_query(
+            state["messages"], state.get("summary", ""), settings
+        )
         content = recall_context(settings, query).content
         # Fold in the most relevant document excerpts on the same channel, so
         # "what did I write about X" is answered from ingested docs too.
@@ -215,7 +298,13 @@ def build_agent(settings: Settings | None = None) -> CompiledStateGraph:
             docs = ""
         if docs:
             content = f"{content}\n\n{docs}" if content else docs
-        return {"recall": content}
+        # First node of the turn: reset the per-turn tool-loop state too.
+        return {
+            "recall": content,
+            "batch_id": uuid.uuid4().hex,
+            "tool_rounds": 0,
+            "tools_exhausted": False,
+        }
 
     def agenda(state: BrainState) -> dict:
         """Give the model a clock and today's schedule (ephemeral, per turn)."""
@@ -245,7 +334,7 @@ def build_agent(settings: Settings | None = None) -> CompiledStateGraph:
             logger.exception("building profile context failed; continuing without it")
             return {"profile": ""}
 
-    def call_codex(state: BrainState) -> dict:
+    def call_agent(state: BrainState) -> dict:
         prefix: list[BaseMessage] = []
         if state.get("recall"):
             prefix.append(SystemMessage(content=state["recall"]))
@@ -259,19 +348,66 @@ def build_agent(settings: Settings | None = None) -> CompiledStateGraph:
             prefix.append(
                 SystemMessage(content="Conversation so far:\n" + state["summary"])
             )
-        reply = model.invoke(prefix + list(state["messages"]))
+        # Past the tool budget the unbound model runs, so a plain-text reply —
+        # and therefore END — is guaranteed.
+        active = model if state.get("tools_exhausted") else bound_model
+        reply = active.invoke(prefix + list(state["messages"]))
         return {"messages": [reply]}
+
+    def run_tools(state: BrainState, config: RunnableConfig) -> dict:
+        last = state["messages"][-1]
+        calls = last.tool_calls if isinstance(last, AIMessage) else []
+        rounds = state.get("tool_rounds", 0)
+        if rounds >= settings.tool_max_rounds:
+            return {
+                "messages": [
+                    ToolMessage(
+                        content="Tool budget exhausted; answer the user with what you have.",
+                        tool_call_id=call["id"],
+                        name=call["name"],
+                    )
+                    for call in calls
+                ],
+                "tools_exhausted": True,
+            }
+        ctx = ToolContext(
+            settings=settings,
+            thread_id=config.get("configurable", {}).get("thread_id", ""),
+            batch_id=state.get("batch_id", ""),
+        )
+        results: list[BaseMessage] = []
+        for call in calls:
+            spec = by_name.get(call["name"])
+            if spec is None:
+                output = f"Unknown tool: {call['name']}. Available: {', '.join(by_name)}."
+            else:
+                output = execute_tool(spec, ctx, call.get("args") or {})
+            results.append(
+                ToolMessage(content=output, tool_call_id=call["id"], name=call["name"])
+            )
+        return {"messages": results, "tool_rounds": rounds + 1}
+
+    def route_after_agent(state: BrainState) -> str:
+        last = state["messages"][-1]
+        if isinstance(last, AIMessage) and last.tool_calls:
+            return "tools"
+        return END
 
     graph = StateGraph(BrainState)
     graph.add_node("recall", recall)
     graph.add_node("agenda", agenda)
     graph.add_node("tasks", tasks)
     graph.add_node("profile", profile)
-    graph.add_node("codex", call_codex)
+    graph.add_node("agent", call_agent)
     graph.add_edge(START, "recall")
     graph.add_edge("recall", "agenda")
     graph.add_edge("agenda", "tasks")
     graph.add_edge("tasks", "profile")
-    graph.add_edge("profile", "codex")
-    graph.add_edge("codex", END)
+    graph.add_edge("profile", "agent")
+    if specs:
+        graph.add_node("tools", run_tools)
+        graph.add_conditional_edges("agent", route_after_agent, ["tools", END])
+        graph.add_edge("tools", "agent")
+    else:
+        graph.add_edge("agent", END)
     return graph.compile(checkpointer=_checkpointer(settings))
