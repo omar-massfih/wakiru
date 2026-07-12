@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 
 from . import slack, telegram, webui
 from .agent import build_agent
+from .briefing import run_briefing
 from .calendar import run_reminders
 from .calendar.context import resolve_tz, upcoming_events
 from .chat import run_chat, run_chat_stream, run_upkeep
@@ -45,6 +46,9 @@ async def _reminder_tick_loop() -> None:
         try:
             await asyncio.to_thread(run_reminders, get_settings())
             await asyncio.to_thread(run_task_reminders, get_settings())
+            # The daily briefing rides the same tick; its own ledger makes it
+            # exactly-once per day and a cheap no-op every other pass.
+            await asyncio.to_thread(run_briefing, get_settings())
         except Exception:
             logger.exception("reminder tick failed")
         await asyncio.sleep(get_settings().reminder_tick_seconds)
@@ -356,6 +360,16 @@ def reminders_run() -> dict:
     settings = get_settings()
     fired = run_reminders(settings) + run_task_reminders(settings)
     return {"count": len(fired), "fired": fired}
+
+
+@app.post("/briefing/run", dependencies=[Depends(require_token)])
+def briefing_run() -> dict:
+    """Send today's briefing now (even if the scheduled time hasn't passed).
+
+    Idempotent per local date via the fired ledger: a second call the same day
+    reports it was already sent rather than pushing a duplicate.
+    """
+    return run_briefing(get_settings(), force=True)
 
 
 @app.post("/documents", dependencies=[Depends(require_token)])

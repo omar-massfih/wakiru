@@ -266,6 +266,17 @@ class Settings(BaseSettings):
     # reminder_repeat_minutes > 0.
     reminder_overdue_max_minutes: int = 1440  # 24h
 
+    # --- Daily briefing ---
+    # Push one proactive digest per day (agenda + due tasks + unread mail when
+    # email is on) through the same channels reminders use.
+    enable_briefing: bool = False
+    # Local wall-clock time (HH:MM, in TIMEZONE) the briefing becomes due. The
+    # ticker fires it on the first tick at/after this time, exactly once per day.
+    briefing_time: str = "07:30"
+    # Rewrite the raw digest into a short natural-language morning note with one
+    # LLM call. False sends the assembled sections verbatim (no LLM cost).
+    briefing_llm_polish: bool = True
+
     # --- Telegram channel ---
     # Bot token from @BotFather. Set => the server long-polls Telegram and each
     # chat becomes a persistent conversation (thread "telegram:<chat_id>").
@@ -330,6 +341,11 @@ class Settings(BaseSettings):
     def docs_db_path(self) -> Path:
         """SQLite file holding ingested documents + their chunk vector index."""
         return self.memory_path / "docs.db"
+
+    @property
+    def briefing_db_path(self) -> Path:
+        """SQLite file holding the daily-briefing fired ledger."""
+        return self.memory_path / "briefing.db"
 
     @property
     def mail_token_path(self) -> Path:
