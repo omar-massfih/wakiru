@@ -55,11 +55,13 @@ async def _reminder_tick_loop() -> None:
     """
     while True:
         try:
-            await asyncio.to_thread(run_reminders, get_settings())
-            await asyncio.to_thread(run_task_reminders, get_settings())
+            # The agent rides along so each delivered push is also recorded
+            # into the authorized chats' working memory (proactive loop-in).
+            await asyncio.to_thread(run_reminders, get_settings(), _agent())
+            await asyncio.to_thread(run_task_reminders, get_settings(), _agent())
             # The daily briefing rides the same tick; its own ledger makes it
             # exactly-once per day and a cheap no-op every other pass.
-            await asyncio.to_thread(run_briefing, get_settings())
+            await asyncio.to_thread(run_briefing, get_settings(), agent=_agent())
         except Exception:
             logger.exception("reminder tick failed")
         await asyncio.sleep(get_settings().reminder_tick_seconds)
@@ -392,7 +394,7 @@ def reminders_run() -> dict:
     Fires both calendar-event and due-task reminders.
     """
     settings = get_settings()
-    fired = run_reminders(settings) + run_task_reminders(settings)
+    fired = run_reminders(settings, _agent()) + run_task_reminders(settings, _agent())
     return {"count": len(fired), "fired": fired}
 
 
@@ -409,7 +411,7 @@ def briefing_run() -> dict:
     Idempotent per local date via the fired ledger: a second call the same day
     reports it was already sent rather than pushing a duplicate.
     """
-    return run_briefing(get_settings(), force=True)
+    return run_briefing(get_settings(), force=True, agent=_agent())
 
 
 @app.post("/documents", dependencies=[Depends(require_token)])

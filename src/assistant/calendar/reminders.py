@@ -197,14 +197,16 @@ def _prune_ledger(conn: sqlite3.Connection, current: datetime) -> None:
     )
 
 
-def run_reminders(settings: Settings | None = None) -> list[dict]:
+def run_reminders(settings: Settings | None = None, agent=None) -> list[dict]:
     """Fire every reminder now due, exactly once, and return what was sent.
 
     Best-effort and idempotent: each due reminder is claimed with an atomic
     ``INSERT OR IGNORE`` on the ledger, so a reminder already fired (by an earlier
     tick or an overlapping manual call) is silently skipped. A rescheduled event
     fires afresh because the ledger key includes the event's start. No-op returning
-    ``[]`` when ``enable_reminders`` is false.
+    ``[]`` when ``enable_reminders`` is false. With ``agent`` given, each delivered
+    reminder is also recorded into the authorized chats' working memory (see
+    :mod:`assistant.proactive`), so conversations know what was pushed.
     """
     settings = settings or get_settings()
     if not settings.enable_reminders:
@@ -250,13 +252,20 @@ def run_reminders(settings: Settings | None = None) -> list[dict]:
                 if claimed:
                     sent.append(reminder)
 
+    from ..proactive import record_push
+
     for reminder in sent:
         try:
-            deliver_reminder(settings, reminder)
+            delivered = deliver_reminder(settings, reminder)
         except Exception:
             # The claim is already committed; a push that blows up must not
             # take the rest of this batch down with it.
             logger.exception("reminder delivery failed: %s", reminder["message"])
+            continue
+        if delivered:
+            # Recorded with the same ⏰ prefix the chat channels show, so the
+            # thread's history matches what the user actually saw.
+            record_push(agent, settings, f"⏰ {reminder['message']}")
 
     if sent:
         logger.info("fired %d reminder(s): %s", len(sent), "; ".join(r["message"] for r in sent))

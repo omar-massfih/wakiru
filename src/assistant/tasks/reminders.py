@@ -139,12 +139,12 @@ def _prune_ledger(conn: sqlite3.Connection, current: datetime) -> None:
     )
 
 
-def run_task_reminders(settings: Settings | None = None) -> list[dict]:
+def run_task_reminders(settings: Settings | None = None, agent=None) -> list[dict]:
     """Fire every due-task reminder now due, exactly once, and return what was sent.
 
-    Same claim-first / deliver-after discipline as
-    :func:`assistant.calendar.reminders.run_reminders`. No-op returning ``[]`` when
-    reminders or tasks are disabled.
+    Same claim-first / deliver-after discipline (and the same loop-in recording
+    via ``agent``) as :func:`assistant.calendar.reminders.run_reminders`. No-op
+    returning ``[]`` when reminders or tasks are disabled.
     """
     settings = settings or get_settings()
     if not (settings.enable_reminders and settings.enable_tasks):
@@ -180,11 +180,16 @@ def run_task_reminders(settings: Settings | None = None) -> list[dict]:
                 if claimed:
                     sent.append(reminder)
 
+    from ..proactive import record_push
+
     for reminder in sent:
         try:
-            deliver_reminder(settings, reminder)
+            delivered = deliver_reminder(settings, reminder)
         except Exception:
             logger.exception("task reminder delivery failed: %s", reminder["message"])
+            continue
+        if delivered:
+            record_push(agent, settings, f"⏰ {reminder['message']}")
 
     if sent:
         logger.info(

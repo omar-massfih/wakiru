@@ -347,3 +347,32 @@ def test_ledger_prune_compares_instants_not_strings(settings) -> None:
         )
     reminders.run_reminders(settings)  # prunes before firing
     assert any(r["event_id"] == "fresh" for r in _ledger_rows(settings))
+
+
+# --- proactive loop-in ------------------------------------------------------ #
+
+
+class _RecordingAgent:
+    def __init__(self) -> None:
+        self.recorded: list[tuple[str, str]] = []
+
+    def update_state(self, config, update, as_node=None) -> None:
+        self.recorded.append(
+            (config["configurable"]["thread_id"], update["messages"][0].content)
+        )
+
+
+def test_delivered_reminder_is_recorded_on_threads(settings, monkeypatch) -> None:
+    settings.telegram_bot_token = "tok"
+    settings.telegram_allowed_chat_ids = [7]
+    monkeypatch.setattr(reminders, "deliver_reminder", lambda s, r: True)
+    _event_in(settings, "Dentist", minutes=30)
+    agent = _RecordingAgent()
+    fired = reminders.run_reminders(settings, agent)
+    assert len(fired) == 1
+    assert agent.recorded == [("telegram:7", "⏰ Dentist in 30 min")]
+
+
+def test_no_agent_records_nothing(settings) -> None:
+    _event_in(settings, "Dentist", minutes=30)
+    assert len(reminders.run_reminders(settings)) == 1  # delivery path unchanged

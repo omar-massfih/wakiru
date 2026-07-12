@@ -19,7 +19,7 @@ import logging
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import datetime, time as dtime
+from datetime import time as dtime
 
 from .calendar.context import agenda_context, now
 from .config import Settings, get_settings
@@ -31,11 +31,6 @@ logger = logging.getLogger(__name__)
 # Fired rows older than this are pruned on each run (see calendar.reminders).
 _LEDGER_RETENTION_DAYS = 30
 
-_POLISH_INSTRUCTION = (
-    "Rewrite the digest below as a short, friendly morning briefing (a few "
-    "sentences, plain text, no headings). Lead with what matters most today. "
-    "Do not invent anything that is not in the digest.\n\n"
-)
 
 
 def _open(settings: Settings) -> sqlite3.Connection:
@@ -91,25 +86,24 @@ def build_briefing(settings: Settings) -> str:
 
 
 def _polish(settings: Settings, digest: str) -> str:
-    """One LLM pass over the digest; the raw digest is the fallback."""
+    """One profile-aware LLM pass over the digest; the raw digest is the fallback."""
     if not settings.briefing_llm_polish:
         return digest
-    from .codex_runner import run_codex
+    from .proactive import compose_briefing
 
-    try:
-        polished = run_codex(_POLISH_INSTRUCTION + digest, settings=settings)
-        return polished or digest
-    except Exception:
-        logger.exception("briefing polish failed; sending the raw digest")
-        return digest
+    return compose_briefing(settings, digest)
 
 
-def run_briefing(settings: Settings | None = None, force: bool = False) -> dict:
+def run_briefing(
+    settings: Settings | None = None, force: bool = False, agent=None
+) -> dict:
     """Fire today's briefing if it is due and unsent; return what happened.
 
     ``force=True`` (the manual endpoint) skips the time-of-day gate but still
     claims the ledger, so a forced briefing replaces — not duplicates — the
-    scheduled one.
+    scheduled one. With ``agent`` given (and ``enable_proactive_loop_in``), the
+    delivered briefing is also recorded into each authorized chat's working
+    memory, so the conversation knows what it was sent.
     """
     settings = settings or get_settings()
     if not settings.enable_briefing and not force:
@@ -148,4 +142,8 @@ def run_briefing(settings: Settings | None = None, force: bool = False) -> dict:
         # Claim stands even if no channel is configured — retrying every tick
         # would re-run the LLM polish for a push that can never land.
         logger.warning("briefing built but no delivery channel accepted it")
+    else:
+        from .proactive import record_push
+
+        record_push(agent, settings, f"Daily briefing: {message}")
     return {"sent": True, "delivered": delivered, "date": local_date}
