@@ -27,9 +27,11 @@ import json
 import logging
 import os
 import secrets
+import tempfile
 import urllib.error
 import urllib.request
 from collections.abc import Callable
+from pathlib import Path
 from urllib.parse import urlparse
 
 from langgraph.graph.state import CompiledStateGraph
@@ -495,6 +497,29 @@ def _dispatch_command(
     return True
 
 
+def _transcribe_voice(token: str, settings: Settings, voice: dict) -> str:
+    """Download one Telegram voice note and return its transcript.
+
+    Raises on any failure (download, decode, model); the caller turns that into
+    a friendly reply. Runs the same thread as the turn — transcription time is
+    part of the reply latency, which is why clip length is bounded.
+    """
+    info = _call(token, "getFile", {"file_id": voice.get("file_id")})
+    file_path = (info or {}).get("file_path") if isinstance(info, dict) else None
+    if not file_path:
+        raise ValueError("telegram getFile returned no file_path")
+    url = f"{_API_BASE}/file/bot{token}/{file_path}"
+    with urllib.request.urlopen(url, timeout=60) as response:
+        data = response.read()
+    from .stt import transcribe
+
+    suffix = Path(file_path).suffix or ".oga"
+    with tempfile.NamedTemporaryFile(suffix=suffix) as tmp:
+        tmp.write(data)
+        tmp.flush()
+        return transcribe(tmp.name, settings)
+
+
 def handle_update(
     agent: CompiledStateGraph, settings: Settings, update: dict
 ) -> Callable[[], None] | None:
@@ -509,13 +534,16 @@ def handle_update(
     message = update.get("message") or {}
     chat_id = (message.get("chat") or {}).get("id")
     text = message.get("text")
-    if token is None or chat_id is None or not text:
-        return None  # not a text message (sticker, photo, member event, …)
+    voice = message.get("voice")
+    if token is None or chat_id is None or not (text or voice):
+        return None  # not a text/voice message (sticker, photo, member event, …)
 
     allowed = authorized_chats(settings)
     if chat_id not in allowed:
-        if allowed:
-            # Once anyone is paired/allowlisted, strangers get silence.
+        if allowed or not text:
+            # Once anyone is paired/allowlisted, strangers get silence — and the
+            # pairing handshake itself is text-only (a stranger's audio is never
+            # downloaded, let alone transcribed).
             logger.warning("ignoring telegram message from unauthorized chat %s", chat_id)
             return None
         # No owner yet: run the pairing handshake (code round-trip via the
@@ -523,6 +551,31 @@ def handle_update(
         # messages themselves never reach the model.
         _handle_pairing(settings, token, chat_id, text)
         return None
+
+    if text is None:  # a voice note from an authorized chat
+        if not settings.enable_voice:
+            send_message(token, chat_id, "Voice notes are off. Set ENABLE_VOICE=true to use them.")
+            return None
+        if (voice.get("duration") or 0) > settings.voice_max_seconds:
+            send_message(
+                token,
+                chat_id,
+                f"That voice note is too long — keep it under {settings.voice_max_seconds}s.",
+            )
+            return None
+        with contextlib.suppress(urllib.error.URLError, OSError, RuntimeError):
+            _call(token, "sendChatAction", {"chat_id": chat_id, "action": "typing"})
+        try:
+            text = _transcribe_voice(token, settings, voice)
+        except Exception:
+            logger.exception("voice transcription failed for chat %s", chat_id)
+            send_message(token, chat_id, "Sorry — I couldn't make out that voice note. Try again?")
+            return None
+        if not text:
+            send_message(token, chat_id, "I couldn't hear any speech in that voice note.")
+            return None
+        # Echo the transcript so a mishearing is obvious before the reply lands.
+        send_message(token, chat_id, f"🎙 Heard: “{text}”")
 
     thread_id = f"telegram:{chat_id}"
 

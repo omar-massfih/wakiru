@@ -460,3 +460,70 @@ def test_reset_command_clears_history(tmp_path, calls, monkeypatch) -> None:
     telegram.handle_update(None, settings, _update(chat_id=7, text="/reset"))
     assert reset_calls == ["telegram:7"]
     assert "forgotten" in _sends(calls)[0]["text"].lower()
+
+
+# --- voice notes ------------------------------------------------------------- #
+
+
+def _voice_update(chat_id: int = 7, duration: int = 5) -> dict:
+    return {
+        "update_id": 11,
+        "message": {
+            "chat": {"id": chat_id},
+            "voice": {"file_id": "F1", "duration": duration, "mime_type": "audio/ogg"},
+        },
+    }
+
+
+def test_voice_disabled_replies_with_hint(tmp_path, calls, monkeypatch) -> None:
+    settings = _settings(tmp_path, telegram_allowed_chat_ids=[7])
+    monkeypatch.setattr(telegram, "run_chat", lambda *a, **kw: pytest.fail("must not chat"))
+    telegram.handle_update(None, settings, _voice_update())
+    assert "Voice notes are off" in _sends(calls)[0]["text"]
+
+
+def test_voice_from_stranger_is_never_downloaded(tmp_path, calls, monkeypatch) -> None:
+    settings = _settings(tmp_path, enable_voice=True)  # no owner paired yet
+    monkeypatch.setattr(
+        telegram, "_transcribe_voice", lambda *a: pytest.fail("must not download")
+    )
+    telegram.handle_update(None, settings, _voice_update(chat_id=99))
+    assert _sends(calls) == []
+
+
+def test_voice_too_long_is_refused(tmp_path, calls, monkeypatch) -> None:
+    settings = _settings(tmp_path, telegram_allowed_chat_ids=[7], enable_voice=True)
+    monkeypatch.setattr(
+        telegram, "_transcribe_voice", lambda *a: pytest.fail("must not download")
+    )
+    telegram.handle_update(None, settings, _voice_update(duration=10_000))
+    assert "too long" in _sends(calls)[0]["text"]
+
+
+def test_voice_transcript_runs_the_turn_and_echoes(tmp_path, calls, monkeypatch) -> None:
+    settings = _settings(tmp_path, telegram_allowed_chat_ids=[7], enable_voice=True)
+    monkeypatch.setattr(telegram, "_transcribe_voice", lambda tok, s, v: "book a dentist")
+    monkeypatch.setattr(telegram, "run_chat", lambda agent, text, tid, settings: f"ok: {text}")
+    upkeep_seen: list[tuple] = []
+    monkeypatch.setattr(telegram, "run_upkeep", lambda *a: upkeep_seen.append(a))
+
+    upkeep = telegram.handle_update(None, settings, _voice_update())
+    sends = _sends(calls)
+    assert "book a dentist" in sends[0]["text"]  # the echo
+    assert sends[1]["text"] == "ok: book a dentist"
+    assert upkeep is not None
+    upkeep()
+    # run_upkeep(agent, settings, user_text, reply, thread_id)
+    assert upkeep_seen and upkeep_seen[0][2] == "book a dentist"
+
+
+def test_voice_transcription_failure_apologizes(tmp_path, calls, monkeypatch) -> None:
+    settings = _settings(tmp_path, telegram_allowed_chat_ids=[7], enable_voice=True)
+
+    def boom(tok, s, v):
+        raise RuntimeError("decode error")
+
+    monkeypatch.setattr(telegram, "_transcribe_voice", boom)
+    monkeypatch.setattr(telegram, "run_chat", lambda *a, **kw: pytest.fail("must not chat"))
+    telegram.handle_update(None, settings, _voice_update())
+    assert "make out that voice note" in _sends(calls)[0]["text"]

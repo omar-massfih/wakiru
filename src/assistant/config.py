@@ -292,6 +292,19 @@ class Settings(BaseSettings):
     # reminders are pushed to all authorized chats.
     telegram_allowed_chat_ids: list[int] = []
 
+    # --- Voice notes (Telegram) ---
+    # Transcribe incoming Telegram voice messages locally (faster-whisper) and
+    # answer them like typed text. Off by default: first use downloads the model.
+    enable_voice: bool = False
+    # Whisper model size: "small" is the sweet spot for Norwegian + English;
+    # "base"/"tiny" are lighter but noticeably worse outside English.
+    voice_model: str = "small"
+    # Force a language code ("no", "en", …). Empty => autodetect per message.
+    voice_language: str = ""
+    # Refuse clips longer than this (seconds): transcription is CPU-bound and a
+    # very long clip would stall the reply loop.
+    voice_max_seconds: int = 600
+
     # --- Slack channel ---
     # Bot token (xoxb-…). Set => POST /slack/events accepts Slack Events API
     # callbacks and each user's DM/channel becomes a persistent conversation.
