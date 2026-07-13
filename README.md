@@ -142,7 +142,8 @@ Replies longer than Telegram's 4096-char limit are split at newline boundaries.
 
 The calendar can nudge you *before* an event, unprompted — "Dentist in 1 hour" —
 instead of only answering when you ask. Every delivered push (reminders and the
-daily briefing) is also recorded into each paired Telegram chat's working memory
+daily briefing) is also recorded into each paired Telegram chat's working memory,
+and into Slack conversations living in `SLACK_NOTIFY_CHANNEL`
 (`ENABLE_PROACTIVE_LOOP_IN`, on by default), so the conversation knows what it
 already sent you — "what was that reminder about?" just works, and the assistant
 can follow up on its own nudges. A ticker inside the server (no cron needed)

@@ -15,6 +15,7 @@ from collections.abc import AsyncIterator
 from langchain_core.messages import AIMessageChunk, HumanMessage
 from langgraph.graph.state import CompiledStateGraph
 
+from . import threads
 from .agent import maybe_summarize
 from .config import Settings, get_settings
 from .memory import consolidate_memory, index, update_memory
@@ -119,6 +120,14 @@ def run_upkeep(
         # Handled synchronously in run_chat; nothing here to learn — the reply
         # already reported the undo and there is no new fact worth remembering.
         return
+
+    # Thread registry: every channel funnels through here, so this one touch
+    # keeps the registry of live conversations current (Slack loop-in, and the
+    # heartbeat's "time since last contact").
+    try:
+        threads.touch(settings, thread_id)
+    except Exception:
+        logger.exception("thread registry touch failed for thread %s", thread_id)
 
     # Long-term memory: an episodic trace + a reconciling save/update/forget pass.
     try:

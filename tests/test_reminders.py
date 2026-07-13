@@ -412,3 +412,21 @@ def test_delivered_reminder_is_recorded_on_threads(settings, monkeypatch) -> Non
 def test_no_agent_records_nothing(settings) -> None:
     _event_in(settings, "Dentist", minutes=30)
     assert len(reminders.run_reminders(settings)) == 1  # delivery path unchanged
+
+
+def test_delivered_reminder_also_records_on_slack_threads(settings, monkeypatch) -> None:
+    from assistant import threads
+
+    settings.telegram_bot_token = "tok"
+    settings.telegram_allowed_chat_ids = [7]
+    settings.slack_bot_token = "xoxb-tok"
+    settings.slack_notify_channel = "C9"
+    # A Slack conversation in the notify channel has spoken to the assistant.
+    threads.touch(settings, "slack:C9:U1")
+
+    monkeypatch.setattr(reminders, "deliver_reminder", lambda s, r: True)
+    _event_in(settings, "Dentist", minutes=30)
+    agent = _RecordingAgent()
+    reminders.run_reminders(settings, agent)
+    assert ("telegram:7", "⏰ Dentist in 30 min") in agent.recorded
+    assert ("slack:C9:U1", "⏰ Dentist in 30 min") in agent.recorded

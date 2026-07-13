@@ -397,6 +397,11 @@ class Settings(BaseSettings):
         return self.memory_path / "mutes.db"
 
     @property
+    def threads_db_path(self) -> Path:
+        """SQLite file holding the live-thread registry (see assistant.threads)."""
+        return self.memory_path / "threads.db"
+
+    @property
     def mail_token_path(self) -> Path:
         """Cache file for the short-lived OAuth2 access token (never the refresh token)."""
         return self.memory_path / "mail_token.json"

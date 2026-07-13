@@ -40,16 +40,32 @@ _BRIEFING_INSTRUCTION = (
 def target_threads(settings: Settings) -> list[str]:
     """The conversation threads proactive pushes should be recorded on.
 
-    Telegram chats each map to a stable thread (``telegram:<chat_id>``). Slack
-    thread ids embed the *user* who spoke (``slack:<channel>:<user>``), which a
-    broadcast can't reconstruct — so Slack pushes are delivered but not
-    recorded (a known v1 limitation).
+    Telegram chats each map to a stable thread (``telegram:<chat_id>``), so the
+    authorized set is the delivery set. Slack thread ids embed the *user* who
+    spoke (``slack:<channel>:<user>``), which a broadcast can't reconstruct —
+    but the thread registry (:mod:`assistant.threads`) knows every Slack thread
+    that has actually talked to the assistant, and a push lands in
+    ``slack_notify_channel``; recording it on the registered threads *in that
+    channel* records it exactly where it was seen.
     """
-    if not settings.telegram_bot_token:
-        return []
-    from .telegram import authorized_chats
+    targets: list[str] = []
+    if settings.telegram_bot_token:
+        from .telegram import authorized_chats
 
-    return [f"telegram:{chat_id}" for chat_id in authorized_chats(settings)]
+        targets += [f"telegram:{chat_id}" for chat_id in authorized_chats(settings)]
+    if settings.slack_bot_token and settings.slack_notify_channel:
+        from . import threads
+
+        try:
+            for info in threads.known_threads(settings, channel="slack"):
+                # slack:<channel>:<user> — only threads living in the channel
+                # the push was delivered to actually saw it.
+                parts = info.thread_id.split(":", 2)
+                if len(parts) == 3 and parts[1] == settings.slack_notify_channel:
+                    targets.append(info.thread_id)
+        except Exception:
+            logger.exception("slack thread lookup failed; recording to telegram only")
+    return targets
 
 
 def record_to_thread(
