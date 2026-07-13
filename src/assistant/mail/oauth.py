@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 import urllib.parse
 import urllib.request
@@ -46,10 +47,16 @@ def _store_cached(settings: Settings, token: str, expires_in: int) -> None:
     settings.memory_path.mkdir(parents=True, exist_ok=True)
     payload = {"access_token": token, "expires_at": time.time() + expires_in}
     try:
-        # 0600: the access token grants mailbox access for its lifetime.
+        # The token grants mailbox access for its lifetime, so it must never be
+        # loose-permissioned, even briefly: create the file 0600 from the start
+        # (write_text-then-chmod leaves a umask-permissioned window) and publish
+        # it atomically.
         path = settings.mail_token_path
-        path.write_text(json.dumps(payload))
-        path.chmod(0o600)
+        tmp = path.with_suffix(".tmp")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as handle:
+            handle.write(json.dumps(payload))
+        os.replace(tmp, path)
     except OSError:
         logger.warning("could not cache the mail access token", exc_info=True)
 

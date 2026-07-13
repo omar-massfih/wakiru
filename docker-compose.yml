@@ -19,6 +19,13 @@ services:
       - ${HOME}/.codex:/home/assistant/.codex
       - ./memory:/app/memory
       - ./models:/app/models
+    # /health is unauthenticated; a hung-but-alive process flips to unhealthy.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
     logging:
       driver: json-file
       options:

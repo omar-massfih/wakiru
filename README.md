@@ -219,9 +219,12 @@ codex login
 docker build -t agentic-assistent .
 
 # 3. Run, mounting your Codex credentials (Codex needs a writable CODEX_HOME at
-#    runtime for its app-server client; auth still lives on the host):
+#    runtime for its app-server client; auth still lives on the host) and the
+#    memory directory (with the default local backend the assistant's entire
+#    brain lives there — without the mount it dies with the container):
 docker run --rm -p 8000:8000 \
   -v "$HOME/.codex:/home/assistant/.codex" \
+  -v "$PWD/memory:/app/memory" \
   -e API_TOKEN=change-me \
   agentic-assistent
 
@@ -229,6 +232,8 @@ curl localhost:8000/health
 ```
 
 Notes:
+- Host-mounted `./memory` (and `./models` when using docker-compose) must be writable
+  by uid 1000 — the container runs as the non-root `assistant` user.
 - `API_TOKEN` is required in the container: the image binds `0.0.0.0`, and the server
   refuses to start on a non-loopback bind without a token. Set `ALLOW_UNAUTHENTICATED=1`
   only if something in front (reverse proxy, VPN) does the authentication.

@@ -26,9 +26,9 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import urllib.request
 from datetime import date, datetime
 
+from .. import netguard
 from ..config import Settings, get_settings
 from . import store
 from .context import resolve_tz
@@ -153,9 +153,17 @@ def _differs(current: store.Event, incoming: store.Event) -> bool:
 
 
 def pull_feed(settings: Settings, url: str) -> dict:
-    """Mirror one ICS feed into the store; return counts of what changed."""
-    request = urllib.request.Request(url, headers={"User-Agent": "wakiru-assistant"})
-    with urllib.request.urlopen(request, timeout=_FETCH_TIMEOUT_SECONDS) as response:
+    """Mirror one ICS feed into the store; return counts of what changed.
+
+    Feed URLs are operator-configured, but their redirects are not — the
+    fetch goes through the SSRF guard, so a feed on a private host is
+    refused (see :mod:`assistant.netguard`).
+    """
+    with netguard.urlopen_public(
+        url,
+        timeout=_FETCH_TIMEOUT_SECONDS,
+        headers={"User-Agent": "wakiru-assistant"},
+    ) as response:
         text = response.read(_MAX_FEED_BYTES).decode("utf-8", errors="replace")
     incoming = parse_feed(text, url, settings)
 

@@ -13,8 +13,9 @@ from __future__ import annotations
 
 import io
 import re
-import urllib.request
 from html.parser import HTMLParser
+
+from .. import netguard
 
 # Pages larger than this are cut off rather than buffered without bound.
 _MAX_FETCH_BYTES = 5_000_000
@@ -119,16 +120,20 @@ def html_to_text(html: str) -> str:
 def fetch_url_text(url: str) -> tuple[str, str]:
     """Fetch ``url`` and return ``(title, text)``; HTML is reduced to prose.
 
-    The scheme must be http(s) — no file://, no redirect target checks beyond
-    urllib's defaults. Callers gate this behind ``enable_docs_url_ingest``.
+    The scheme must be http(s) and the host must resolve to a public address
+    (every redirect hop re-checked — see :mod:`assistant.netguard`). Callers
+    gate this behind ``enable_docs_url_ingest``.
     """
-    if not url.lower().startswith(("http://", "https://")):
-        raise ExtractionError("only http(s) URLs can be ingested")
-    request = urllib.request.Request(url, headers={"User-Agent": "wakiru-assistant"})
     try:
-        with urllib.request.urlopen(request, timeout=_FETCH_TIMEOUT_SECONDS) as response:
+        with netguard.urlopen_public(
+            url,
+            timeout=_FETCH_TIMEOUT_SECONDS,
+            headers={"User-Agent": "wakiru-assistant"},
+        ) as response:
             content_type = response.headers.get_content_type()
             body = response.read(_MAX_FETCH_BYTES)
+    except netguard.BlockedURLError as exc:
+        raise ExtractionError(str(exc)) from exc
     except OSError as exc:  # URLError subclasses OSError
         raise ExtractionError(f"could not fetch {url}: {exc}") from exc
 

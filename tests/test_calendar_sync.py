@@ -45,11 +45,14 @@ def _feed(monkeypatch, text: str) -> None:
     import contextlib
     import io
 
+    from assistant import netguard
+
     @contextlib.contextmanager
-    def fake_urlopen(request, timeout=None):
+    def fake_open(request, timeout=None):
         yield io.BytesIO(text.encode())
 
-    monkeypatch.setattr(sync.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(netguard, "require_public_url", lambda url: None)
+    monkeypatch.setattr(netguard, "_open", fake_open)
 
 
 def test_pull_mirrors_events(settings, monkeypatch) -> None:
@@ -148,10 +151,13 @@ def test_write_path_refuses_synced_events(settings, monkeypatch) -> None:
 
 
 def test_pull_feeds_survives_a_broken_feed(settings, monkeypatch) -> None:
+    from assistant import netguard
+
     settings.calendar_ics_urls = ["https://bad.example.com/x.ics"]
 
     def boom(request, timeout=None):
         raise OSError("connection refused")
 
-    monkeypatch.setattr(sync.urllib.request, "urlopen", boom)
+    monkeypatch.setattr(netguard, "require_public_url", lambda url: None)
+    monkeypatch.setattr(netguard, "_open", boom)
     assert sync.pull_feeds(settings) == []
