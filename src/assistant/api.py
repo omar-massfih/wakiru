@@ -37,6 +37,7 @@ from .config import get_settings
 from .docs import extract as docs_extract
 from .docs import store as docs_store
 from .docs.summarize import summarize_document
+from .heartbeat import run_heartbeat
 from .mail import client as mail_client
 from .mail import snapshot as mail_snapshot
 from .mail.client import MailDisabledError
@@ -69,6 +70,20 @@ async def _reminder_tick_loop() -> None:
         except Exception:
             logger.exception("reminder tick failed")
         await asyncio.sleep(get_settings().reminder_tick_seconds)
+
+
+async def _heartbeat_loop() -> None:
+    """Wake the deliberative layer on its own (slow) cadence.
+
+    ``run_heartbeat`` starts with an LLM-free triage, so a tick with nothing to
+    do costs nothing. Same best-effort discipline as the other tickers.
+    """
+    while True:
+        try:
+            await asyncio.to_thread(run_heartbeat, get_settings(), _agent())
+        except Exception:
+            logger.exception("heartbeat tick failed")
+        await asyncio.sleep(get_settings().heartbeat_minutes * 60)
 
 
 async def _calendar_sync_loop() -> None:
@@ -150,6 +165,9 @@ async def lifespan(app: FastAPI):
     if settings.enable_reminders and settings.reminder_tick_seconds > 0:
         tasks.append(asyncio.create_task(_reminder_tick_loop(), name="reminder-ticker"))
         logger.info("reminder ticker started (every %ss)", settings.reminder_tick_seconds)
+    if settings.enable_heartbeat and settings.heartbeat_minutes > 0:
+        tasks.append(asyncio.create_task(_heartbeat_loop(), name="heartbeat"))
+        logger.info("heartbeat started (every %d min)", settings.heartbeat_minutes)
     if settings.calendar_ics_urls and settings.calendar_sync_minutes > 0:
         tasks.append(asyncio.create_task(_calendar_sync_loop(), name="calendar-sync"))
         logger.info(
@@ -416,6 +434,17 @@ def briefing_run() -> dict:
     reports it was already sent rather than pushing a duplicate.
     """
     return run_briefing(get_settings(), force=True, agent=_agent())
+
+
+@app.post("/heartbeat/run", dependencies=[Depends(require_token)])
+def heartbeat_run() -> dict:
+    """Run one heartbeat now (bypasses the ambient throttle, not quiet hours).
+
+    The deliberative wake: triage the situation, let the model decide whether
+    to reach out, and report what happened. Due followups are consumed
+    exactly-once, so a manual run replaces — not duplicates — the scheduled one.
+    """
+    return run_heartbeat(get_settings(), agent=_agent(), force=True)
 
 
 @app.post("/documents", dependencies=[Depends(require_token)])

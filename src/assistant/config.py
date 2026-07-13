@@ -319,8 +319,9 @@ class Settings(BaseSettings):
     # pre-check finds a trigger, so a quiet day costs zero tokens. 0 disables
     # the ticker (POST /heartbeat/run still works).
     heartbeat_minutes: int = 30
-    # Minimum minutes between heartbeat-initiated pushes, so a busy morning
-    # doesn't become a barrage. Claimed triggers within the gap are dropped.
+    # Minimum minutes between ambient heartbeat wakes (mail changes, contact
+    # staleness), so a busy inbox doesn't become a barrage. Due follow-ups are
+    # explicit intent and always wake regardless of the gap.
     heartbeat_min_gap_minutes: int = 120
     # Hours of user silence (across all channels) before "we haven't talked in
     # a while" becomes a heartbeat trigger. 0 disables the staleness trigger.
