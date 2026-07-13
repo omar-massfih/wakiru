@@ -83,7 +83,10 @@ Documents:
 _EMAIL = """\
 Email:
 - You can list, read, and draft email with the email tools. Reading never marks
-  anything as read; drafting saves to the drafts folder and sends nothing."""
+  anything as read; drafting saves to the drafts folder and sends nothing.
+- A block headed "Unread mail (snapshot as of …)" may ride in each turn; it is
+  a cached snapshot, possibly minutes old — use the email tools when the user
+  needs the live mailbox."""
 
 _EMAIL_SEND = """\
 - Sending (`send_email`) is allowed ONLY after the user explicitly confirms

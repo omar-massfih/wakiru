@@ -38,6 +38,7 @@ from .docs import extract as docs_extract
 from .docs import store as docs_store
 from .docs.summarize import summarize_document
 from .mail import client as mail_client
+from .mail import snapshot as mail_snapshot
 from .mail.client import MailDisabledError
 from .memory import consolidate_memory, store
 from .tasks import store as tasks_store
@@ -62,6 +63,9 @@ async def _reminder_tick_loop() -> None:
             # The daily briefing rides the same tick; its own ledger makes it
             # exactly-once per day and a cheap no-op every other pass.
             await asyncio.to_thread(run_briefing, get_settings(), agent=_agent())
+            # The unread-mail snapshot rides along too, on its own (slower)
+            # cadence — a no-op tick when email is off or the snapshot is fresh.
+            await asyncio.to_thread(mail_snapshot.maybe_refresh, get_settings())
         except Exception:
             logger.exception("reminder tick failed")
         await asyncio.sleep(get_settings().reminder_tick_seconds)

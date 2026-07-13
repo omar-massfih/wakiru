@@ -217,3 +217,90 @@ def test_send_blocked_when_email_disabled_entirely(tmp_path) -> None:
     s = Settings(memory_dir=str(tmp_path / "m"), enable_email_send=True)
     with pytest.raises(MailDisabledError):
         client.send_message(s, "bob@x.com", "Hi", "body")
+
+
+# --- the unread snapshot (per-turn context, no IMAP on the reply path) ------- #
+
+
+def _fake_messages() -> list[client.Message]:
+    return [
+        client.Message(uid="1", sender="anna@x.com", subject="Quarterly numbers",
+                       date="", unread=True),
+        client.Message(uid="2", sender="bob@x.com", subject="", date="", unread=True),
+    ]
+
+
+def test_snapshot_refresh_persists_and_current_serves_it(settings, monkeypatch) -> None:
+    from assistant.mail import snapshot
+
+    monkeypatch.setattr(client, "list_recent", lambda s, unread_only=True: _fake_messages())
+    assert snapshot.refresh(settings) is not None
+
+    block = snapshot.current(settings)
+    assert block.startswith("## Unread mail (snapshot as of ")
+    assert "Quarterly numbers" in block and "(no subject)" in block
+
+
+def test_snapshot_current_never_fetches(settings, monkeypatch) -> None:
+    from assistant.mail import snapshot
+
+    monkeypatch.setattr(
+        client, "list_recent",
+        lambda *a, **k: pytest.fail("current() must never touch the mailbox"),
+    )
+    assert snapshot.current(settings) == ""  # nothing persisted yet — and no I/O
+
+
+def test_snapshot_survives_a_restart(settings, monkeypatch) -> None:
+    from assistant.mail import snapshot
+
+    monkeypatch.setattr(client, "list_recent", lambda s, unread_only=True: _fake_messages())
+    snapshot.refresh(settings)
+    # A "restart": nothing in memory, only the persisted file.
+    assert "Quarterly numbers" in snapshot.current(settings)
+
+
+def test_snapshot_maybe_refresh_respects_cadence(settings, monkeypatch) -> None:
+    from assistant.mail import snapshot
+
+    calls = {"n": 0}
+
+    def counting(s, unread_only=True):
+        calls["n"] += 1
+        return _fake_messages()
+
+    monkeypatch.setattr(client, "list_recent", counting)
+    snapshot.maybe_refresh(settings)
+    snapshot.maybe_refresh(settings)  # fresh — must not refetch
+    assert calls["n"] == 1
+
+
+def test_snapshot_failed_refresh_keeps_previous(settings, monkeypatch) -> None:
+    from assistant.mail import snapshot
+
+    monkeypatch.setattr(client, "list_recent", lambda s, unread_only=True: _fake_messages())
+    snapshot.refresh(settings)
+
+    def boom(*a, **k):
+        raise RuntimeError("mailbox down")
+
+    monkeypatch.setattr(client, "list_recent", boom)
+    assert snapshot.refresh(settings) is None  # logged, not raised
+    assert "Quarterly numbers" in snapshot.current(settings)  # old snapshot stands
+
+
+def test_snapshot_disabled_is_inert(tmp_path, monkeypatch) -> None:
+    from assistant.mail import snapshot
+
+    s = Settings(memory_dir=str(tmp_path / "m"))  # email off
+    monkeypatch.setattr(
+        client, "list_recent", lambda *a, **k: pytest.fail("disabled must not fetch")
+    )
+    assert snapshot.refresh(s) is None
+    snapshot.maybe_refresh(s)
+    assert snapshot.current(s) == ""
+
+    zero = Settings(memory_dir=str(tmp_path / "m2"), enable_email=True,
+                    email_snapshot_minutes=0)
+    assert snapshot.refresh(zero) is None
+    assert snapshot.current(zero) == ""

@@ -1,9 +1,9 @@
-"""The email read path — rendered *on request only*.
+"""The live email read path — a fresh IMAP fetch, rendered on request.
 
-Deliberately not wired into the agent graph: unlike the calendar, tasks, or
-recall, mail is not injected into every turn. It is private correspondence and
-would cost tokens on every message, so it is surfaced only when explicitly asked
-for (the ``/email`` command, the ``GET /email`` endpoint).
+Used where freshness matters and a network round-trip is acceptable: the
+``/email`` command and the ``GET /email`` endpoint. The per-turn context block
+never calls this — it reads the cached snapshot instead
+(:mod:`assistant.mail.snapshot`), so the reply path never waits on IMAP.
 """
 
 from __future__ import annotations
