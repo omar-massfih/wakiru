@@ -12,11 +12,9 @@ the in-process ticker and a manual ``POST /reminders/run`` can both drive it.
 from __future__ import annotations
 
 import logging
-import sqlite3
-from collections.abc import Iterator
-from contextlib import contextmanager
 from datetime import datetime, timedelta
 
+from .. import fired_ledger
 from ..calendar.context import now
 from ..calendar.reminders import _humanize, _humanize_ago, _repeat_slot
 from ..calendar.store import parse_dt
@@ -26,32 +24,12 @@ from . import store
 
 logger = logging.getLogger(__name__)
 
-_LEDGER_RETENTION_DAYS = 30
-
-
-def _open(settings: Settings) -> sqlite3.Connection:
-    settings.memory_path.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(settings.tasks_db_path)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout = 5000")
-    conn.execute("PRAGMA journal_mode = WAL")
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS task_reminders_fired ("
-        " task_id TEXT NOT NULL, due TEXT NOT NULL,"
-        " lead_minutes INTEGER NOT NULL, fired_at TEXT NOT NULL,"
-        " PRIMARY KEY (task_id, due, lead_minutes))"
-    )
-    return conn
-
-
-@contextmanager
-def _connect(settings: Settings) -> Iterator[sqlite3.Connection]:
-    conn = _open(settings)
-    try:
-        with conn:
-            yield conn
-    finally:
-        conn.close()
+# The dedupe ledger lives in the same ``tasks.db`` file the store uses.
+_LEDGER = fired_ledger.FiredLedgerSpec(
+    table="task_reminders_fired",
+    columns=(("task_id", "TEXT"), ("due", "TEXT"), ("lead_minutes", "INTEGER")),
+    db_path=lambda settings: settings.tasks_db_path,
+)
 
 
 def due_task_reminders(settings: Settings, current: datetime | None = None) -> list[dict]:
@@ -123,22 +101,6 @@ def due_task_reminders(settings: Settings, current: datetime | None = None) -> l
     return reminders
 
 
-def _prune_ledger(conn: sqlite3.Connection, current: datetime) -> None:
-    cutoff = current - timedelta(days=_LEDGER_RETENTION_DAYS)
-    stale = [
-        (row["task_id"], row["due"], row["lead_minutes"])
-        for row in conn.execute(
-            "SELECT task_id, due, lead_minutes, fired_at FROM task_reminders_fired"
-        )
-        if (fired := parse_dt(row["fired_at"])) is None or fired < cutoff
-    ]
-    conn.executemany(
-        "DELETE FROM task_reminders_fired"
-        " WHERE task_id = ? AND due = ? AND lead_minutes = ?",
-        stale,
-    )
-
-
 def run_task_reminders(settings: Settings | None = None, agent=None) -> list[dict]:
     """Fire every due-task reminder now due, exactly once, and return what was sent.
 
@@ -169,20 +131,19 @@ def run_task_reminders(settings: Settings | None = None, agent=None) -> list[dic
 
         sent = storage_postgres.claim_task_reminders(settings, due, fired_at, current)
     else:
-        sent: list[dict] = []
-        with _connect(settings) as conn:
-            _prune_ledger(conn, current)
-            for reminder in due:
-                claimed = 0
-                for lead in reminder["covered_leads"]:
-                    cursor = conn.execute(
-                        "INSERT OR IGNORE INTO task_reminders_fired"
-                        " (task_id, due, lead_minutes, fired_at) VALUES (?, ?, ?, ?)",
-                        (reminder["task_id"], reminder["due"], lead, fired_at),
-                    )
-                    claimed += cursor.rowcount
-                if claimed:
-                    sent.append(reminder)
+        keys = [
+            (reminder["task_id"], reminder["due"], lead)
+            for reminder in due
+            for lead in reminder["covered_leads"]
+        ]
+        owner = [
+            index
+            for index, reminder in enumerate(due)
+            for _ in reminder["covered_leads"]
+        ]
+        claimed = fired_ledger.claim(_LEDGER, settings, keys, fired_at, current)
+        sent_indexes = sorted({owner[key_index] for key_index in claimed})
+        sent = [due[index] for index in sent_indexes]
 
     from ..proactive import record_push
 

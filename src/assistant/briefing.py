@@ -16,11 +16,9 @@ the same local date.
 from __future__ import annotations
 
 import logging
-import sqlite3
-from collections.abc import Iterator
-from contextlib import contextmanager
 from datetime import time as dtime
 
+from . import fired_ledger
 from .calendar.context import agenda_context, now
 from .config import Settings, get_settings
 from .notify import deliver_reminder
@@ -28,32 +26,11 @@ from .tasks.context import tasks_context
 
 logger = logging.getLogger(__name__)
 
-# Fired rows older than this are pruned on each run (see calendar.reminders).
-_LEDGER_RETENTION_DAYS = 30
-
-
-
-def _open(settings: Settings) -> sqlite3.Connection:
-    settings.memory_path.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(settings.briefing_db_path)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout = 5000")
-    conn.execute("PRAGMA journal_mode = WAL")
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS briefings_fired ("
-        " local_date TEXT PRIMARY KEY, fired_at TEXT NOT NULL)"
-    )
-    return conn
-
-
-@contextmanager
-def _connect(settings: Settings) -> Iterator[sqlite3.Connection]:
-    conn = _open(settings)
-    try:
-        with conn:
-            yield conn
-    finally:
-        conn.close()
+_LEDGER = fired_ledger.FiredLedgerSpec(
+    table="briefings_fired",
+    columns=(("local_date", "TEXT"),),
+    db_path=lambda settings: settings.briefing_db_path,
+)
 
 
 def _due_time(settings: Settings) -> dtime:
@@ -126,16 +103,8 @@ def run_briefing(
         if all_muted(settings, current):
             return {"sent": False, "reason": "muted"}
 
-    with _connect(settings) as conn:
-        conn.execute(
-            "DELETE FROM briefings_fired WHERE fired_at < datetime('now', ?)",
-            (f"-{_LEDGER_RETENTION_DAYS} days",),
-        )
-        claimed = conn.execute(
-            "INSERT OR IGNORE INTO briefings_fired (local_date, fired_at)"
-            " VALUES (?, datetime('now'))",
-            (local_date,),
-        ).rowcount
+    fired_at = current.isoformat(timespec="seconds")
+    claimed = fired_ledger.claim(_LEDGER, settings, [(local_date,)], fired_at, current)
     if not claimed:
         return {"sent": False, "reason": "already sent today"}
 

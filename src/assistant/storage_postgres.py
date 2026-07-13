@@ -1208,11 +1208,11 @@ def mark_task_writes_undone(settings: Settings, ids: list[int], undone_at: str) 
 def claim_calendar_reminders(settings: Settings, reminders: list[dict], fired_at: str, current) -> list[dict]:
     from datetime import timedelta
 
-    from .calendar import reminders as calendar_reminders
     from .calendar import store as calendar_store
+    from .fired_ledger import LEDGER_RETENTION_DAYS
 
     ensure_calendar_schema(settings)
-    cutoff = current - timedelta(days=calendar_reminders._LEDGER_RETENTION_DAYS)
+    cutoff = current - timedelta(days=LEDGER_RETENTION_DAYS)
     sent: list[dict] = []
     with connect(settings) as conn:
         rows = _rows(conn.execute("SELECT event_id, event_start, lead_minutes, fired_at FROM assistant_calendar_reminders_fired"))
@@ -1243,10 +1243,10 @@ def claim_task_reminders(settings: Settings, reminders: list[dict], fired_at: st
     from datetime import timedelta
 
     from .calendar.store import parse_dt
-    from .tasks import reminders as task_reminders
+    from .fired_ledger import LEDGER_RETENTION_DAYS
 
     ensure_tasks_schema(settings)
-    cutoff = current - timedelta(days=task_reminders._LEDGER_RETENTION_DAYS)
+    cutoff = current - timedelta(days=LEDGER_RETENTION_DAYS)
     sent: list[dict] = []
     with connect(settings) as conn:
         rows = _rows(conn.execute("SELECT task_id, due, lead_minutes, fired_at FROM assistant_task_reminders_fired"))

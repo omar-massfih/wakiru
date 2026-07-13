@@ -15,11 +15,9 @@ from __future__ import annotations
 
 import logging
 import math
-import sqlite3
-from collections.abc import Iterator
-from contextlib import contextmanager
 from datetime import datetime, timedelta
 
+from .. import fired_ledger
 from ..config import Settings, get_settings
 from ..notify import deliver_reminder
 from . import recurrence, store
@@ -27,40 +25,12 @@ from .context import now
 
 logger = logging.getLogger(__name__)
 
-# Fired-reminder rows older than this are pruned on each run so the ledger, which
-# only ever grows, stays bounded without any separate maintenance job.
-_LEDGER_RETENTION_DAYS = 30
-
-
-def _open(settings: Settings) -> sqlite3.Connection:
-    """Open the calendar DB and ensure the dedupe ledger exists.
-
-    Mirrors :func:`assistant.calendar.store._open` (WAL + busy timeout, a fresh
-    connection per operation) and shares the same ``calendar.db`` file.
-    """
-    settings.memory_path.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(settings.calendar_db_path)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout = 5000")
-    conn.execute("PRAGMA journal_mode = WAL")
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS reminders_fired ("
-        " event_id TEXT NOT NULL, event_start TEXT NOT NULL,"
-        " lead_minutes INTEGER NOT NULL, fired_at TEXT NOT NULL,"
-        " PRIMARY KEY (event_id, event_start, lead_minutes))"
-    )
-    return conn
-
-
-@contextmanager
-def _connect(settings: Settings) -> Iterator[sqlite3.Connection]:
-    """One transaction on a fresh connection, closed on exit (see store._connect)."""
-    conn = _open(settings)
-    try:
-        with conn:
-            yield conn
-    finally:
-        conn.close()
+# The dedupe ledger lives in the same ``calendar.db`` file the store uses.
+_LEDGER = fired_ledger.FiredLedgerSpec(
+    table="reminders_fired",
+    columns=(("event_id", "TEXT"), ("event_start", "TEXT"), ("lead_minutes", "INTEGER")),
+    db_path=lambda settings: settings.calendar_db_path,
+)
 
 
 def _humanize(delta: timedelta) -> str:
@@ -175,28 +145,6 @@ def due_reminders(settings: Settings, current: datetime | None = None) -> list[d
     return reminders
 
 
-def _prune_ledger(conn: sqlite3.Connection, current: datetime) -> None:
-    """Drop fired rows older than the retention window (and unparseable ones).
-
-    Compared as datetimes in Python rather than as ISO strings in SQL: stamps
-    written under different UTC offsets (a DST change) don't order lexically.
-    The ledger holds at most ~30 days of rows, so the full scan is cheap.
-    """
-    cutoff = current - timedelta(days=_LEDGER_RETENTION_DAYS)
-    stale = [
-        (row["event_id"], row["event_start"], row["lead_minutes"])
-        for row in conn.execute(
-            "SELECT event_id, event_start, lead_minutes, fired_at FROM reminders_fired"
-        )
-        if (fired := store.parse_dt(row["fired_at"])) is None or fired < cutoff
-    ]
-    conn.executemany(
-        "DELETE FROM reminders_fired"
-        " WHERE event_id = ? AND event_start = ? AND lead_minutes = ?",
-        stale,
-    )
-
-
 def run_reminders(settings: Settings | None = None, agent=None) -> list[dict]:
     """Fire every reminder now due, exactly once, and return what was sent.
 
@@ -240,23 +188,22 @@ def run_reminders(settings: Settings | None = None, agent=None) -> list[dict]:
 
         sent = storage_postgres.claim_calendar_reminders(settings, due, fired_at, current)
     else:
-        sent: list[dict] = []
-        with _connect(settings) as conn:
-            _prune_ledger(conn, current)
-            for reminder in due:
-                # Claim every lead window the event is currently inside, so the
-                # larger leads can't fire a duplicate nudge on a later tick.
-                claimed = 0
-                for lead in reminder["covered_leads"]:
-                    cursor = conn.execute(
-                        "INSERT OR IGNORE INTO reminders_fired"
-                        " (event_id, event_start, lead_minutes, fired_at)"
-                        " VALUES (?, ?, ?, ?)",
-                        (reminder["event_id"], reminder["start"], lead, fired_at),
-                    )
-                    claimed += cursor.rowcount
-                if claimed:
-                    sent.append(reminder)
+        # Claim every lead window each event is currently inside, so the larger
+        # leads can't fire a duplicate nudge on a later tick; a reminder is sent
+        # when any of its windows was newly claimed.
+        keys = [
+            (reminder["event_id"], reminder["start"], lead)
+            for reminder in due
+            for lead in reminder["covered_leads"]
+        ]
+        owner = [
+            index
+            for index, reminder in enumerate(due)
+            for _ in reminder["covered_leads"]
+        ]
+        claimed = fired_ledger.claim(_LEDGER, settings, keys, fired_at, current)
+        sent_indexes = sorted({owner[key_index] for key_index in claimed})
+        sent = [due[index] for index in sent_indexes]
 
     from ..proactive import record_push
 
