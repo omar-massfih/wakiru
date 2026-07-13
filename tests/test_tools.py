@@ -151,6 +151,88 @@ def test_task_roundtrip_and_ambiguous_target(settings) -> None:
     assert tasks_store.list_tasks(settings) == []  # open tasks only
 
 
+# --- reminder mutes ----------------------------------------------------------- #
+
+
+def test_reminder_tools_gated_on_enable_reminders() -> None:
+    on = {s.name for s in available_tools(Settings())}
+    assert {"mute_reminders", "unmute_reminders"} <= on
+    off = {s.name for s in available_tools(Settings(enable_reminders=False))}
+    assert not {"mute_reminders", "unmute_reminders"} & off
+
+
+def test_mute_by_title_defaults_to_end_of_today(settings) -> None:
+    from assistant import mutes
+
+    event = calendar_store.create_event(
+        settings, title="Exercise", start=_iso_in(settings, minutes=30)
+    )
+    result = execute_tool(
+        tool_map(settings)["mute_reminders"], _ctx(settings), {"target": "Exercise"}
+    )
+    assert result.startswith("Muted reminders for Exercise until")
+
+    current = context.now(settings)
+    active = mutes.active_mutes(settings, current)
+    assert set(active) == {("event", event.id)}
+    until = active[("event", event.id)]
+    assert until.date() == current.date() and (until.hour, until.minute) == (23, 59)
+
+
+def test_mute_all_and_unmute(settings) -> None:
+    from assistant import mutes
+
+    ctx = _ctx(settings)
+    tools = tool_map(settings)
+    assert execute_tool(tools["mute_reminders"], ctx, {"target": "all"}).startswith(
+        "Muted reminders for all reminders"
+    )
+    assert mutes.all_muted(settings, context.now(settings))
+
+    assert execute_tool(tools["unmute_reminders"], ctx, {"target": "all"}) == (
+        "Unmuted reminders for all reminders."
+    )
+    assert not mutes.all_muted(settings, context.now(settings))
+    assert execute_tool(tools["unmute_reminders"], ctx, {"target": "all"}) == (
+        "No active mute for all reminders."
+    )
+
+
+def test_mute_resolves_tasks_and_refuses_ambiguity(settings) -> None:
+    from assistant import mutes
+
+    ctx = _ctx(settings)
+    tools = tool_map(settings)
+    task = tasks_store.create_task(settings, "Pay bill", due=_iso_in(settings, hours=2))
+    assert execute_tool(tools["mute_reminders"], ctx, {"target": "Pay bill"}).startswith(
+        "Muted reminders for Pay bill"
+    )
+    assert set(mutes.active_mutes(settings, context.now(settings))) == {("task", task.id)}
+
+    calendar_store.create_event(settings, title="Gym A", start=_iso_in(settings, hours=1))
+    calendar_store.create_event(settings, title="Gym B", start=_iso_in(settings, hours=2))
+    assert "No matching item" in execute_tool(
+        tools["mute_reminders"], ctx, {"target": "Gym"}
+    )
+    assert "No matching item" in execute_tool(
+        tools["mute_reminders"], ctx, {"target": "no such thing"}
+    )
+
+
+def test_mute_rejects_bad_until(settings) -> None:
+    calendar_store.create_event(settings, title="Exercise", start=_iso_in(settings, hours=1))
+    ctx = _ctx(settings)
+    tools = tool_map(settings)
+    assert execute_tool(
+        tools["mute_reminders"], ctx, {"target": "Exercise", "until": "not-a-date"}
+    ).startswith("Tool failed: until must be")
+    assert execute_tool(
+        tools["mute_reminders"],
+        ctx,
+        {"target": "Exercise", "until": _iso_in(settings, hours=-1)},
+    ) == "Tool failed: until is already in the past."
+
+
 # --- memory tools ------------------------------------------------------------ #
 
 

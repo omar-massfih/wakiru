@@ -223,6 +223,12 @@ def run_reminders(settings: Settings | None = None, agent=None) -> list[dict]:
     # Compute the due list first, with its own (store) connections, so the ledger
     # write transaction below never overlaps a nested connection to the same DB.
     due = due_reminders(settings, current)
+    # Honor active mutes (the agent's "stop nudging me about this" switch) the
+    # same way quiet hours are honored: filtered before the claim, so nudges
+    # resume on the first tick after a mute expires.
+    from ..mutes import filter_muted
+
+    due = filter_muted(settings, due, current, "event")
 
     # Claim first, commit, deliver after: delivery is network I/O (webhook POST,
     # a Telegram send per chat) and must not run inside the ledger's write

@@ -291,12 +291,51 @@ def test_postgres_reminder_ledgers_delegate(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr(task_reminders, "due_task_reminders", lambda _settings, current=None: [{"task_id": "t1", "due": "d", "covered_leads": [60], "message": "task"}])
     monkeypatch.setattr(storage_postgres, "claim_calendar_reminders", lambda _settings, due, fired_at, current: due)
     monkeypatch.setattr(storage_postgres, "claim_task_reminders", lambda _settings, due, fired_at, current: due)
+    monkeypatch.setattr(storage_postgres, "list_mutes", lambda _settings: [])
     monkeypatch.setattr(calendar_reminders, "deliver_reminder", lambda _settings, reminder: None)
     monkeypatch.setattr(task_reminders, "deliver_reminder", lambda _settings, reminder: None)
 
     assert calendar_reminders.run_reminders(settings)[0]["message"] == "event"
     assert task_reminders.run_task_reminders(settings)[0]["message"] == "task"
 
+
+
+def test_postgres_mutes_delegate(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = Settings(storage_backend="postgres", database_url="postgres://example")
+
+    from datetime import timedelta
+
+    from assistant import mutes, storage_postgres
+    from assistant.calendar.context import now
+
+    current = now(settings)
+    until = current + timedelta(hours=1)
+
+    calls: list[tuple] = []
+    monkeypatch.setattr(
+        storage_postgres, "set_mute",
+        lambda _s, scope, target_id, u, reason, c: calls.append(("set", scope, target_id)),
+    )
+    monkeypatch.setattr(
+        storage_postgres, "clear_mute",
+        lambda _s, scope, target_id: calls.append(("clear", scope, target_id)) or True,
+    )
+    monkeypatch.setattr(
+        storage_postgres, "list_mutes",
+        lambda _s: [("event", "e1", until.isoformat(timespec="seconds"))],
+    )
+
+    mutes.set_mute(settings, "event", "e1", until, current=current)
+    assert mutes.clear_mute(settings, "event", "e1") is True
+    assert calls == [("set", "event", "e1"), ("clear", "event", "e1")]
+
+    active = mutes.active_mutes(settings, current)
+    assert set(active) == {("event", "e1")}
+    # Expired rows returned by the backend are filtered out client-side.
+    assert mutes.active_mutes(settings, until + timedelta(minutes=1)) == {}
+    # And the due-list filter consumes the same view.
+    due = [{"event_id": "e1", "message": "m"}, {"event_id": "e2", "message": "m2"}]
+    assert mutes.filter_muted(settings, due, current, "event") == [due[1]]
 
 
 def test_postgres_telegram_pairing_delegates(monkeypatch: pytest.MonkeyPatch) -> None:

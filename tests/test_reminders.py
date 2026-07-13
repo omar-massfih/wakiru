@@ -334,6 +334,41 @@ def test_repeat_silent_after_start(tmp_path, monkeypatch) -> None:
     assert reminders.run_reminders(settings) == []  # 15 min past start -> nothing
 
 
+def test_repeat_skip_occurrence_stops_remaining_nudges(tmp_path, monkeypatch) -> None:
+    # Regression for the "I'm sick today" incident: after "Exercise in 30 min"
+    # fired, skipping today's occurrence (what the agent does when the user
+    # declines) must silence the rest of the countdown — the ledger only
+    # dedupes, it must not keep the schedule alive past the EXDATE.
+    from assistant.calendar import ops
+
+    settings = Settings(
+        memory_dir=str(tmp_path / "memory"),
+        timezone="Europe/Oslo",
+        reminder_lead_minutes=[60],
+        reminder_repeat_minutes=15,
+    )
+    base = context.now(settings).replace(second=0, microsecond=0)
+    occ = base + timedelta(minutes=30)
+    dtstart = (occ - timedelta(days=3)).isoformat(timespec="seconds")
+    event = store.create_event(settings, title="Exercise", start=dtstart, rrule="FREQ=DAILY")
+
+    monkeypatch.setattr(reminders, "now", lambda s: base)
+    fired = reminders.run_reminders(settings)
+    assert [r["message"] for r in fired] == ["Exercise in 30 min"]
+
+    assert ops.apply_op(
+        settings, {"op": "skip", "id": event.id, "occurrence": occ.isoformat()}
+    ) is not None
+    for step in (14, 25, 29):  # the "in 14 min" nudge and every later band
+        monkeypatch.setattr(reminders, "now", lambda s, t=base + timedelta(minutes=30 - step): t)
+        assert reminders.run_reminders(settings) == []
+
+    # Tomorrow's occurrence is untouched and nudges normally.
+    tomorrow = base + timedelta(days=1)
+    monkeypatch.setattr(reminders, "now", lambda s: tomorrow)
+    assert [r["message"] for r in reminders.run_reminders(settings)] == ["Exercise in 30 min"]
+
+
 def test_ledger_prune_compares_instants_not_strings(settings) -> None:
     # A fresh row stamped under another UTC offset sorts lexically before the
     # cutoff string; pruning must compare instants and keep it.

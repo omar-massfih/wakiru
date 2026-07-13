@@ -159,6 +159,10 @@ def run_task_reminders(settings: Settings | None = None, agent=None) -> list[dic
         return []
     fired_at = current.isoformat(timespec="seconds")
     due = due_task_reminders(settings, current)
+    # Same mute hold as calendar reminders: filtered before the claim.
+    from ..mutes import filter_muted
+
+    due = filter_muted(settings, due, current, "task")
 
     if settings.storage_backend == "postgres":
         from .. import storage_postgres

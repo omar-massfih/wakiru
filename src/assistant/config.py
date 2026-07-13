@@ -399,6 +399,11 @@ class Settings(BaseSettings):
         return self.memory_path / "briefing.db"
 
     @property
+    def mutes_db_path(self) -> Path:
+        """SQLite file holding active reminder mutes (see assistant.mutes)."""
+        return self.memory_path / "mutes.db"
+
+    @property
     def mail_token_path(self) -> Path:
         """Cache file for the short-lived OAuth2 access token (never the refresh token)."""
         return self.memory_path / "mail_token.json"

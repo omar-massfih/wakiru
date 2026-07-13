@@ -120,6 +120,11 @@ def run_briefing(
 
         if in_quiet_hours(settings, current):
             return {"sent": False, "reason": "quiet hours"}
+        # An all-scope mute ("no nudges today") holds the briefing the same way.
+        from .mutes import all_muted
+
+        if all_muted(settings, current):
+            return {"sent": False, "reason": "muted"}
 
     with _connect(settings) as conn:
         conn.execute(
