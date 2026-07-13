@@ -435,9 +435,9 @@ def _reset_thread(agent: CompiledStateGraph, thread_id: str) -> None:
     snapshot = agent.get_state(config)
     messages = snapshot.values.get("messages", [])
     removals = [RemoveMessage(id=m.id) for m in messages if m.id is not None]
-    # as_node="codex" matches the node the graph's message-producing edge runs on,
-    # mirroring how maybe_summarize applies its trims.
-    agent.update_state(config, {"messages": removals, "summary": ""}, as_node="codex")
+    # as_node="agent" matches the graph's message-producing node, mirroring how
+    # maybe_summarize applies its trims.
+    agent.update_state(config, {"messages": removals, "summary": ""}, as_node="agent")
 
 
 def _command_reply(agent: CompiledStateGraph, settings: Settings, command: str, thread_id: str) -> str:

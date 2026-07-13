@@ -462,6 +462,36 @@ def test_reset_command_clears_history(tmp_path, calls, monkeypatch) -> None:
     assert "forgotten" in _sends(calls)[0]["text"].lower()
 
 
+def test_reset_thread_clears_a_real_graph_thread(tmp_path, monkeypatch) -> None:
+    # Drives the real compiled graph: _reset_thread's update_state names a graph
+    # node (as_node), and a mocked agent can't catch a stale node name.
+    from langchain_core.language_models.fake_chat_models import FakeListChatModel
+    from langchain_core.messages import HumanMessage
+
+    from assistant.agent import build_agent
+
+    monkeypatch.setattr(
+        "assistant.agent.build_model", lambda s=None: FakeListChatModel(responses=["ok"] * 3)
+    )
+    monkeypatch.setattr("assistant.agent.available_tools", lambda s: [])
+    monkeypatch.setattr(
+        "assistant.memory.embeddings._embed",
+        lambda texts, prefix="", settings=None: [[1.0] + [0.0] * 63 for _ in texts],
+    )
+    settings = _settings(tmp_path, enable_calendar=False)
+    agent = build_agent(settings)
+    thread_id = "telegram:7"
+    config = {"configurable": {"thread_id": thread_id}}
+    agent.invoke({"messages": [HumanMessage(content="remember this")]}, config=config)
+    assert agent.get_state(config).values["messages"]
+
+    telegram._reset_thread(agent, thread_id)
+
+    state = agent.get_state(config).values
+    assert state["messages"] == []
+    assert state.get("summary", "") == ""
+
+
 # --- voice notes ------------------------------------------------------------- #
 
 
