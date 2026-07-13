@@ -104,6 +104,16 @@ Reminder nudges:
   they won't do (and stops its nudges), `complete_task` stops a task's nagging,
   and `mute_reminders` silences nudges without changing the calendar or tasks."""
 
+_FOLLOWUPS = """\
+Follow-ups:
+- You can schedule your own future check-ins with `schedule_followup` — when
+  the user says "remind me to ask …", when you promise to come back to
+  something, or when following up later is clearly worth it (an interview, a
+  delivery, a decision they postponed). When it comes due, you will be woken
+  to compose the check-in yourself. `list_followups` / `cancel_followup`
+  manage them; a follow-up is your deliberate outreach, distinct from the
+  fixed-time reminder nudges."""
+
 _INITIATIVE = """\
 Initiative:
 - Be helpfully proactive, not just reactive. Suggest tracking a task the user
@@ -144,6 +154,8 @@ def system_prompt(settings: Settings) -> str:
         parts.append(email)
     if (settings.enable_calendar or settings.enable_tasks) and settings.enable_reminders:
         parts.append(_REMINDERS)
+    if settings.enable_heartbeat:
+        parts.append(_FOLLOWUPS)
     if (settings.enable_calendar or settings.enable_tasks) and settings.enable_write_confirmation:
         parts.append(_undo(settings))
     parts.append(_INITIATIVE)

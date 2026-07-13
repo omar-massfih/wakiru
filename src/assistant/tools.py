@@ -11,8 +11,9 @@ Two rules the registry enforces structurally rather than by prompt:
 * Every tool is gated by its subsystem's enable flag — a disabled capability is
   simply not offered to the model.
 * ``send_email`` is registered only when ``enable_email_send`` is set (the
-  second, independent switch), and background/proactive composition paths bind
-  no tools at all — mail can never be sent except from a live conversation.
+  second, independent switch) **and** only in ``mode="chat"`` — background
+  paths (the heartbeat) request ``mode="heartbeat"``, which never contains
+  ``send_email``, so mail can never be sent except from a live conversation.
 
 ``execute_tool`` never raises: a failure becomes the tool's result string, so
 the loop always produces a ``ToolMessage`` and the model can self-correct.
@@ -508,11 +509,97 @@ def _email_tools(settings: Settings) -> list[ToolSpec]:
 
 
 # --------------------------------------------------------------------------- #
+# Followups — the assistant schedules its own future check-ins
+# --------------------------------------------------------------------------- #
+
+def _schedule_followup(ctx: ToolContext, when: str, topic: str, context: str = "") -> str:
+    from . import followups
+    from .calendar.context import format_when, now
+    from .calendar.store import parse_dt
+
+    due = parse_dt(str(when))
+    if due is None:
+        return f"Tool failed: when must be {_ISO}."
+    if due <= now(ctx.settings):
+        return "Tool failed: when is already in the past."
+    saved = followups.add(
+        ctx.settings, due, str(topic), str(context), thread_id=ctx.thread_id
+    )
+    return (
+        f"Follow-up scheduled: {saved.topic}"
+        f" @ {format_when(ctx.settings, saved.due)} (id {saved.id})"
+    )
+
+
+def _cancel_followup(ctx: ToolContext, target: str) -> str:
+    from . import followups
+
+    cancelled = followups.cancel(ctx.settings, str(target))
+    if cancelled is None:
+        return _NO_MATCH
+    return f"Cancelled follow-up: {cancelled.topic}"
+
+
+def _list_followups(ctx: ToolContext) -> str:
+    from . import followups
+    from .calendar.context import format_when
+
+    open_items = followups.list_open(ctx.settings)
+    if not open_items:
+        return "No follow-ups scheduled."
+    return "\n".join(
+        f"- {f.topic} @ {format_when(ctx.settings, f.due)} (id {f.id})"
+        for f in open_items
+    )
+
+
+def _followup_tools() -> list[ToolSpec]:
+    return [
+        ToolSpec(
+            "schedule_followup",
+            "Schedule yourself to check in with the user about something "
+            "later. Use for 'remind me to ask …', promises you made, or "
+            "things you decide are worth following up on. When it comes due "
+            "you will be woken to compose the check-in yourself.",
+            _params(
+                {
+                    "when": ("string", _ISO),
+                    "topic": ("string", "What to follow up about (one line)"),
+                    "context": (
+                        "string",
+                        "What future-you needs to know to write a good check-in",
+                    ),
+                },
+                ["when", "topic"],
+            ),
+            _schedule_followup,
+        ),
+        ToolSpec(
+            "cancel_followup",
+            "Cancel a scheduled follow-up by id or an unambiguous topic reference.",
+            _params({"target": ("string", "Follow-up id or topic")}, ["target"]),
+            _cancel_followup,
+        ),
+        ToolSpec(
+            "list_followups",
+            "List your scheduled follow-ups.",
+            _params({}, []),
+            _list_followups,
+        ),
+    ]
+
+
+# --------------------------------------------------------------------------- #
 # Registry + dispatch
 # --------------------------------------------------------------------------- #
 
-def available_tools(settings: Settings) -> list[ToolSpec]:
-    """Every tool the current configuration offers the model."""
+def available_tools(settings: Settings, mode: str = "chat") -> list[ToolSpec]:
+    """Every tool the current configuration offers the model.
+
+    ``mode="heartbeat"`` is the background variant: identical except that
+    ``send_email`` is structurally absent — no prompt, bug, or jailbreak can
+    make a background wake send mail.
+    """
     tools: list[ToolSpec] = []
     if settings.enable_calendar:
         tools += _calendar_tools()
@@ -525,6 +612,10 @@ def available_tools(settings: Settings) -> list[ToolSpec]:
         tools += _docs_tools()
     if settings.enable_email:
         tools += _email_tools(settings)
+    if settings.enable_heartbeat:
+        tools += _followup_tools()
+    if mode == "heartbeat":
+        tools = [spec for spec in tools if spec.name != "send_email"]
     return tools
 
 

@@ -1,0 +1,138 @@
+"""Followup-store tests — add/cancel/list, claim-exactly-once, and the tools."""
+
+from __future__ import annotations
+
+from datetime import timedelta
+
+import pytest
+
+from assistant import followups
+from assistant.calendar.context import now
+from assistant.config import Settings
+
+
+@pytest.fixture
+def settings(tmp_path) -> Settings:
+    return Settings(
+        memory_dir=str(tmp_path / "memory"),
+        timezone="Europe/Oslo",
+        enable_heartbeat=True,
+    )
+
+
+def _due_in(settings: Settings, **delta):
+    return now(settings) + timedelta(**delta)
+
+
+def test_add_and_list_open_sorted_by_due(settings) -> None:
+    followups.add(settings, _due_in(settings, days=2), "later thing")
+    followups.add(settings, _due_in(settings, hours=1), "sooner thing", "some context")
+    items = followups.list_open(settings)
+    assert [f.topic for f in items] == ["sooner thing", "later thing"]
+    assert items[0].context == "some context"
+    assert all(f.status == "open" for f in items)
+
+
+def test_cancel_by_id_and_by_unambiguous_topic(settings) -> None:
+    kept = followups.add(settings, _due_in(settings, hours=1), "ask about interview")
+    by_topic = followups.add(settings, _due_in(settings, hours=2), "check the delivery")
+
+    assert followups.cancel(settings, by_topic.id).id == by_topic.id
+    assert followups.cancel(settings, "interview").id == kept.id
+    assert followups.list_open(settings) == []
+
+
+def test_cancel_ambiguous_topic_refuses(settings) -> None:
+    followups.add(settings, _due_in(settings, hours=1), "check flight to Oslo")
+    followups.add(settings, _due_in(settings, hours=2), "check flight to Bergen")
+    assert followups.cancel(settings, "check flight") is None
+    assert len(followups.list_open(settings)) == 2  # nothing guessed at
+
+
+def test_cancel_unknown_returns_none(settings) -> None:
+    assert followups.cancel(settings, "nope") is None
+    assert followups.cancel(settings, "") is None
+
+
+def test_claim_due_takes_only_due_and_exactly_once(settings) -> None:
+    due = followups.add(settings, _due_in(settings, minutes=-5), "overdue check-in")
+    followups.add(settings, _due_in(settings, days=1), "tomorrow's check-in")
+
+    claimed = followups.claim_due(settings)
+    assert [f.id for f in claimed] == [due.id]
+    assert followups.claim_due(settings) == []  # consumed
+    assert [f.topic for f in followups.list_open(settings)] == ["tomorrow's check-in"]
+
+
+def test_claimed_followup_is_marked_fired_not_deleted(settings) -> None:
+    followups.add(settings, _due_in(settings, minutes=-5), "overdue")
+    followups.claim_due(settings)
+    with followups._connect(settings) as conn:
+        row = conn.execute("SELECT status, fired_at FROM followups").fetchone()
+    assert row["status"] == "fired" and row["fired_at"]
+
+
+def test_cancelled_followup_is_never_claimed(settings) -> None:
+    added = followups.add(settings, _due_in(settings, minutes=-5), "changed my mind")
+    followups.cancel(settings, added.id)
+    assert followups.claim_due(settings) == []
+
+
+# --- the tools ---------------------------------------------------------------- #
+
+
+def _run(settings: Settings, name: str, args: dict) -> str:
+    from assistant.tools import ToolContext, execute_tool, tool_map
+
+    spec = tool_map(settings)[name]
+    return execute_tool(spec, ToolContext(settings=settings, thread_id="telegram:7"), args)
+
+
+def test_schedule_followup_tool_roundtrip(settings) -> None:
+    when = _due_in(settings, hours=3).isoformat(timespec="seconds")
+    result = _run(
+        settings, "schedule_followup",
+        {"when": when, "topic": "ask about the viewing", "context": "Apt on Storgata"},
+    )
+    assert result.startswith("Follow-up scheduled: ask about the viewing")
+
+    items = followups.list_open(settings)
+    assert len(items) == 1 and items[0].thread_id == "telegram:7"
+
+    assert "ask about the viewing" in _run(settings, "list_followups", {})
+    assert _run(settings, "cancel_followup", {"target": "viewing"}).startswith("Cancelled")
+    assert _run(settings, "list_followups", {}) == "No follow-ups scheduled."
+
+
+def test_schedule_followup_rejects_bad_or_past_when(settings) -> None:
+    assert "Tool failed" in _run(
+        settings, "schedule_followup", {"when": "not-a-date", "topic": "x"}
+    )
+    past = _due_in(settings, hours=-1).isoformat(timespec="seconds")
+    assert "already in the past" in _run(
+        settings, "schedule_followup", {"when": past, "topic": "x"}
+    )
+    assert followups.list_open(settings) == []
+
+
+def test_followup_tools_gated_by_heartbeat_flag(tmp_path) -> None:
+    from assistant.tools import available_tools
+
+    off = Settings(memory_dir=str(tmp_path / "m"))  # heartbeat off by default
+    assert "schedule_followup" not in {t.name for t in available_tools(off)}
+
+
+def test_heartbeat_mode_never_offers_send_email(tmp_path) -> None:
+    from assistant.tools import available_tools
+
+    settings = Settings(
+        memory_dir=str(tmp_path / "m"),
+        enable_heartbeat=True,
+        enable_email=True,
+        enable_email_send=True,  # even with sending explicitly on
+    )
+    chat_names = {t.name for t in available_tools(settings)}
+    heartbeat_names = {t.name for t in available_tools(settings, mode="heartbeat")}
+    assert "send_email" in chat_names
+    assert "send_email" not in heartbeat_names
+    assert heartbeat_names == chat_names - {"send_email"}

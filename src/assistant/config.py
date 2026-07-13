@@ -308,6 +308,24 @@ class Settings(BaseSettings):
     # ("what was that reminder about?" works). No extra LLM cost.
     enable_proactive_loop_in: bool = True
 
+    # --- Heartbeat (deliberative proactivity) ---
+    # Periodically let the model itself review the situation (due followups,
+    # briefing, mail changes, contact staleness) and decide whether reaching
+    # out helps — or stay silent. Deterministic calendar/task reminders keep
+    # running regardless: they are the reflex arc, this is the deliberative
+    # layer. Off by default; also unlocks the schedule_followup tools.
+    enable_heartbeat: bool = False
+    # Minutes between heartbeat wakes. The LLM only runs when a cheap
+    # pre-check finds a trigger, so a quiet day costs zero tokens. 0 disables
+    # the ticker (POST /heartbeat/run still works).
+    heartbeat_minutes: int = 30
+    # Minimum minutes between heartbeat-initiated pushes, so a busy morning
+    # doesn't become a barrage. Claimed triggers within the gap are dropped.
+    heartbeat_min_gap_minutes: int = 120
+    # Hours of user silence (across all channels) before "we haven't talked in
+    # a while" becomes a heartbeat trigger. 0 disables the staleness trigger.
+    heartbeat_contact_gap_hours: int = 0
+
     # --- Telegram channel ---
     # Bot token from @BotFather. Set => the server long-polls Telegram and each
     # chat becomes a persistent conversation (thread "telegram:<chat_id>").
@@ -400,6 +418,11 @@ class Settings(BaseSettings):
     def threads_db_path(self) -> Path:
         """SQLite file holding the live-thread registry (see assistant.threads)."""
         return self.memory_path / "threads.db"
+
+    @property
+    def followups_db_path(self) -> Path:
+        """SQLite file holding the assistant's followups (see assistant.followups)."""
+        return self.memory_path / "followups.db"
 
     @property
     def mail_token_path(self) -> Path:

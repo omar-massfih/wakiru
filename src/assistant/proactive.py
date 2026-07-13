@@ -13,8 +13,10 @@ reminder about?" drew a blank. This module closes that loop two ways:
   pass), so the one proactive message that is prose reads like the assistant,
   not a template.
 
-No tools are ever bound on these background paths — a proactive composition
-must not be able to reach ``send_email`` or any other write.
+Background compositions here bind no tools; the heartbeat
+(:mod:`assistant.heartbeat`) binds the restricted ``mode="heartbeat"``
+registry, which can never contain ``send_email`` — either way, no background
+path can send mail.
 """
 
 from __future__ import annotations
