@@ -27,21 +27,19 @@ Telegram bot  /
 - **`tools.py`** — the tool registry the model acts through: calendar
   (create/reschedule/cancel/skip/move), tasks (add/complete/update/remove), memory
   (remember/forget/search), document search, and email (list/read/draft; `send_email` exists
-  only when `ENABLE_EMAIL_SEND` is on). Each tool wraps the same guarded write path the old
-  background extractors used, so ambiguity guards, conflict notes, and the undo ledger all
-  still apply. `ENABLE_TOOL_LOOP=false` restores the previous extractor architecture.
+  only when `ENABLE_EMAIL_SEND` is on). Each tool wraps a guarded write path, so ambiguity
+  guards, conflict notes, and the undo ledger all apply.
 - **`chat.py`** — the channel-agnostic core: one turn of conversation plus its
   post-reply upkeep (memory learning, summary folding, consolidation), shared by
   every channel so they all behave identically. Calendar/task writes happen through
-  the tool loop during the turn; the legacy post-reply extractors run only with
-  `ENABLE_TOOL_LOOP=false`.
+  the tool loop during the turn.
 - **`api.py`** — FastAPI app: `GET /health`, `POST /chat`, `POST /chat/stream` (SSE),
   `GET /memory` and `POST /memory/consolidate` for inspecting and consolidating the brain,
   `GET /calendar`, `GET /tasks` for the to-do list, `POST|GET /documents` (+ `/documents/search`,
   `/documents/{id}/summarize`) for documents, and `POST /reminders/run` for firing
   due reminders (events and tasks). Swagger UI stays at `/docs`.
 - **`tasks/`** — the to-do list: a store, a read path (open tasks injected each turn), a
-  reconciling write path (add/complete/update/remove), a due-task reminder path, and an undo
+  tool-driven write path (add/complete/update/remove), a due-task reminder path, and an undo
   ledger — mirroring the `calendar/` package for work with no fixed time and a done state.
 - **`docs/`** — ingested documents, chunked and embedded into their own `docs.db` vector
   index. The most relevant chunks ride in on the `recall` node each turn (so "what did I

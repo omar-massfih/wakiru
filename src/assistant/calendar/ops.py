@@ -1,87 +1,27 @@
-"""Calendar formation — the write path, modeled on :mod:`assistant.memory.learn`.
+"""Calendar writes — the operation set the agent's calendar tools apply.
 
-After each exchange (in the background, off the reply path) a reconciling
-extractor reads the turn *together with the current time and what's already
-booked* and returns operations —
+Each operation arrives as a parsed dict —
 
 * ``create``     — schedule a new event,
 * ``reschedule`` — change an existing event's time/details (an in-place update),
-* ``cancel``     — remove an event.
+* ``cancel``     — remove an event,
+* ``skip``/``move`` — single-occurrence exceptions on a recurring series.
 
-Because the extractor is given the real current time and the upcoming events (with
-their ids), it resolves natural-language dates ("this Friday at 3pm") to concrete
-ISO-8601 datetimes and targets existing events by id, so it neither double-books
-nor invents times. Like memory upkeep it is best-effort: any failure is logged and
-swallowed so the chat reply is never affected.
+Existing events are targeted by id (with a fuzzy title fallback that refuses
+ambiguity — cancelling nothing beats cancelling the wrong appointment). Every
+applied op is logged to the undo ledger under the turn's batch so "undo"
+reverts the whole batch deterministically.
 """
 
 from __future__ import annotations
 
 import logging
-import uuid
 
-from .. import notify
-from ..config import Settings, get_settings
-from ..llm import complete_text
-from ..ops_parse import parse_ops
+from ..config import Settings
 from . import recurrence, store, sync, undo
-from .context import (
-    format_when,
-    now,
-    overlapping_events,
-    render_events,
-    resolve_tz,
-    writer_view,
-)
+from .context import format_when, overlapping_events, resolve_tz
 
 logger = logging.getLogger(__name__)
-
-
-_SCHEDULE_PROMPT = """\
-You maintain the local calendar of a personal assistant. Read the exchange, the
-current time, and the events already scheduled, then decide what should change.
-
-Only act on a clear scheduling intent — the user asking to book, move, or cancel
-something (or the assistant confirming it). Ignore chit-chat and questions that
-merely ask about the schedule. Resolve relative dates ("tomorrow", "this Friday
-at 3pm") against the CURRENT TIME below and always emit absolute ISO-8601
-datetimes that include the timezone offset. To move or cancel an existing event,
-reference it by its exact id from the list below.
-
-For a repeating event ("every Monday", "daily standup", "weekly 1:1"), set "rrule"
-to an RFC 5545 recurrence rule and use "start" as the first occurrence — e.g. every
-Monday → "FREQ=WEEKLY;BYDAY=MO", every weekday → "FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR",
-daily → "FREQ=DAILY". A series shows its rule in the list below; reschedule and
-cancel act on the WHOLE series by its id.
-
-To change just ONE occurrence of a series (not the whole series), use "skip" to drop
-that single date, or "move" to change only that occurrence — identify it with
-"occurrence" set to that occurrence's scheduled datetime (resolve "this Monday",
-"next week's" against CURRENT TIME).
-
-Return a JSON array of operations, each one of:
-  {{"op": "create", "title": "<short title>", "start": "<ISO-8601 with offset>", "end": "<ISO-8601 or omit>", "location": "<or omit>", "notes": "<or omit>", "rrule": "<RFC 5545 RRULE or omit>"}}
-  {{"op": "reschedule", "id": "<existing event id>", "start": "<new ISO-8601 or omit>", "title": "<or omit>", "location": "<or omit>"}}
-  {{"op": "cancel", "id": "<existing event id>"}}
-  {{"op": "skip", "id": "<series id>", "occurrence": "<ISO-8601 of the occurrence to drop>"}}
-  {{"op": "move", "id": "<series id>", "occurrence": "<ISO-8601 of the original occurrence>", "start": "<new ISO-8601>", "end": "<or omit>", "title": "<or omit>", "location": "<or omit>"}}
-Return [] if nothing should change. Output JSON only — no prose, no code fences.
-
-CURRENT TIME: {now}
-
-Already scheduled:
-{events}
-
-User: {user}
-Assistant: {assistant}
-"""
-
-
-_ALLOWED_OPS = frozenset({"create", "reschedule", "cancel", "skip", "move"})
-
-
-def _parse_ops(text: str) -> list[dict]:
-    return parse_ops(text, _ALLOWED_OPS)
 
 
 # Ops whose schema defines "title" as the NEW value, not an identifier. Looking
@@ -254,53 +194,3 @@ def _apply_occurrence_op(
     )
     _log_write(settings, thread_id, batch_id, target, "move", summary, master)
     return summary
-
-
-def update_calendar(
-    settings: Settings | None, user_msg: str, assistant_msg: str, thread_id: str = ""
-) -> list[str]:
-    """Extract and apply calendar operations for one turn (create/reschedule/cancel).
-
-    Intended to run in the background — it makes a second Codex call. Returns a
-    short log of what changed. No-ops when ``enable_auto_schedule`` is false.
-    When ``thread_id`` is given and ``enable_write_confirmation`` is on, every
-    applied op is logged to the undo ledger under one batch and an out-of-band
-    confirmation (with an undo hint) is pushed back to that thread.
-    """
-    settings = settings or get_settings()
-    if not settings.enable_auto_schedule:
-        return []
-
-    prompt = _SCHEDULE_PROMPT.format(
-        now=now(settings).isoformat(timespec="minutes"),
-        events=render_events(settings, writer_view(settings), with_ids=True),
-        user=user_msg,
-        assistant=assistant_msg,
-    )
-    try:
-        raw = complete_text(prompt, settings)
-    except Exception:
-        logger.exception("calendar extraction (LLM) failed; skipping this turn")
-        return []  # calendar upkeep is best-effort; never break the main flow
-
-    batch_id = uuid.uuid4().hex if thread_id else ""
-    applied: list[str] = []
-    for op in _parse_ops(raw):
-        try:
-            result = apply_op(settings, op, thread_id, batch_id)
-            if result:
-                applied.append(result)
-        except Exception:
-            logger.exception("failed to apply calendar op: %s", op)
-
-    if applied:
-        logger.info("calendar updated: %s", "; ".join(applied))
-        if thread_id and settings.enable_write_confirmation:
-            try:
-                message = "\n".join(applied) + (
-                    f'\nReply "undo" within {settings.write_undo_window_minutes} min to revert.'
-                )
-                notify.deliver_write_confirmation(settings, thread_id, message)
-            except Exception:
-                logger.exception("failed to push write confirmation for thread %s", thread_id)
-    return applied

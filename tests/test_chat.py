@@ -7,6 +7,7 @@ calendar store, matching the style of test_calendar.py / test_undo.py.
 
 from __future__ import annotations
 
+import uuid
 from datetime import timedelta
 
 import pytest
@@ -24,7 +25,6 @@ def settings(tmp_path) -> Settings:
     return Settings(
         memory_dir=str(tmp_path / "memory"),
         timezone="Europe/Oslo",
-        enable_auto_schedule=True,
         enable_write_confirmation=True,
         write_undo_window_minutes=15,
     )
@@ -53,25 +53,28 @@ class _CannedAgent:
         return {"messages": [type("Msg", (), {"content": self.reply})()]}
 
 
-def _seed_booking(settings: Settings, monkeypatch) -> None:
+def _seed_booking(settings: Settings) -> None:
     start = _iso_in(settings, days=2)
-    canned = f'[{{"op": "create", "title": "Dentist", "start": "{start}"}}]'
-    monkeypatch.setattr("assistant.calendar.ops.complete_text", lambda *a, **k: canned)
-    ops.update_calendar(settings, "book the dentist friday", "Done!", THREAD)
+    ops.apply_op(
+        settings,
+        {"op": "create", "title": "Dentist", "start": start},
+        THREAD,
+        uuid.uuid4().hex,
+    )
 
 
 # --- run_chat --------------------------------------------------------------- #
 
 
-def test_run_chat_undo_short_circuits_without_invoking_agent(settings, monkeypatch) -> None:
-    _seed_booking(settings, monkeypatch)
+def test_run_chat_undo_short_circuits_without_invoking_agent(settings) -> None:
+    _seed_booking(settings)
     reply = chat.run_chat(_FailingAgent(), "undo", THREAD, settings=settings)
     assert reply.startswith("Undone:")
     assert store.list_events(settings) == []
 
 
-def test_run_chat_undo_variant_with_trailing_text(settings, monkeypatch) -> None:
-    _seed_booking(settings, monkeypatch)
+def test_run_chat_undo_variant_with_trailing_text(settings) -> None:
+    _seed_booking(settings)
     reply = chat.run_chat(_FailingAgent(), "undo that", THREAD, settings=settings)
     assert reply.startswith("Undone:")
 
@@ -135,8 +138,8 @@ def test_run_chat_stream_skips_empty_chunks(settings) -> None:
     assert chunks == ["hi"]
 
 
-def test_run_chat_stream_undo_short_circuits(settings, monkeypatch) -> None:
-    _seed_booking(settings, monkeypatch)
+def test_run_chat_stream_undo_short_circuits(settings) -> None:
+    _seed_booking(settings)
     agent = _StreamingAgent(["must not stream"])
     chunks = _collect(chat.run_chat_stream(agent, "undo", THREAD, settings=settings))
     assert len(chunks) == 1 and chunks[0].startswith("Undone:")
@@ -148,7 +151,7 @@ def test_run_chat_stream_undo_short_circuits(settings, monkeypatch) -> None:
 
 
 def test_run_upkeep_skips_all_upkeep_for_undo_turn(settings, monkeypatch) -> None:
-    for name in ("update_memory", "maybe_summarize", "update_calendar"):
+    for name in ("update_memory", "maybe_summarize"):
         monkeypatch.setattr(
             chat,
             name,
@@ -157,31 +160,10 @@ def test_run_upkeep_skips_all_upkeep_for_undo_turn(settings, monkeypatch) -> Non
     chat.run_upkeep(_FailingAgent(), settings, "undo", "Undone: removed Dentist.", THREAD)
 
 
-def test_run_upkeep_runs_calendar_for_normal_turn_legacy_mode(settings, monkeypatch) -> None:
-    legacy = settings.model_copy(update={"enable_tool_loop": False})
+def test_run_upkeep_runs_memory_and_summary_for_normal_turn(settings, monkeypatch) -> None:
     called = {}
     monkeypatch.setattr(chat, "update_memory", lambda *a, **k: called.setdefault("memory", True))
     monkeypatch.setattr(chat, "maybe_summarize", lambda *a, **k: called.setdefault("summary", True))
-    monkeypatch.setattr(
-        chat, "update_calendar", lambda *a, **k: called.setdefault("calendar", True)
-    )
-    chat.run_upkeep(_FailingAgent(), legacy, "book a dentist", "Done!", THREAD)
-    assert called == {"memory": True, "summary": True, "calendar": True}
-
-
-def test_run_upkeep_skips_extractors_under_tool_loop(settings, monkeypatch) -> None:
-    """With the tool loop on, the model already applied its writes — the legacy
-    calendar/task extractors must not run again and double-apply them."""
-    called = {}
-    monkeypatch.setattr(chat, "update_memory", lambda *a, **k: called.setdefault("memory", True))
-    monkeypatch.setattr(chat, "maybe_summarize", lambda *a, **k: called.setdefault("summary", True))
-    for name in ("update_calendar", "update_tasks"):
-        monkeypatch.setattr(
-            chat,
-            name,
-            lambda *a, _name=name, **k: pytest.fail(f"{_name} must not run under the tool loop"),
-        )
-    assert settings.enable_tool_loop  # the default
     chat.run_upkeep(_FailingAgent(), settings, "book a dentist", "Done!", THREAD)
     assert called == {"memory": True, "summary": True}
 

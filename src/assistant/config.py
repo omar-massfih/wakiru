@@ -60,11 +60,6 @@ class Settings(BaseSettings):
     codex_web_search: bool = False
 
     # --- Tool loop ---
-    # Master switch: bind the tool registry (calendar, tasks, memory, docs,
-    # email) to the reply model so it acts through structured tool calls in a
-    # bounded agent<->tools loop. False restores the previous architecture:
-    # no tools, and the background calendar/task extractors take over again.
-    enable_tool_loop: bool = True
     # Max tool rounds per turn; past it, pending calls get a budget-exhausted
     # result and the model must answer with what it has.
     tool_max_rounds: int = 6
@@ -189,9 +184,6 @@ class Settings(BaseSettings):
     timezone: str | None = None
     # Master switch: inject current time + upcoming events into each turn.
     enable_calendar: bool = True
-    # Master switch for the write path: an LLM extraction after each turn that
-    # creates/reschedules/cancels events (parallel to enable_auto_memory).
-    enable_auto_schedule: bool = True
     # How far ahead (days) upcoming events are surfaced to the model.
     calendar_upcoming_days: int = 14
     # Cap on how many upcoming events are injected per turn.
@@ -263,9 +255,6 @@ class Settings(BaseSettings):
     # Master switch: inject open tasks into each turn (the read path) so the model
     # knows what's outstanding.
     enable_tasks: bool = True
-    # Master switch for the write path: an LLM extraction after each turn that
-    # adds/completes/updates/removes tasks (parallel to enable_auto_schedule).
-    enable_auto_tasks: bool = True
     # Cap on how many open tasks are injected per turn.
     tasks_max_open: int = 20
 

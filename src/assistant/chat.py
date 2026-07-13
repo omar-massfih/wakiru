@@ -2,9 +2,9 @@
 
 Every channel (the HTTP API, Telegram) speaks to the agent the same way: invoke
 the graph for a reply, then run the post-reply upkeep — long-term memory,
-working-memory folding, calendar extraction, periodic consolidation — *after*
-the reply has been delivered. Centralizing it here keeps channel behavior
-identical and the channels themselves thin.
+working-memory folding, periodic consolidation — *after* the reply has been
+delivered. Centralizing it here keeps channel behavior identical and the
+channels themselves thin.
 """
 
 from __future__ import annotations
@@ -16,10 +16,8 @@ from langchain_core.messages import AIMessageChunk, HumanMessage
 from langgraph.graph.state import CompiledStateGraph
 
 from .agent import maybe_summarize
-from .calendar import update_calendar
 from .config import Settings, get_settings
 from .memory import consolidate_memory, index, update_memory
-from .tasks import update_tasks
 from .undo import undo_latest
 
 logger = logging.getLogger(__name__)
@@ -118,9 +116,8 @@ def run_upkeep(
     never starves the others.
     """
     if _is_undo_command(settings, message):
-        # Handled synchronously in run_chat; nothing here to learn or extract —
-        # and re-running the calendar extractor on "undo" text risks it
-        # hallucinating its own op from the reply that already reported the undo.
+        # Handled synchronously in run_chat; nothing here to learn — the reply
+        # already reported the undo and there is no new fact worth remembering.
         return
 
     # Long-term memory: an episodic trace + a reconciling save/update/forget pass.
@@ -134,24 +131,6 @@ def run_upkeep(
         maybe_summarize(agent, settings, thread_id)
     except Exception:
         logger.exception("summarization upkeep failed for thread %s", thread_id)
-
-    # Calendar/tasks extraction is the legacy write path: under the tool loop
-    # the model already applied its writes via tool calls, and re-extracting
-    # from the transcript would double-apply them.
-    if not settings.enable_tool_loop:
-        # Calendar: a reconciling extraction that creates/reschedules/cancels events.
-        if settings.enable_calendar and settings.enable_auto_schedule:
-            try:
-                update_calendar(settings, message, reply, thread_id)
-            except Exception:
-                logger.exception("calendar upkeep failed for thread %s", thread_id)
-
-        # Tasks: a reconciling extraction that adds/completes/updates/removes to-dos.
-        if settings.enable_tasks and settings.enable_auto_tasks:
-            try:
-                update_tasks(settings, message, reply, thread_id)
-            except Exception:
-                logger.exception("task upkeep failed for thread %s", thread_id)
 
     # Periodic consolidation ("sleep"); the counter persists across restarts.
     try:

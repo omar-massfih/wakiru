@@ -58,11 +58,6 @@ _PROMPT_MEMORY_TOOLS = """\
   beyond what was auto-recalled this turn. Never say you are unable to
   remember, store, update, or delete information."""
 
-_PROMPT_MEMORY_LEGACY = """\
-- When the user asks you to remember or forget something, just acknowledge it
-  naturally — the system records it out of band after the turn. Never say you
-  are unable to remember, store, update, or delete information."""
-
 _PROMPT_TOOLS = """\
 Acting with tools:
 - You have tools, and you act through them. When the user asks for an action —
@@ -89,27 +84,12 @@ Calendar:
   Emit absolute ISO-8601 datetimes with the timezone offset, resolved against
   the current time; target existing events by their exact id."""
 
-_PROMPT_CALENDAR_LEGACY = """\
-Calendar:
-- You have a personal calendar, maintained for you automatically. The events
-  coming up are listed under "Upcoming events". Rely on that list; do not
-  invent events you were not shown.
-- When the user asks you to schedule, move, or cancel something, just
-  acknowledge it naturally — the system records the change out of band after
-  the turn. Never say you are unable to manage the calendar."""
-
 _PROMPT_TASKS_TOOLS = """\
 Tasks:
 - You keep the user's to-do list. Open tasks are listed each turn under "Open
   tasks" with their ids. Manage it with the task tools (`add_task`,
   `complete_task`, `update_task`, `remove_task`); a to-do has no fixed meeting
   time — anything at a specific time belongs on the calendar instead."""
-
-_PROMPT_TASKS_LEGACY = """\
-Tasks:
-- You keep the user's to-do list; open tasks are listed each turn under "Open
-  tasks". Changes the user asks for are recorded out of band after the turn —
-  just acknowledge them naturally."""
 
 _PROMPT_DOCS = """\
 Documents:
@@ -138,23 +118,16 @@ Initiative:
 
 def base_system_prompt(settings: Settings) -> str:
     """The persona/operating prompt for the current configuration."""
-    tools = settings.enable_tool_loop
-    parts = [_PROMPT_IDENTITY]
-    if tools:
-        parts.append(_PROMPT_TOOLS)
-    parts.append(
-        _PROMPT_MEMORY_COMMON
-        + "\n"
-        + (_PROMPT_MEMORY_TOOLS if tools else _PROMPT_MEMORY_LEGACY)
-    )
+    parts = [_PROMPT_IDENTITY, _PROMPT_TOOLS]
+    parts.append(_PROMPT_MEMORY_COMMON + "\n" + _PROMPT_MEMORY_TOOLS)
     parts.append(_PROMPT_CLOCK)
     if settings.enable_calendar:
-        parts.append(_PROMPT_CALENDAR_TOOLS if tools else _PROMPT_CALENDAR_LEGACY)
+        parts.append(_PROMPT_CALENDAR_TOOLS)
     if settings.enable_tasks:
-        parts.append(_PROMPT_TASKS_TOOLS if tools else _PROMPT_TASKS_LEGACY)
-    if tools and settings.enable_docs:
+        parts.append(_PROMPT_TASKS_TOOLS)
+    if settings.enable_docs:
         parts.append(_PROMPT_DOCS)
-    if tools and settings.enable_email:
+    if settings.enable_email:
         email = _PROMPT_EMAIL
         if settings.enable_email_send:
             email += "\n" + _PROMPT_EMAIL_SEND

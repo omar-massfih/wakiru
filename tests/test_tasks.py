@@ -1,12 +1,13 @@
-"""Task subsystem tests — store CRUD, the reconciling write path, and undo.
+"""Task subsystem tests — store CRUD, the tool write path, and undo.
 
-Everything runs for real (plain SQLite + stdlib datetime); only the Codex call in
-the write path (via ops.update_tasks) and the outbound confirmation are faked,
-matching test_calendar.py / test_undo.py.
+Everything runs for real (plain SQLite + stdlib datetime); writes are exercised
+by applying parsed operations directly through ``ops.apply_op`` — exactly what
+the task tools do — matching test_calendar.py / test_undo.py.
 """
 
 from __future__ import annotations
 
+import uuid
 from datetime import timedelta
 
 import pytest
@@ -26,16 +27,8 @@ def settings(tmp_path) -> Settings:
         memory_dir=str(tmp_path / "memory"),
         timezone="Europe/Oslo",
         enable_tasks=True,
-        enable_auto_tasks=True,
         enable_write_confirmation=True,
         write_undo_window_minutes=15,
-    )
-
-
-@pytest.fixture(autouse=True)
-def _no_push(monkeypatch) -> None:
-    monkeypatch.setattr(
-        "assistant.notify.deliver_write_confirmation", lambda *a, **k: True
     )
 
 
@@ -43,9 +36,15 @@ def _iso_in(settings: Settings, **delta) -> str:
     return (context.now(settings) + timedelta(**delta)).isoformat(timespec="minutes")
 
 
-def _apply(settings: Settings, raw: str, monkeypatch, user="do it", reply="ok") -> list[str]:
-    monkeypatch.setattr("assistant.tasks.ops.complete_text", lambda *a, **k: raw)
-    return ops.update_tasks(settings, user, reply, THREAD)
+def _apply(settings: Settings, ops_list: list[dict]) -> list[str]:
+    """Apply parsed operations as the task tools do — one undo batch per call."""
+    batch_id = uuid.uuid4().hex
+    applied = []
+    for op in ops_list:
+        result = ops.apply_op(settings, op, THREAD, batch_id)
+        if result:
+            applied.append(result)
+    return applied
 
 
 # --- store CRUD ------------------------------------------------------------- #
@@ -99,38 +98,38 @@ def test_due_naive_gets_timezone(settings) -> None:
     assert "+" in t.due or t.due.endswith("Z")
 
 
-# --- write path (ops.update_tasks) ------------------------------------------ #
+# --- write path (ops.apply_op) ----------------------------------------------- #
 
 
-def test_add_op_creates_task(settings, monkeypatch) -> None:
-    applied = _apply(settings, '[{"op": "add", "title": "buy milk"}]', monkeypatch)
+def test_add_op_creates_task(settings) -> None:
+    applied = _apply(settings, [{"op": "add", "title": "buy milk"}])
     assert applied == ["added task: buy milk"]
     assert [t.title for t in store.list_tasks(settings)] == ["buy milk"]
 
 
-def test_complete_op_by_id(settings, monkeypatch) -> None:
+def test_complete_op_by_id(settings) -> None:
     t = store.create_task(settings, "buy milk")
-    applied = _apply(settings, f'[{{"op": "complete", "id": "{t.id}"}}]', monkeypatch)
+    applied = _apply(settings, [{"op": "complete", "id": t.id}])
     assert applied == ["completed: buy milk"]
     assert store.list_tasks(settings) == []
 
 
-def test_remove_op_by_fuzzy_title(settings, monkeypatch) -> None:
+def test_remove_op_by_fuzzy_title(settings) -> None:
     store.create_task(settings, "buy milk")
-    applied = _apply(settings, '[{"op": "remove", "title": "milk"}]', monkeypatch)
+    applied = _apply(settings, [{"op": "remove", "title": "milk"}])
     assert applied == ["removed task: buy milk"]
     assert store.list_tasks(settings) == []
 
 
-def test_ambiguous_target_is_skipped(settings, monkeypatch) -> None:
+def test_ambiguous_target_is_skipped(settings) -> None:
     store.create_task(settings, "buy milk")
     store.create_task(settings, "buy bread")
-    applied = _apply(settings, '[{"op": "remove", "title": "buy"}]', monkeypatch)
+    applied = _apply(settings, [{"op": "remove", "title": "buy"}])
     assert applied == []  # ambiguous — reverting nothing beats removing the wrong one
     assert len(store.list_tasks(settings)) == 2
 
 
-def test_update_op_never_targets_by_its_new_title(settings, monkeypatch) -> None:
+def test_update_op_never_targets_by_its_new_title(settings) -> None:
     # For an "update" the schema's `title` is the REPLACEMENT value. Using it to
     # look the target up resolves to whichever task already bears that title —
     # a row the user never named.
@@ -138,9 +137,7 @@ def test_update_op_never_targets_by_its_new_title(settings, monkeypatch) -> None
     bystander = store.create_task(settings, "buy milk and eggs")
 
     applied = _apply(
-        settings,
-        '[{"op": "update", "title": "buy milk and eggs", "notes": "corner shop"}]',
-        monkeypatch,
+        settings, [{"op": "update", "title": "buy milk and eggs", "notes": "corner shop"}]
     )
 
     assert applied == []  # no id and no query, so there is nothing to target
@@ -148,20 +145,10 @@ def test_update_op_never_targets_by_its_new_title(settings, monkeypatch) -> None
     assert store.get_task(settings, renamed.id).title == "buy milk"
 
 
-def test_update_op_by_id_still_renames(settings, monkeypatch) -> None:
+def test_update_op_by_id_still_renames(settings) -> None:
     task = store.create_task(settings, "buy milk")
-    applied = _apply(
-        settings,
-        f'[{{"op": "update", "id": "{task.id}", "title": "buy milk and eggs"}}]',
-        monkeypatch,
-    )
+    applied = _apply(settings, [{"op": "update", "id": task.id, "title": "buy milk and eggs"}])
     assert applied == ["updated task: buy milk and eggs"]
-
-
-def test_auto_tasks_disabled_is_noop(tmp_path, monkeypatch) -> None:
-    settings = Settings(memory_dir=str(tmp_path / "m"), enable_auto_tasks=False)
-    applied = _apply(settings, '[{"op": "add", "title": "x"}]', monkeypatch)
-    assert applied == []
 
 
 def test_context_flags_overdue(settings) -> None:
@@ -172,25 +159,25 @@ def test_context_flags_overdue(settings) -> None:
 # --- undo (via the cross-ledger arbiter) ------------------------------------ #
 
 
-def test_undo_reverts_add(settings, monkeypatch) -> None:
-    _apply(settings, '[{"op": "add", "title": "buy milk"}]', monkeypatch)
+def test_undo_reverts_add(settings) -> None:
+    _apply(settings, [{"op": "add", "title": "buy milk"}])
     result = undo_latest(settings, THREAD, 15)
     assert result == "Undone: removed: buy milk"
     assert store.list_tasks(settings) == []
 
 
-def test_undo_restores_completed_task(settings, monkeypatch) -> None:
+def test_undo_restores_completed_task(settings) -> None:
     t = store.create_task(settings, "buy milk")
-    _apply(settings, f'[{{"op": "complete", "id": "{t.id}"}}]', monkeypatch)
+    _apply(settings, [{"op": "complete", "id": t.id}])
     assert store.list_tasks(settings) == []  # completed
     result = undo_latest(settings, THREAD, 15)
     assert result.startswith("Undone: restored:")
     assert [x.title for x in store.list_tasks(settings)] == ["buy milk"]  # open again
 
 
-def test_undo_restores_removed_task(settings, monkeypatch) -> None:
+def test_undo_restores_removed_task(settings) -> None:
     store.create_task(settings, "buy milk")
-    _apply(settings, '[{"op": "remove", "title": "buy milk"}]', monkeypatch)
+    _apply(settings, [{"op": "remove", "title": "buy milk"}])
     undo_latest(settings, THREAD, 15)
     assert [x.title for x in store.list_tasks(settings)] == ["buy milk"]
 
@@ -278,7 +265,7 @@ def test_repeat_overdue_stops_once_done(settings, monkeypatch) -> None:
     assert reminders.run_task_reminders(settings) == []  # done → no longer listed
 
 
-def test_undo_arbiter_reverts_most_recent_across_ledgers(settings, monkeypatch) -> None:
+def test_undo_arbiter_reverts_most_recent_across_ledgers(settings) -> None:
     import time
 
     from assistant.calendar import ops as cal_ops
@@ -286,13 +273,14 @@ def test_undo_arbiter_reverts_most_recent_across_ledgers(settings, monkeypatch) 
 
     # An event write, then (a moment later) a task write on the same thread.
     start = _iso_in(settings, days=2)
-    monkeypatch.setattr(
-        "assistant.calendar.ops.complete_text",
-        lambda *a, **k: f'[{{"op": "create", "title": "Dentist", "start": "{start}"}}]',
+    cal_ops.apply_op(
+        settings,
+        {"op": "create", "title": "Dentist", "start": start},
+        THREAD,
+        uuid.uuid4().hex,
     )
-    cal_ops.update_calendar(settings, "book dentist", "Done", THREAD)
     time.sleep(1.1)  # seconds-precision stamps must differ so the arbiter can order them
-    _apply(settings, '[{"op": "add", "title": "buy milk"}]', monkeypatch)
+    _apply(settings, [{"op": "add", "title": "buy milk"}])
 
     # The task was written most recently, so "undo" reverts it and leaves the event.
     assert undo_latest(settings, THREAD, 15) == "Undone: removed: buy milk"

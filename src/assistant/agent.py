@@ -20,15 +20,10 @@ Graph shape::
 * **agent** — feed ``[recall] + [profile] + [agenda] + [tasks] + history`` to
   the model with the tool registry bound (:mod:`assistant.tools`).
 * **tools** — execute the model's tool calls (calendar, tasks, memory, docs,
-  email) through the same guarded write paths the old background extractors
-  used, so the undo ledger and ambiguity guards keep working. The loop is
-  bounded by ``tool_max_rounds``; past it, pending calls are answered with a
-  budget-exhausted result and the next model pass runs tool-less, so history
-  never ends on a dangling tool call.
-
-``ENABLE_TOOL_LOOP=false`` restores the previous behavior: no tools are bound,
-the graph is effectively the old linear shape, and the background calendar/task
-extractors in :mod:`assistant.chat` take over again.
+  email) through guarded write paths, so the undo ledger and ambiguity guards
+  keep working. The loop is bounded by ``tool_max_rounds``; past it, pending
+  calls are answered with a budget-exhausted result and the next model pass
+  runs tool-less, so history never ends on a dangling tool call.
 
 Working memory is bounded *off* the reply path: after the reply is sent, the API
 layer runs :func:`maybe_summarize` in the background, which folds older turns
@@ -297,7 +292,7 @@ def build_agent(settings: Settings | None = None) -> CompiledStateGraph:
             logger.exception("startup docs reindex failed; continuing with existing index")
 
     model = build_model(settings)
-    specs = available_tools(settings) if settings.enable_tool_loop else []
+    specs = available_tools(settings)
     by_name = {spec.name: spec for spec in specs}
     bound_model = (
         model.bind_tools([spec.to_openai_tool() for spec in specs]) if specs else model

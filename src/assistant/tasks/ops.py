@@ -1,72 +1,25 @@
-"""Task formation — the write path, modeled on :mod:`assistant.calendar.ops`.
+"""Task writes — the operation set the agent's task tools apply.
 
-After each exchange (in the background, off the reply path) a reconciling
-extractor reads the turn together with the current time and the open to-do list,
-and returns operations —
+Each operation arrives as a parsed dict —
 
 * ``add``      — create a new task,
 * ``complete`` — mark an existing task done,
 * ``update``   — change an existing task's title/due/notes,
 * ``remove``   — delete a task.
 
-Existing tasks are targeted by id (with a fuzzy title fallback, ambiguity-guarded
-exactly as the calendar extractor does). Best-effort: any failure is logged and
-swallowed so the chat reply is never affected.
+Existing tasks are targeted by id (with a fuzzy title fallback that refuses
+ambiguity, exactly as :mod:`assistant.calendar.ops` does). Every applied op is
+logged to the undo ledger under the turn's batch.
 """
 
 from __future__ import annotations
 
 import logging
-import uuid
 
-from .. import notify
-from ..calendar.context import now
-from ..config import Settings, get_settings
-from ..llm import complete_text
-from ..ops_parse import parse_ops
+from ..config import Settings
 from . import store, undo
-from .context import render_tasks
 
 logger = logging.getLogger(__name__)
-
-
-_TASKS_PROMPT = """\
-You maintain the to-do list of a personal assistant. Read the exchange, the
-current time, and the open tasks, then decide what should change.
-
-Only act on a clear task intent — the user asking to remember/track something to
-do, marking something done, or changing/removing a task (or the assistant
-confirming it). A task has no fixed meeting time; if the user is scheduling an
-event at a specific time, that belongs to the calendar, not here. Ignore
-chit-chat and questions that merely ask what's on the list.
-
-A task may have an optional due date. Resolve relative dates ("by Friday",
-"tomorrow") against the CURRENT TIME below and emit an absolute ISO-8601 datetime
-with offset. To complete, update, or remove an existing task, reference it by its
-exact id from the list below.
-
-Return a JSON array of operations, each one of:
-  {{"op": "add", "title": "<short title>", "due": "<ISO-8601 with offset, or omit>", "notes": "<or omit>"}}
-  {{"op": "complete", "id": "<existing task id>"}}
-  {{"op": "update", "id": "<existing task id>", "title": "<or omit>", "due": "<ISO-8601, or omit>", "notes": "<or omit>"}}
-  {{"op": "remove", "id": "<existing task id>"}}
-Return [] if nothing should change. Output JSON only — no prose, no code fences.
-
-CURRENT TIME: {now}
-
-Open tasks:
-{tasks}
-
-User: {user}
-Assistant: {assistant}
-"""
-
-
-_ALLOWED_OPS = frozenset({"add", "complete", "update", "remove"})
-
-
-def _parse_ops(text: str) -> list[dict]:
-    return parse_ops(text, _ALLOWED_OPS)
 
 
 # Ops whose schema defines "title" as the NEW value, not an identifier. Looking
@@ -165,53 +118,3 @@ def apply_op(
         return summary
 
     return None
-
-
-def update_tasks(
-    settings: Settings | None, user_msg: str, assistant_msg: str, thread_id: str = ""
-) -> list[str]:
-    """Extract and apply task operations for one turn (add/complete/update/remove).
-
-    Intended to run in the background — it makes a second Codex call. Returns a
-    short log of what changed. No-ops when ``enable_auto_tasks`` is false. When
-    ``thread_id`` is given and ``enable_write_confirmation`` is on, every applied
-    op is logged to the undo ledger under one batch and an out-of-band
-    confirmation (with an undo hint) is pushed back to that thread.
-    """
-    settings = settings or get_settings()
-    if not settings.enable_auto_tasks:
-        return []
-
-    prompt = _TASKS_PROMPT.format(
-        now=now(settings).isoformat(timespec="minutes"),
-        tasks=render_tasks(settings, store.list_tasks(settings), with_ids=True),
-        user=user_msg,
-        assistant=assistant_msg,
-    )
-    try:
-        raw = complete_text(prompt, settings)
-    except Exception:
-        logger.exception("task extraction (LLM) failed; skipping this turn")
-        return []
-
-    batch_id = uuid.uuid4().hex if thread_id else ""
-    applied: list[str] = []
-    for op in _parse_ops(raw):
-        try:
-            result = apply_op(settings, op, thread_id, batch_id)
-            if result:
-                applied.append(result)
-        except Exception:
-            logger.exception("failed to apply task op: %s", op)
-
-    if applied:
-        logger.info("tasks updated: %s", "; ".join(applied))
-        if thread_id and settings.enable_write_confirmation:
-            try:
-                message = "\n".join(applied) + (
-                    f'\nReply "undo" within {settings.write_undo_window_minutes} min to revert.'
-                )
-                notify.deliver_write_confirmation(settings, thread_id, message)
-            except Exception:
-                logger.exception("failed to push task confirmation for thread %s", thread_id)
-    return applied

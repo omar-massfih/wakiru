@@ -335,9 +335,10 @@ def test_maybe_summarize_trims_thread_in_background(tmp_path, monkeypatch) -> No
         "assistant.memory.embeddings._embed",
         lambda texts, prefix="", settings=None: [[1.0] + [0.0] * 63 for _ in texts],
     )
-    # Legacy graph: FakeListChatModel has no bind_tools, and this test is about
-    # summarization, not the tool loop.
-    settings = _wm_settings(tmp_path, enable_tool_loop=False)
+    # Tool-less graph: FakeListChatModel has no bind_tools, and this test is
+    # about summarization, not the tool loop.
+    monkeypatch.setattr("assistant.agent.available_tools", lambda s: [])
+    settings = _wm_settings(tmp_path)
     graph = build_agent(settings)
     config = {"configurable": {"thread_id": "t1"}}
     for i in range(3):
@@ -498,15 +499,14 @@ def test_tool_loop_cap_forces_plain_reply(tmp_path, monkeypatch) -> None:
     )
 
 
-def test_tool_loop_disabled_binds_nothing(tmp_path, monkeypatch) -> None:
+def test_empty_tool_registry_binds_nothing(tmp_path, monkeypatch) -> None:
     from assistant.chat import run_chat
 
     model = _ScriptedToolModel()
-    agent, settings = _build_tool_agent(
-        tmp_path, monkeypatch, model, enable_tool_loop=False
-    )
+    monkeypatch.setattr("assistant.agent.available_tools", lambda s: [])
+    agent, settings = _build_tool_agent(tmp_path, monkeypatch, model)
     reply = run_chat(agent, "hello", "t1", settings=settings)
-    assert model.bound_schemas == []  # legacy graph: the model is never bound
+    assert model.bound_schemas == []  # nothing registered: the model is never bound
     assert model.invocations == [False]
     assert reply == "Done — added to your list."
 

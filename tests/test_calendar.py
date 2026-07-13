@@ -1,7 +1,9 @@
-"""Calendar tests — store CRUD, context rendering, and the LLM write path.
+"""Calendar tests — store CRUD, context rendering, and the tool write path.
 
-The store and context run for real (plain SQLite + stdlib datetime); only the
-Codex call in the write path is faked, so these stay fast and offline.
+The store, context, and ops all run for real (plain SQLite + stdlib datetime);
+writes are exercised by applying parsed operations directly through
+``ops.apply_op`` — exactly what the calendar tools do — so these stay fast and
+offline.
 """
 
 from __future__ import annotations
@@ -13,6 +15,7 @@ import pytest
 
 from assistant.calendar import context, ops, recurrence, store
 from assistant.config import Settings
+from assistant.ops_parse import parse_ops
 
 
 @pytest.fixture
@@ -20,7 +23,6 @@ def settings(tmp_path) -> Settings:
     return Settings(
         memory_dir=str(tmp_path / "memory"),
         timezone="Europe/Oslo",
-        enable_auto_schedule=True,
     )
 
 
@@ -144,65 +146,44 @@ def test_parse_ops_filters_and_strips_fences() -> None:
         ' {"op": "cancel", "id": "abc"}]\n'
         "```"
     )
-    parsed = ops._parse_ops(raw)
+    allowed = frozenset({"create", "reschedule", "cancel", "skip", "move"})
+    parsed = parse_ops(raw, allowed)
     assert [op["op"] for op in parsed] == ["create", "cancel"]
-    assert ops._parse_ops("not json at all") == []
+    assert parse_ops("not json at all", allowed) == []
 
 
-def test_update_calendar_create_reschedule_cancel(settings, monkeypatch) -> None:
+def test_apply_op_create_reschedule_cancel(settings) -> None:
     start = _iso_in(settings, days=2)
-    canned_create = f'[{{"op": "create", "title": "Dentist", "start": "{start}"}}]'
-    monkeypatch.setattr("assistant.calendar.ops.complete_text", lambda *a, **k: canned_create)
-
-    applied = ops.update_calendar(settings, "book the dentist friday", "Done!")
-    assert any(s.startswith("created:") for s in applied)
+    summary = ops.apply_op(settings, {"op": "create", "title": "Dentist", "start": start})
+    assert summary is not None and summary.startswith("created:")
     events = store.list_events(settings)
     assert len(events) == 1
     event_id = events[0].id
 
     new_start = _iso_in(settings, days=2, hours=1)
-    canned_move = f'[{{"op": "reschedule", "id": "{event_id}", "start": "{new_start}"}}]'
-    monkeypatch.setattr("assistant.calendar.ops.complete_text", lambda *a, **k: canned_move)
-    ops.update_calendar(settings, "move it an hour later", "Moved.")
+    ops.apply_op(settings, {"op": "reschedule", "id": event_id, "start": new_start})
     assert store.get_event(settings, event_id).start == new_start
 
-    canned_cancel = f'[{{"op": "cancel", "id": "{event_id}"}}]'
-    monkeypatch.setattr("assistant.calendar.ops.complete_text", lambda *a, **k: canned_cancel)
-    ops.update_calendar(settings, "cancel the dentist", "Cancelled.")
+    ops.apply_op(settings, {"op": "cancel", "id": event_id})
     assert store.list_events(settings) == []
 
 
-def test_update_calendar_disabled_is_noop(tmp_path, monkeypatch) -> None:
-    settings = Settings(
-        memory_dir=str(tmp_path / "memory"), enable_auto_schedule=False
-    )
-    monkeypatch.setattr(
-        "assistant.calendar.ops.complete_text",
-        lambda *a, **k: pytest.fail("the extractor must not be called when disabled"),
-    )
-    assert ops.update_calendar(settings, "book something", "ok") == []
-
-
-def test_update_calendar_creates_recurring_series(settings, monkeypatch) -> None:
+def test_apply_op_creates_recurring_series(settings) -> None:
     start = _iso_in(settings, days=1)
-    canned = (
-        f'[{{"op": "create", "title": "Standup", "start": "{start}",'
-        ' "rrule": "FREQ=WEEKLY;BYDAY=MO"}]'
+    summary = ops.apply_op(
+        settings,
+        {"op": "create", "title": "Standup", "start": start, "rrule": "FREQ=WEEKLY;BYDAY=MO"},
     )
-    monkeypatch.setattr("assistant.calendar.ops.complete_text", lambda *a, **k: canned)
-
-    applied = ops.update_calendar(settings, "standup every monday", "Set up.")
-    assert any("every Monday" in s for s in applied)
+    assert summary is not None and "every Monday" in summary
     events = store.list_events(settings)
     assert len(events) == 1 and events[0].rrule == "FREQ=WEEKLY;BYDAY=MO"
 
 
-def test_create_drops_invalid_rrule_but_keeps_event(settings, monkeypatch) -> None:
+def test_create_drops_invalid_rrule_but_keeps_event(settings) -> None:
     start = _iso_in(settings, days=1)
-    canned = f'[{{"op": "create", "title": "Thing", "start": "{start}", "rrule": "FREQ=NEVER"}}]'
-    monkeypatch.setattr("assistant.calendar.ops.complete_text", lambda *a, **k: canned)
-
-    ops.update_calendar(settings, "schedule thing", "Done.")
+    ops.apply_op(
+        settings, {"op": "create", "title": "Thing", "start": start, "rrule": "FREQ=NEVER"}
+    )
     events = store.list_events(settings)
     assert len(events) == 1 and events[0].rrule == ""  # rule dropped, event kept
 
@@ -312,33 +293,37 @@ def test_resolve_occurrence_snaps_to_series(settings) -> None:
     assert recurrence.resolve_occurrence(series, loose) == real
 
 
-def test_skip_occurrence_drops_only_that_date(settings, monkeypatch) -> None:
+def test_skip_occurrence_drops_only_that_date(settings) -> None:
     series = _weekly_series(settings)
     mondays = _upcoming_mondays(settings)
     first, second = store.parse_dt(mondays[0].start), store.parse_dt(mondays[1].start)
 
-    canned = f'[{{"op": "skip", "id": "{series.id}", "occurrence": "{first.isoformat()}"}}]'
-    monkeypatch.setattr("assistant.calendar.ops.complete_text", lambda *a, **k: canned)
-    applied = ops.update_calendar(settings, "skip this monday's standup", "Skipped.")
-    assert any(s.startswith("skipped:") for s in applied)
+    summary = ops.apply_op(
+        settings, {"op": "skip", "id": series.id, "occurrence": first.isoformat()}
+    )
+    assert summary is not None and summary.startswith("skipped:")
 
     starts = [store.parse_dt(e.start) for e in _upcoming_mondays(settings)]
     assert first not in starts and second in starts  # only the one date is gone
 
 
-def test_move_occurrence_changes_only_that_one(settings, monkeypatch) -> None:
+def test_move_occurrence_changes_only_that_one(settings) -> None:
     series = _weekly_series(settings)
     mondays = _upcoming_mondays(settings)
     first = store.parse_dt(mondays[0].start)
     new_start = (first + timedelta(days=1, hours=1)).isoformat()  # Tuesday, an hour later
 
-    canned = (
-        f'[{{"op": "move", "id": "{series.id}", "occurrence": "{first.isoformat()}",'
-        f' "start": "{new_start}", "title": "Standup (special)"}}]'
+    summary = ops.apply_op(
+        settings,
+        {
+            "op": "move",
+            "id": series.id,
+            "occurrence": first.isoformat(),
+            "start": new_start,
+            "title": "Standup (special)",
+        },
     )
-    monkeypatch.setattr("assistant.calendar.ops.complete_text", lambda *a, **k: canned)
-    applied = ops.update_calendar(settings, "move this monday's standup to tuesday", "Moved.")
-    assert any(s.startswith("moved:") for s in applied)
+    assert summary is not None and summary.startswith("moved:")
 
     occ = _upcoming_mondays(settings)
     moved = [e for e in occ if e.title == "Standup (special)"]
@@ -357,7 +342,7 @@ def test_exception_helpers_reject_non_series(settings) -> None:
 
 
 def test_naive_start_is_normalized_on_write(settings) -> None:
-    # The extractor is told to emit offsets, but an LLM slip must not poison the
+    # The model is told to emit offsets, but an LLM slip must not poison the
     # store: one naive start used to TypeError every aware/naive comparison.
     naive = (context.now(settings) + timedelta(days=1)).replace(tzinfo=None)
     event = store.create_event(settings, title="Dentist", start=naive.isoformat())

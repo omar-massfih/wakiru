@@ -1,11 +1,13 @@
 """Undo ledger tests — restore_event, record_write, and undo_latest.
 
-Everything runs for real (plain SQLite + stdlib datetime); only the Codex call
-in the write path (via ops.update_calendar) is faked, matching test_calendar.py.
+Everything runs for real (plain SQLite + stdlib datetime); writes are exercised
+by applying parsed operations directly through ``ops.apply_op`` — exactly what
+the calendar tools do — matching test_calendar.py.
 """
 
 from __future__ import annotations
 
+import uuid
 from datetime import UTC, timedelta
 
 import pytest
@@ -21,7 +23,6 @@ def settings(tmp_path) -> Settings:
     return Settings(
         memory_dir=str(tmp_path / "memory"),
         timezone="Europe/Oslo",
-        enable_auto_schedule=True,
         enable_write_confirmation=True,
         write_undo_window_minutes=15,
     )
@@ -29,6 +30,17 @@ def settings(tmp_path) -> Settings:
 
 def _iso_in(settings: Settings, **delta) -> str:
     return (context.now(settings) + timedelta(**delta)).isoformat(timespec="minutes")
+
+
+def _apply(settings: Settings, ops_list: list[dict], thread: str = THREAD) -> list[str]:
+    """Apply parsed operations as the calendar tools do — one undo batch per call."""
+    batch_id = uuid.uuid4().hex
+    applied = []
+    for op in ops_list:
+        result = ops.apply_op(settings, op, thread, batch_id)
+        if result:
+            applied.append(result)
+    return applied
 
 
 def _past_monday(settings: Settings, weeks_ago: int = 3, hour: int = 9):
@@ -91,12 +103,9 @@ def test_undo_latest_nothing_to_undo_when_ledger_empty(settings) -> None:
     assert undo.undo_latest(settings, THREAD, 15) == "Nothing to undo."
 
 
-def test_undo_latest_reverts_create(settings, monkeypatch) -> None:
+def test_undo_latest_reverts_create(settings) -> None:
     start = _iso_in(settings, days=2)
-    canned = f'[{{"op": "create", "title": "Dentist", "start": "{start}"}}]'
-    monkeypatch.setattr("assistant.calendar.ops.complete_text", lambda *a, **k: canned)
-
-    ops.update_calendar(settings, "book the dentist friday", "Done!", THREAD)
+    _apply(settings, [{"op": "create", "title": "Dentist", "start": start}])
     assert len(store.list_events(settings)) == 1
 
     result = undo.undo_latest(settings, THREAD, 15)
@@ -104,17 +113,13 @@ def test_undo_latest_reverts_create(settings, monkeypatch) -> None:
     assert store.list_events(settings) == []
 
 
-def test_undo_latest_reverts_reschedule(settings, monkeypatch) -> None:
+def test_undo_latest_reverts_reschedule(settings) -> None:
     start = _iso_in(settings, days=2)
-    canned_create = f'[{{"op": "create", "title": "Dentist", "start": "{start}"}}]'
-    monkeypatch.setattr("assistant.calendar.ops.complete_text", lambda *a, **k: canned_create)
-    ops.update_calendar(settings, "book the dentist friday", "Done!", THREAD)
+    _apply(settings, [{"op": "create", "title": "Dentist", "start": start}])
     event_id = store.list_events(settings)[0].id
 
     new_start = _iso_in(settings, days=2, hours=1)
-    canned_move = f'[{{"op": "reschedule", "id": "{event_id}", "start": "{new_start}"}}]'
-    monkeypatch.setattr("assistant.calendar.ops.complete_text", lambda *a, **k: canned_move)
-    ops.update_calendar(settings, "move it an hour later", "Moved.", THREAD)
+    _apply(settings, [{"op": "reschedule", "id": event_id, "start": new_start}])
     assert store.get_event(settings, event_id).start == new_start
 
     result = undo.undo_latest(settings, THREAD, 15)
@@ -122,11 +127,9 @@ def test_undo_latest_reverts_reschedule(settings, monkeypatch) -> None:
     assert store.get_event(settings, event_id).start == start
 
 
-def test_undo_latest_reverts_cancel_by_recreating(settings, monkeypatch) -> None:
+def test_undo_latest_reverts_cancel_by_recreating(settings) -> None:
     event = store.create_event(settings, title="Dentist", start=_iso_in(settings, days=2))
-    canned_cancel = f'[{{"op": "cancel", "id": "{event.id}"}}]'
-    monkeypatch.setattr("assistant.calendar.ops.complete_text", lambda *a, **k: canned_cancel)
-    ops.update_calendar(settings, "cancel the dentist", "Cancelled.", THREAD)
+    _apply(settings, [{"op": "cancel", "id": event.id}])
     assert store.get_event(settings, event.id) is None
 
     result = undo.undo_latest(settings, THREAD, 15)
@@ -135,7 +138,7 @@ def test_undo_latest_reverts_cancel_by_recreating(settings, monkeypatch) -> None
     assert back is not None and back == event
 
 
-def test_undo_latest_reverts_skip_occurrence(settings, monkeypatch) -> None:
+def test_undo_latest_reverts_skip_occurrence(settings) -> None:
     series = _weekly_series(settings)
     current = context.now(settings)
     from assistant.calendar import recurrence
@@ -143,9 +146,7 @@ def test_undo_latest_reverts_skip_occurrence(settings, monkeypatch) -> None:
     mondays = recurrence.occurrences_in(settings, current, current + timedelta(days=28))
     first = store.parse_dt(mondays[0].start)
 
-    canned = f'[{{"op": "skip", "id": "{series.id}", "occurrence": "{first.isoformat()}"}}]'
-    monkeypatch.setattr("assistant.calendar.ops.complete_text", lambda *a, **k: canned)
-    ops.update_calendar(settings, "skip this monday's standup", "Skipped.", THREAD)
+    _apply(settings, [{"op": "skip", "id": series.id, "occurrence": first.isoformat()}])
     assert store.load_exdates(store.get_event(settings, series.id)) == [first.isoformat()]
 
     result = undo.undo_latest(settings, THREAD, 15)
@@ -153,7 +154,7 @@ def test_undo_latest_reverts_skip_occurrence(settings, monkeypatch) -> None:
     assert store.load_exdates(store.get_event(settings, series.id)) == []
 
 
-def test_undo_latest_reverts_move_occurrence(settings, monkeypatch) -> None:
+def test_undo_latest_reverts_move_occurrence(settings) -> None:
     series = _weekly_series(settings)
     current = context.now(settings)
     from assistant.calendar import recurrence
@@ -162,12 +163,10 @@ def test_undo_latest_reverts_move_occurrence(settings, monkeypatch) -> None:
     first = store.parse_dt(mondays[0].start)
     new_start = (first + timedelta(days=1, hours=1)).isoformat()
 
-    canned = (
-        f'[{{"op": "move", "id": "{series.id}", "occurrence": "{first.isoformat()}",'
-        f' "start": "{new_start}"}}]'
+    _apply(
+        settings,
+        [{"op": "move", "id": series.id, "occurrence": first.isoformat(), "start": new_start}],
     )
-    monkeypatch.setattr("assistant.calendar.ops.complete_text", lambda *a, **k: canned)
-    ops.update_calendar(settings, "move this monday's standup to tuesday", "Moved.", THREAD)
     assert store.load_overrides(store.get_event(settings, series.id))
 
     result = undo.undo_latest(settings, THREAD, 15)
@@ -175,19 +174,17 @@ def test_undo_latest_reverts_move_occurrence(settings, monkeypatch) -> None:
     assert store.load_overrides(store.get_event(settings, series.id)) == {}
 
 
-def test_undo_latest_reverts_whole_batch(settings, monkeypatch) -> None:
+def test_undo_latest_reverts_whole_batch(settings) -> None:
     keep_cancelled = store.create_event(
         settings, title="Yoga", start=_iso_in(settings, days=3)
     )
-    canned = (
-        '[{"op": "create", "title": "Dentist", "start": "'
-        + _iso_in(settings, days=2)
-        + '"}, {"op": "cancel", "id": "'
-        + keep_cancelled.id
-        + '"}]'
+    applied = _apply(
+        settings,
+        [
+            {"op": "create", "title": "Dentist", "start": _iso_in(settings, days=2)},
+            {"op": "cancel", "id": keep_cancelled.id},
+        ],
     )
-    monkeypatch.setattr("assistant.calendar.ops.complete_text", lambda *a, **k: canned)
-    applied = ops.update_calendar(settings, "book dentist, cancel yoga", "Done.", THREAD)
     assert len(applied) == 2
     titles = {e.title for e in store.list_events(settings)}
     assert titles == {"Dentist"}  # Yoga cancelled, Dentist created
@@ -198,31 +195,25 @@ def test_undo_latest_reverts_whole_batch(settings, monkeypatch) -> None:
     assert titles == {"Yoga"}  # both reverted: Dentist gone, Yoga back
 
 
-def test_undo_latest_only_targets_own_thread(settings, monkeypatch) -> None:
+def test_undo_latest_only_targets_own_thread(settings) -> None:
     start = _iso_in(settings, days=2)
-    canned = f'[{{"op": "create", "title": "Dentist", "start": "{start}"}}]'
-    monkeypatch.setattr("assistant.calendar.ops.complete_text", lambda *a, **k: canned)
-    ops.update_calendar(settings, "book the dentist friday", "Done!", THREAD)
+    _apply(settings, [{"op": "create", "title": "Dentist", "start": start}])
 
     assert undo.undo_latest(settings, "telegram:999", 15) == "Nothing to undo."
     assert len(store.list_events(settings)) == 1  # untouched
 
 
-def test_undo_latest_is_idempotent_after_success(settings, monkeypatch) -> None:
+def test_undo_latest_is_idempotent_after_success(settings) -> None:
     start = _iso_in(settings, days=2)
-    canned = f'[{{"op": "create", "title": "Dentist", "start": "{start}"}}]'
-    monkeypatch.setattr("assistant.calendar.ops.complete_text", lambda *a, **k: canned)
-    ops.update_calendar(settings, "book the dentist friday", "Done!", THREAD)
+    _apply(settings, [{"op": "create", "title": "Dentist", "start": start}])
 
     assert undo.undo_latest(settings, THREAD, 15).startswith("Undone:")
     assert undo.undo_latest(settings, THREAD, 15) == "Nothing to undo."
 
 
-def test_undo_latest_respects_window(settings, monkeypatch) -> None:
+def test_undo_latest_respects_window(settings) -> None:
     start = _iso_in(settings, days=2)
-    canned = f'[{{"op": "create", "title": "Dentist", "start": "{start}"}}]'
-    monkeypatch.setattr("assistant.calendar.ops.complete_text", lambda *a, **k: canned)
-    ops.update_calendar(settings, "book the dentist friday", "Done!", THREAD)
+    _apply(settings, [{"op": "create", "title": "Dentist", "start": start}])
 
     # Backdate the ledger entry well outside the window (avoids a same-second race
     # against real time, since applied_at only has second precision).
@@ -234,16 +225,13 @@ def test_undo_latest_respects_window(settings, monkeypatch) -> None:
     assert len(store.list_events(settings)) == 1  # write still in place
 
 
-def test_write_log_empty_when_confirmation_disabled(tmp_path, monkeypatch) -> None:
+def test_write_log_empty_when_confirmation_disabled(tmp_path) -> None:
     settings = Settings(
         memory_dir=str(tmp_path / "memory"),
-        enable_auto_schedule=True,
         enable_write_confirmation=False,
     )
     start = _iso_in(settings, days=2)
-    canned = f'[{{"op": "create", "title": "Dentist", "start": "{start}"}}]'
-    monkeypatch.setattr("assistant.calendar.ops.complete_text", lambda *a, **k: canned)
-    ops.update_calendar(settings, "book the dentist friday", "Done!", THREAD)
+    _apply(settings, [{"op": "create", "title": "Dentist", "start": start}])
 
     assert len(store.list_events(settings)) == 1  # write still applied
     assert _log_rows(settings) == []  # but nothing logged
