@@ -394,15 +394,22 @@ def build_model(settings: Settings | None = None) -> BaseChatModel:
     return builder(settings)
 
 
-def complete_text(prompt: str, settings: Settings | None = None) -> str:
+def complete_text(
+    prompt: str, settings: Settings | None = None, *, system: str | None = None
+) -> str:
     """One plain-text completion through the configured provider.
 
-    The background extractors (memory learning/consolidation, calendar/task
-    ops) call this instead of shelling out to Codex directly, so
-    LLM_PROVIDER=openai/anthropic works without a Codex install.
+    Every one-shot background LLM call (memory learning/consolidation,
+    document summaries, briefing composition) goes through this single seam
+    instead of shelling out to Codex directly, so LLM_PROVIDER=openai/anthropic
+    works without a Codex install. ``system`` prepends an instruction message
+    when the call needs one.
     """
     settings = settings or get_settings()
-    reply = build_model(settings).invoke([HumanMessage(content=prompt)])
+    messages: list[BaseMessage] = [HumanMessage(content=prompt)]
+    if system:
+        messages.insert(0, SystemMessage(content=system))
+    reply = build_model(settings).invoke(messages)
     content = reply.content
     if isinstance(content, str):
         return content

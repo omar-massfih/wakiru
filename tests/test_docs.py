@@ -185,12 +185,11 @@ def test_reindex_embeds_nothing_when_the_model_is_unchanged(settings, monkeypatc
 def test_summarize_uses_model(settings, monkeypatch) -> None:
     doc = store.add_document(settings, "Report", "Q3 revenue rose 10%.")
 
-    class _FakeModel:
-        def invoke(self, messages):
-            assert "Q3 revenue" in messages[0].content
-            return type("Msg", (), {"content": "Revenue up 10% in Q3."})()
+    def fake_complete(prompt, s=None, **kwargs):
+        assert "Q3 revenue" in prompt
+        return "Revenue up 10% in Q3."
 
-    monkeypatch.setattr(summarize, "build_model", lambda s: _FakeModel())
+    monkeypatch.setattr(summarize, "complete_text", fake_complete)
     assert summarize.summarize_document(settings, doc.id) == "Revenue up 10% in Q3."
 
 
@@ -198,24 +197,24 @@ def test_summarize_missing_document_returns_none(settings) -> None:
     assert summarize.summarize_document(settings, "nope") is None
 
 
-class _CountingModel:
+class _CountingCompleter:
     """Records every prompt it is asked to complete."""
 
     def __init__(self) -> None:
         self.prompts: list[str] = []
 
-    def invoke(self, messages):
-        self.prompts.append(messages[0].content)
-        return type("Msg", (), {"content": f"summary {len(self.prompts)}"})()
+    def __call__(self, prompt, settings=None, **kwargs) -> str:
+        self.prompts.append(prompt)
+        return f"summary {len(self.prompts)}"
 
 
 def test_short_document_summarizes_in_one_call(settings, monkeypatch) -> None:
     doc = store.add_document(settings, "Report", "Q3 revenue rose 10%.")
-    model = _CountingModel()
-    monkeypatch.setattr(summarize, "build_model", lambda s: model)
+    completer = _CountingCompleter()
+    monkeypatch.setattr(summarize, "complete_text", completer)
 
     assert summarize.summarize_document(settings, doc.id) == "summary 1"
-    assert len(model.prompts) == 1
+    assert len(completer.prompts) == 1
 
 
 def test_long_document_is_summarized_map_reduce(tmp_path, monkeypatch) -> None:
@@ -225,12 +224,12 @@ def test_long_document_is_summarized_map_reduce(tmp_path, monkeypatch) -> None:
     doc = store.add_document(
         s, "Report", "Q3 revenue rose.\n\nQ4 revenue fell.\n\nHiring is paused."
     )
-    model = _CountingModel()
-    monkeypatch.setattr(summarize, "build_model", lambda s: model)
+    completer = _CountingCompleter()
+    monkeypatch.setattr(summarize, "complete_text", completer)
 
     result = summarize.summarize_document(s, doc.id)
 
-    assert len(model.prompts) > 2  # one per section (map) plus the final fold
-    assert all("one section" in p for p in model.prompts[:-1])
-    assert "Section summaries:" in model.prompts[-1]
-    assert result == f"summary {len(model.prompts)}"  # the reduce output wins
+    assert len(completer.prompts) > 2  # one per section (map) plus the final fold
+    assert all("one section" in p for p in completer.prompts[:-1])
+    assert "Section summaries:" in completer.prompts[-1]
+    assert result == f"summary {len(completer.prompts)}"  # the reduce output wins

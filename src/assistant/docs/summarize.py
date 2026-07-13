@@ -9,10 +9,8 @@ fits in one piece takes the single-call path, exactly as before.
 
 from __future__ import annotations
 
-from langchain_core.messages import HumanMessage
-
 from ..config import Settings, get_settings
-from ..llm import build_model
+from ..llm import complete_text
 from . import store
 
 _PROMPT = (
@@ -41,30 +39,26 @@ _REDUCE_PROMPT = (
 )
 
 
-def _invoke(model, prompt: str, title: str, text: str) -> str:
-    reply = model.invoke(
-        [HumanMessage(content=prompt.format(title=title, text=text))]
-    ).content
-    return reply if isinstance(reply, str) else str(reply)
+def _invoke(settings: Settings, prompt: str, title: str, text: str) -> str:
+    return complete_text(prompt.format(title=title, text=text), settings)
 
 
 def summarize_document(settings: Settings | None, doc_id: str) -> str | None:
     """Return a summary of the stored document, or ``None`` if it doesn't exist.
 
-    Runs via the configured provider (:func:`assistant.llm.build_model`), so it
-    works with codex or an API-backed provider alike. A document that fits in one
-    ``docs_summarize_chars`` piece costs one model call; a longer one costs one
-    call per piece plus a final fold.
+    Runs via the configured provider (:func:`assistant.llm.complete_text`), so
+    it works with codex or an API-backed provider alike. A document that fits in
+    one ``docs_summarize_chars`` piece costs one model call; a longer one costs
+    one call per piece plus a final fold.
     """
     settings = settings or get_settings()
     doc = store.get_document(settings, doc_id)
     if doc is None:
         return None
 
-    model = build_model(settings)
     pieces = store.chunk_text(doc.text, settings.docs_summarize_chars)
     if len(pieces) <= 1:
-        return _invoke(model, _PROMPT, doc.title, doc.text)
+        return _invoke(settings, _PROMPT, doc.title, doc.text)
 
-    partials = [_invoke(model, _MAP_PROMPT, doc.title, piece) for piece in pieces]
-    return _invoke(model, _REDUCE_PROMPT, doc.title, "\n\n".join(partials))
+    partials = [_invoke(settings, _MAP_PROMPT, doc.title, piece) for piece in pieces]
+    return _invoke(settings, _REDUCE_PROMPT, doc.title, "\n\n".join(partials))

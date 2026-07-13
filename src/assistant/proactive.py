@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import logging
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage
 from langgraph.graph.state import CompiledStateGraph
 
 from .config import Settings
@@ -78,7 +78,7 @@ def record_push(
 
 def compose_briefing(settings: Settings, digest: str) -> str:
     """One profile-aware LLM pass over the digest; the raw digest is the fallback."""
-    from .llm import build_model
+    from .llm import complete_text
     from .memory.profile import profile_context
 
     system = _BRIEFING_INSTRUCTION
@@ -91,12 +91,8 @@ def compose_briefing(settings: Settings, digest: str) -> str:
         system += "\n\n" + profile
 
     try:
-        reply = build_model(settings).invoke(
-            [SystemMessage(content=system), HumanMessage(content=digest)]
-        ).content
+        reply = complete_text(digest, settings, system=system)
     except Exception:
         logger.exception("briefing composition failed; sending the raw digest")
         return digest
-    if not isinstance(reply, str):
-        reply = str(reply)
     return reply.strip() or digest
