@@ -29,8 +29,8 @@ import logging
 import re
 from datetime import date
 
-from ..codex_runner import run_codex
 from ..config import Settings, get_settings
+from ..llm import complete_text
 from . import index, store
 from .embeddings import embed_one, embed_query
 from .locks import locked
@@ -405,9 +405,9 @@ def update_memory(
         assistant=assistant_msg,
     )
     try:
-        raw = run_codex(prompt, settings=settings)
+        raw = complete_text(prompt, settings)
     except Exception:
-        logger.exception("memory extraction (run_codex) failed; skipping this turn")
+        logger.exception("memory extraction (LLM) failed; skipping this turn")
         return applied  # memory upkeep is best-effort; never break the main flow
 
     for op in _parse_ops(raw):

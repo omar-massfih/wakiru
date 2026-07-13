@@ -307,7 +307,7 @@ def test_update_memory_applies_save_update_forget(tmp_path, monkeypatch) -> None
         ' "body": "The user now lives in Bergen."},'
         ' {"op": "forget", "name": "favorite-color"}]'
     )
-    monkeypatch.setattr("assistant.memory.learn.run_codex", lambda *a, **k: canned)
+    monkeypatch.setattr("assistant.memory.learn.complete_text", lambda *a, **k: canned)
 
     applied = learn.update_memory(settings, "user text", "assistant text", source="t-9")
 
@@ -322,8 +322,8 @@ def test_update_memory_applies_save_update_forget(tmp_path, monkeypatch) -> None
 def test_update_memory_disabled_is_noop(tmp_path, monkeypatch) -> None:
     settings = Settings(memory_dir=str(tmp_path / "memory"), enable_auto_memory=False)
     monkeypatch.setattr(
-        "assistant.memory.learn.run_codex",
-        lambda *a, **k: pytest.fail("run_codex must not be called when disabled"),
+        "assistant.memory.learn.complete_text",
+        lambda *a, **k: pytest.fail("the extractor must not be called when disabled"),
     )
     assert learn.update_memory(settings, "hi", "hello") == []
 
@@ -465,7 +465,7 @@ def test_consolidate_prunes_and_promotes(tmp_path, monkeypatch) -> None:
         '[{"op": "save", "kind": "procedural", "description": "Deploys with uv",'
         ' "body": "The user deploys with uv."}]'
     )
-    monkeypatch.setattr("assistant.memory.consolidate.run_codex", lambda *a, **k: canned)
+    monkeypatch.setattr("assistant.memory.consolidate.complete_text", lambda *a, **k: canned)
 
     summary = consolidate.consolidate_memory(settings)
     assert summary["pruned_episodes"] >= 1
@@ -589,7 +589,7 @@ def test_forget_op_with_hallucinated_name_deletes_nothing(settings, monkeypatch)
     auto = settings.model_copy(update={"enable_auto_memory": True})
     kept = learn.save_memory(auto, "The user's name is Omar.", description="user name")
     monkeypatch.setattr(
-        learn, "run_codex",
+        learn, "complete_text",
         lambda prompt, settings=None: '[{"op": "forget", "name": "user-name-omar"}]',
     )
     applied = learn.update_memory(auto, "please forget about my name", "Okay.")

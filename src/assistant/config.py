@@ -34,6 +34,11 @@ class Settings(BaseSettings):
     # Model name for the selected provider. None => a sensible per-provider
     # default (see llm.py: gpt-4o for openai, claude-opus-4-8 for anthropic).
     llm_model: str | None = None
+    # Request timeout (seconds) for the API-backed providers. The codex
+    # provider has its own wall-clock cap, codex_timeout below.
+    llm_timeout: int = 120
+    # Reply-length cap (tokens) for the API-backed providers.
+    llm_max_tokens: int = 4096
 
     # --- Codex CLI ---
     codex_bin: str = "codex"

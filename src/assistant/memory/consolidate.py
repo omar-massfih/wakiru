@@ -25,8 +25,8 @@ import logging
 import math
 from datetime import date
 
-from ..codex_runner import run_codex
 from ..config import Settings, get_settings
+from ..llm import complete_text
 from . import index, learn, recall, store
 from .locks import CONSOLIDATE_LOCK, MEMORY_LOCK, locked
 
@@ -183,9 +183,9 @@ def _llm_consolidate(settings: Settings) -> list[str]:
     prompt = _CONSOLIDATE_PROMPT.format(episodes=episodes_txt, durable=durable_txt)
 
     try:
-        raw = run_codex(prompt, settings=settings)
+        raw = complete_text(prompt, settings)
     except Exception:
-        logger.exception("consolidation (run_codex) failed")
+        logger.exception("consolidation (LLM) failed")
         return []
 
     applied: list[str] = []

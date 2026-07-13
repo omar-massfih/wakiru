@@ -29,6 +29,8 @@ from langchain_core.messages import (
     AIMessage,
     AIMessageChunk,
     BaseMessage,
+    HumanMessage,
+    SystemMessage,
     ToolMessage,
 )
 from langchain_core.messages.tool import ToolCall, ToolCallChunk
@@ -348,7 +350,8 @@ def _build_openai(settings: Settings) -> BaseChatModel:
         # None => the SDK's default endpoint; set for an OpenAI-compatible proxy.
         base_url=settings.llm_base_url,
         temperature=0,
-        timeout=settings.codex_timeout,
+        max_tokens=settings.llm_max_tokens,
+        timeout=settings.llm_timeout,
     )
 
 
@@ -360,8 +363,8 @@ def _build_anthropic(settings: Settings) -> BaseChatModel:
     return ChatAnthropic(
         model=settings.llm_model or _DEFAULT_ANTHROPIC_MODEL,
         api_key=_require_api_key(settings, "anthropic"),
-        max_tokens=4096,
-        timeout=settings.codex_timeout,
+        max_tokens=settings.llm_max_tokens,
+        timeout=settings.llm_timeout,
     )
 
 
@@ -389,3 +392,38 @@ def build_model(settings: Settings | None = None) -> BaseChatModel:
             f"Options: {', '.join(sorted(PROVIDERS))}."
         )
     return builder(settings)
+
+
+def complete_text(prompt: str, settings: Settings | None = None) -> str:
+    """One plain-text completion through the configured provider.
+
+    The background extractors (memory learning/consolidation, calendar/task
+    ops) call this instead of shelling out to Codex directly, so
+    LLM_PROVIDER=openai/anthropic works without a Codex install.
+    """
+    settings = settings or get_settings()
+    reply = build_model(settings).invoke([HumanMessage(content=prompt)])
+    content = reply.content
+    if isinstance(content, str):
+        return content
+    # Anthropic can return a list of content blocks; keep the text ones.
+    return "".join(
+        block.get("text", "") for block in content if isinstance(block, dict)
+    )
+
+
+def cacheable_system_message(text: str, settings: Settings) -> SystemMessage:
+    """A ``SystemMessage`` for ``text``, cache-marked where the provider allows.
+
+    Anthropic prompt caching: a ``cache_control`` marker caches everything up
+    to and including its block — the bound tool schemas plus this text — so
+    the marker belongs only on a *stable* prompt (the base system prompt), not
+    on per-turn context.
+    """
+    if settings.llm_provider.lower() == "anthropic":
+        return SystemMessage(
+            content=[
+                {"type": "text", "text": text, "cache_control": {"type": "ephemeral"}}
+            ]
+        )
+    return SystemMessage(content=text)

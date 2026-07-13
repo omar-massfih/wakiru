@@ -152,7 +152,7 @@ def test_parse_ops_filters_and_strips_fences() -> None:
 def test_update_calendar_create_reschedule_cancel(settings, monkeypatch) -> None:
     start = _iso_in(settings, days=2)
     canned_create = f'[{{"op": "create", "title": "Dentist", "start": "{start}"}}]'
-    monkeypatch.setattr("assistant.calendar.ops.run_codex", lambda *a, **k: canned_create)
+    monkeypatch.setattr("assistant.calendar.ops.complete_text", lambda *a, **k: canned_create)
 
     applied = ops.update_calendar(settings, "book the dentist friday", "Done!")
     assert any(s.startswith("created:") for s in applied)
@@ -162,12 +162,12 @@ def test_update_calendar_create_reschedule_cancel(settings, monkeypatch) -> None
 
     new_start = _iso_in(settings, days=2, hours=1)
     canned_move = f'[{{"op": "reschedule", "id": "{event_id}", "start": "{new_start}"}}]'
-    monkeypatch.setattr("assistant.calendar.ops.run_codex", lambda *a, **k: canned_move)
+    monkeypatch.setattr("assistant.calendar.ops.complete_text", lambda *a, **k: canned_move)
     ops.update_calendar(settings, "move it an hour later", "Moved.")
     assert store.get_event(settings, event_id).start == new_start
 
     canned_cancel = f'[{{"op": "cancel", "id": "{event_id}"}}]'
-    monkeypatch.setattr("assistant.calendar.ops.run_codex", lambda *a, **k: canned_cancel)
+    monkeypatch.setattr("assistant.calendar.ops.complete_text", lambda *a, **k: canned_cancel)
     ops.update_calendar(settings, "cancel the dentist", "Cancelled.")
     assert store.list_events(settings) == []
 
@@ -177,8 +177,8 @@ def test_update_calendar_disabled_is_noop(tmp_path, monkeypatch) -> None:
         memory_dir=str(tmp_path / "memory"), enable_auto_schedule=False
     )
     monkeypatch.setattr(
-        "assistant.calendar.ops.run_codex",
-        lambda *a, **k: pytest.fail("run_codex must not be called when disabled"),
+        "assistant.calendar.ops.complete_text",
+        lambda *a, **k: pytest.fail("the extractor must not be called when disabled"),
     )
     assert ops.update_calendar(settings, "book something", "ok") == []
 
@@ -189,7 +189,7 @@ def test_update_calendar_creates_recurring_series(settings, monkeypatch) -> None
         f'[{{"op": "create", "title": "Standup", "start": "{start}",'
         ' "rrule": "FREQ=WEEKLY;BYDAY=MO"}]'
     )
-    monkeypatch.setattr("assistant.calendar.ops.run_codex", lambda *a, **k: canned)
+    monkeypatch.setattr("assistant.calendar.ops.complete_text", lambda *a, **k: canned)
 
     applied = ops.update_calendar(settings, "standup every monday", "Set up.")
     assert any("every Monday" in s for s in applied)
@@ -200,7 +200,7 @@ def test_update_calendar_creates_recurring_series(settings, monkeypatch) -> None
 def test_create_drops_invalid_rrule_but_keeps_event(settings, monkeypatch) -> None:
     start = _iso_in(settings, days=1)
     canned = f'[{{"op": "create", "title": "Thing", "start": "{start}", "rrule": "FREQ=NEVER"}}]'
-    monkeypatch.setattr("assistant.calendar.ops.run_codex", lambda *a, **k: canned)
+    monkeypatch.setattr("assistant.calendar.ops.complete_text", lambda *a, **k: canned)
 
     ops.update_calendar(settings, "schedule thing", "Done.")
     events = store.list_events(settings)
@@ -318,7 +318,7 @@ def test_skip_occurrence_drops_only_that_date(settings, monkeypatch) -> None:
     first, second = store.parse_dt(mondays[0].start), store.parse_dt(mondays[1].start)
 
     canned = f'[{{"op": "skip", "id": "{series.id}", "occurrence": "{first.isoformat()}"}}]'
-    monkeypatch.setattr("assistant.calendar.ops.run_codex", lambda *a, **k: canned)
+    monkeypatch.setattr("assistant.calendar.ops.complete_text", lambda *a, **k: canned)
     applied = ops.update_calendar(settings, "skip this monday's standup", "Skipped.")
     assert any(s.startswith("skipped:") for s in applied)
 
@@ -336,7 +336,7 @@ def test_move_occurrence_changes_only_that_one(settings, monkeypatch) -> None:
         f'[{{"op": "move", "id": "{series.id}", "occurrence": "{first.isoformat()}",'
         f' "start": "{new_start}", "title": "Standup (special)"}}]'
     )
-    monkeypatch.setattr("assistant.calendar.ops.run_codex", lambda *a, **k: canned)
+    monkeypatch.setattr("assistant.calendar.ops.complete_text", lambda *a, **k: canned)
     applied = ops.update_calendar(settings, "move this monday's standup to tuesday", "Moved.")
     assert any(s.startswith("moved:") for s in applied)
 

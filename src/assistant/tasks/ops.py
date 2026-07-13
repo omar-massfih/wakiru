@@ -23,8 +23,8 @@ import uuid
 
 from .. import notify
 from ..calendar.context import now
-from ..codex_runner import run_codex
 from ..config import Settings, get_settings
+from ..llm import complete_text
 from . import store, undo
 from .context import render_tasks
 
@@ -200,9 +200,9 @@ def update_tasks(
         assistant=assistant_msg,
     )
     try:
-        raw = run_codex(prompt, settings=settings)
+        raw = complete_text(prompt, settings)
     except Exception:
-        logger.exception("task extraction (run_codex) failed; skipping this turn")
+        logger.exception("task extraction (LLM) failed; skipping this turn")
         return []
 
     batch_id = uuid.uuid4().hex if thread_id else ""

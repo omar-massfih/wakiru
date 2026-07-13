@@ -56,7 +56,7 @@ class _CannedAgent:
 def _seed_booking(settings: Settings, monkeypatch) -> None:
     start = _iso_in(settings, days=2)
     canned = f'[{{"op": "create", "title": "Dentist", "start": "{start}"}}]'
-    monkeypatch.setattr("assistant.calendar.ops.run_codex", lambda *a, **k: canned)
+    monkeypatch.setattr("assistant.calendar.ops.complete_text", lambda *a, **k: canned)
     ops.update_calendar(settings, "book the dentist friday", "Done!", THREAD)
 
 

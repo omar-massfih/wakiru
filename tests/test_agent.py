@@ -212,6 +212,65 @@ def test_api_providers_require_key() -> None:
             build_model(Settings(llm_provider=provider))
 
 
+def test_api_providers_use_llm_timeout_and_max_tokens() -> None:
+    settings = Settings(llm_api_key="sk-test", llm_timeout=42, llm_max_tokens=1234)
+    anthropic = build_model(settings.model_copy(update={"llm_provider": "anthropic"}))
+    assert anthropic.max_tokens == 1234
+    openai = build_model(settings.model_copy(update={"llm_provider": "openai"}))
+    assert openai.max_tokens == 1234
+
+
+def test_complete_text_goes_through_the_configured_provider(monkeypatch) -> None:
+    from langchain_core.messages import AIMessage
+
+    from assistant import llm as llm_module
+
+    class Echo:
+        def invoke(self, messages):
+            return AIMessage(content=f"echo: {messages[0].content}")
+
+    monkeypatch.setattr(llm_module, "build_model", lambda s=None: Echo())
+    assert llm_module.complete_text("hi", Settings()) == "echo: hi"
+
+
+def test_cacheable_system_message_marks_only_anthropic() -> None:
+    from assistant.llm import cacheable_system_message
+
+    plain = cacheable_system_message("base", Settings(llm_provider="codex"))
+    assert plain.content == "base"
+
+    marked = cacheable_system_message(
+        "base", Settings(llm_provider="anthropic", llm_api_key="sk-test")
+    )
+    assert marked.content[0]["cache_control"] == {"type": "ephemeral"}
+    assert marked.content[0]["text"] == "base"
+
+
+def test_reply_prompt_carries_the_base_system_prompt(monkeypatch, tmp_path) -> None:
+    """The persistent persona block must lead every reply-path prompt."""
+    from assistant import agent as agent_module
+    from assistant.chat import run_chat
+
+    seen: dict[str, str] = {}
+
+    def fake_run_codex(prompt, settings=None):
+        seen["prompt"] = prompt
+        return "hei"
+
+    monkeypatch.setattr("assistant.llm.run_codex", fake_run_codex)
+    settings = Settings(
+        memory_dir=str(tmp_path / "memory"),
+        enable_memory=False,
+        enable_auto_memory=False,
+        enable_calendar=False,
+        enable_tasks=False,
+        enable_docs=False,
+    )
+    agent = agent_module.build_agent(settings)
+    run_chat(agent, "hello", "t-prompt", settings=settings)
+    assert agent_module.BASE_SYSTEM_PROMPT.splitlines()[0] in seen["prompt"]
+
+
 # --- background working-memory summarization -------------------------------- #
 
 

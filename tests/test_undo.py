@@ -94,7 +94,7 @@ def test_undo_latest_nothing_to_undo_when_ledger_empty(settings) -> None:
 def test_undo_latest_reverts_create(settings, monkeypatch) -> None:
     start = _iso_in(settings, days=2)
     canned = f'[{{"op": "create", "title": "Dentist", "start": "{start}"}}]'
-    monkeypatch.setattr("assistant.calendar.ops.run_codex", lambda *a, **k: canned)
+    monkeypatch.setattr("assistant.calendar.ops.complete_text", lambda *a, **k: canned)
 
     ops.update_calendar(settings, "book the dentist friday", "Done!", THREAD)
     assert len(store.list_events(settings)) == 1
@@ -107,13 +107,13 @@ def test_undo_latest_reverts_create(settings, monkeypatch) -> None:
 def test_undo_latest_reverts_reschedule(settings, monkeypatch) -> None:
     start = _iso_in(settings, days=2)
     canned_create = f'[{{"op": "create", "title": "Dentist", "start": "{start}"}}]'
-    monkeypatch.setattr("assistant.calendar.ops.run_codex", lambda *a, **k: canned_create)
+    monkeypatch.setattr("assistant.calendar.ops.complete_text", lambda *a, **k: canned_create)
     ops.update_calendar(settings, "book the dentist friday", "Done!", THREAD)
     event_id = store.list_events(settings)[0].id
 
     new_start = _iso_in(settings, days=2, hours=1)
     canned_move = f'[{{"op": "reschedule", "id": "{event_id}", "start": "{new_start}"}}]'
-    monkeypatch.setattr("assistant.calendar.ops.run_codex", lambda *a, **k: canned_move)
+    monkeypatch.setattr("assistant.calendar.ops.complete_text", lambda *a, **k: canned_move)
     ops.update_calendar(settings, "move it an hour later", "Moved.", THREAD)
     assert store.get_event(settings, event_id).start == new_start
 
@@ -125,7 +125,7 @@ def test_undo_latest_reverts_reschedule(settings, monkeypatch) -> None:
 def test_undo_latest_reverts_cancel_by_recreating(settings, monkeypatch) -> None:
     event = store.create_event(settings, title="Dentist", start=_iso_in(settings, days=2))
     canned_cancel = f'[{{"op": "cancel", "id": "{event.id}"}}]'
-    monkeypatch.setattr("assistant.calendar.ops.run_codex", lambda *a, **k: canned_cancel)
+    monkeypatch.setattr("assistant.calendar.ops.complete_text", lambda *a, **k: canned_cancel)
     ops.update_calendar(settings, "cancel the dentist", "Cancelled.", THREAD)
     assert store.get_event(settings, event.id) is None
 
@@ -144,7 +144,7 @@ def test_undo_latest_reverts_skip_occurrence(settings, monkeypatch) -> None:
     first = store.parse_dt(mondays[0].start)
 
     canned = f'[{{"op": "skip", "id": "{series.id}", "occurrence": "{first.isoformat()}"}}]'
-    monkeypatch.setattr("assistant.calendar.ops.run_codex", lambda *a, **k: canned)
+    monkeypatch.setattr("assistant.calendar.ops.complete_text", lambda *a, **k: canned)
     ops.update_calendar(settings, "skip this monday's standup", "Skipped.", THREAD)
     assert store.load_exdates(store.get_event(settings, series.id)) == [first.isoformat()]
 
@@ -166,7 +166,7 @@ def test_undo_latest_reverts_move_occurrence(settings, monkeypatch) -> None:
         f'[{{"op": "move", "id": "{series.id}", "occurrence": "{first.isoformat()}",'
         f' "start": "{new_start}"}}]'
     )
-    monkeypatch.setattr("assistant.calendar.ops.run_codex", lambda *a, **k: canned)
+    monkeypatch.setattr("assistant.calendar.ops.complete_text", lambda *a, **k: canned)
     ops.update_calendar(settings, "move this monday's standup to tuesday", "Moved.", THREAD)
     assert store.load_overrides(store.get_event(settings, series.id))
 
@@ -186,7 +186,7 @@ def test_undo_latest_reverts_whole_batch(settings, monkeypatch) -> None:
         + keep_cancelled.id
         + '"}]'
     )
-    monkeypatch.setattr("assistant.calendar.ops.run_codex", lambda *a, **k: canned)
+    monkeypatch.setattr("assistant.calendar.ops.complete_text", lambda *a, **k: canned)
     applied = ops.update_calendar(settings, "book dentist, cancel yoga", "Done.", THREAD)
     assert len(applied) == 2
     titles = {e.title for e in store.list_events(settings)}
@@ -201,7 +201,7 @@ def test_undo_latest_reverts_whole_batch(settings, monkeypatch) -> None:
 def test_undo_latest_only_targets_own_thread(settings, monkeypatch) -> None:
     start = _iso_in(settings, days=2)
     canned = f'[{{"op": "create", "title": "Dentist", "start": "{start}"}}]'
-    monkeypatch.setattr("assistant.calendar.ops.run_codex", lambda *a, **k: canned)
+    monkeypatch.setattr("assistant.calendar.ops.complete_text", lambda *a, **k: canned)
     ops.update_calendar(settings, "book the dentist friday", "Done!", THREAD)
 
     assert undo.undo_latest(settings, "telegram:999", 15) == "Nothing to undo."
@@ -211,7 +211,7 @@ def test_undo_latest_only_targets_own_thread(settings, monkeypatch) -> None:
 def test_undo_latest_is_idempotent_after_success(settings, monkeypatch) -> None:
     start = _iso_in(settings, days=2)
     canned = f'[{{"op": "create", "title": "Dentist", "start": "{start}"}}]'
-    monkeypatch.setattr("assistant.calendar.ops.run_codex", lambda *a, **k: canned)
+    monkeypatch.setattr("assistant.calendar.ops.complete_text", lambda *a, **k: canned)
     ops.update_calendar(settings, "book the dentist friday", "Done!", THREAD)
 
     assert undo.undo_latest(settings, THREAD, 15).startswith("Undone:")
@@ -221,7 +221,7 @@ def test_undo_latest_is_idempotent_after_success(settings, monkeypatch) -> None:
 def test_undo_latest_respects_window(settings, monkeypatch) -> None:
     start = _iso_in(settings, days=2)
     canned = f'[{{"op": "create", "title": "Dentist", "start": "{start}"}}]'
-    monkeypatch.setattr("assistant.calendar.ops.run_codex", lambda *a, **k: canned)
+    monkeypatch.setattr("assistant.calendar.ops.complete_text", lambda *a, **k: canned)
     ops.update_calendar(settings, "book the dentist friday", "Done!", THREAD)
 
     # Backdate the ledger entry well outside the window (avoids a same-second race
@@ -242,7 +242,7 @@ def test_write_log_empty_when_confirmation_disabled(tmp_path, monkeypatch) -> No
     )
     start = _iso_in(settings, days=2)
     canned = f'[{{"op": "create", "title": "Dentist", "start": "{start}"}}]'
-    monkeypatch.setattr("assistant.calendar.ops.run_codex", lambda *a, **k: canned)
+    monkeypatch.setattr("assistant.calendar.ops.complete_text", lambda *a, **k: canned)
     ops.update_calendar(settings, "book the dentist friday", "Done!", THREAD)
 
     assert len(store.list_events(settings)) == 1  # write still applied

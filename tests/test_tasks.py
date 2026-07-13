@@ -44,7 +44,7 @@ def _iso_in(settings: Settings, **delta) -> str:
 
 
 def _apply(settings: Settings, raw: str, monkeypatch, user="do it", reply="ok") -> list[str]:
-    monkeypatch.setattr("assistant.tasks.ops.run_codex", lambda *a, **k: raw)
+    monkeypatch.setattr("assistant.tasks.ops.complete_text", lambda *a, **k: raw)
     return ops.update_tasks(settings, user, reply, THREAD)
 
 
@@ -287,7 +287,7 @@ def test_undo_arbiter_reverts_most_recent_across_ledgers(settings, monkeypatch) 
     # An event write, then (a moment later) a task write on the same thread.
     start = _iso_in(settings, days=2)
     monkeypatch.setattr(
-        "assistant.calendar.ops.run_codex",
+        "assistant.calendar.ops.complete_text",
         lambda *a, **k: f'[{{"op": "create", "title": "Dentist", "start": "{start}"}}]',
     )
     cal_ops.update_calendar(settings, "book dentist", "Done", THREAD)
