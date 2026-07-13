@@ -118,6 +118,56 @@ def test_postgres_checkpointer_uses_a_health_checked_pool(monkeypatch: pytest.Mo
 
 
 
+def test_postgres_connect_pools_and_schema_runs_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """connect() must reuse one pool per DSN, and the CREATE TABLE pass must run
+    once per process, not on every operation."""
+    from contextlib import contextmanager
+
+    import psycopg_pool
+
+    from assistant import storage_postgres
+
+    executed: list[str] = []
+
+    class FakeConn:
+        def execute(self, sql, *args):
+            executed.append(sql)
+
+    pools_created: list[str] = []
+
+    class FakePool:
+        def __init__(self, conninfo: str, **kwargs):
+            pools_created.append(conninfo)
+
+        @staticmethod
+        def check_connection(conn) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+        @contextmanager
+        def connection(self):
+            yield FakeConn()
+
+    monkeypatch.setattr(psycopg_pool, "ConnectionPool", FakePool)
+    monkeypatch.setattr(storage_postgres, "_pools", {})
+    monkeypatch.setattr(storage_postgres, "_ensured_schemas", set())
+
+    settings = Settings(storage_backend="postgres", database_url="postgres://example")
+    with storage_postgres.connect(settings):
+        pass
+    with storage_postgres.connect(settings):
+        pass
+    assert pools_created == ["postgres://example"]
+
+    storage_postgres.ensure_tasks_schema(settings)
+    first_pass = len(executed)
+    assert first_pass > 0
+    storage_postgres.ensure_tasks_schema(settings)
+    assert len(executed) == first_pass
+
+
 def test_postgres_calendar_and_task_stores_delegate(monkeypatch: pytest.MonkeyPatch) -> None:
     settings = Settings(storage_backend="postgres", database_url="postgres://example")
 

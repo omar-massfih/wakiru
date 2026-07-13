@@ -226,12 +226,12 @@ def complete_task(settings: Settings, task_id: str) -> Task | None:
 
 
 def restore_task(settings: Settings, task: Task) -> Task:
+    """Re-insert a full task snapshot verbatim, overwriting any current row with
+    the same id. Used by the undo path (see :mod:`.undo`); never bumps ``updated``."""
     if settings.storage_backend == "postgres":
         from .. import storage_postgres
 
         return storage_postgres.restore_task(settings, task)
-    """Re-insert a full task snapshot verbatim, overwriting any current row with
-    the same id. Used by the undo path (see :mod:`.undo`); never bumps ``updated``."""
     with _connect(settings) as conn:
         conn.execute(
             "INSERT OR REPLACE INTO tasks"

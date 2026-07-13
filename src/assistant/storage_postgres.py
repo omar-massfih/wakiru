@@ -8,6 +8,9 @@ APIs used by the rest of the assistant.
 
 from __future__ import annotations
 
+import atexit
+import json
+import threading
 from collections.abc import Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -37,18 +40,60 @@ def _psycopg():
     return psycopg
 
 
+# One pool per DSN for the process (opening a fresh connection per operation
+# costs a TLS round-trip each time on serverless Postgres). check= revalidates
+# a connection on checkout — an idle one dies when e.g. Neon suspends — the
+# same discipline as the checkpointer pool in agent._checkpointer.
+_pools: dict[str, object] = {}
+_pools_lock = threading.Lock()
+# (dsn, schema) pairs whose CREATE TABLE IF NOT EXISTS pass already ran in
+# this process; the DDL is idempotent but not free, and it used to run on
+# nearly every operation.
+_ensured_schemas: set[tuple[str, str]] = set()
+
+
+def _pool(settings: Settings):
+    _psycopg()  # surface the missing-dependency error first
+    try:
+        from psycopg_pool import ConnectionPool
+    except ImportError as exc:  # pragma: no cover - ships with the postgres extra
+        raise RuntimeError(
+            "STORAGE_BACKEND=postgres requires the 'psycopg-pool' dependency"
+        ) from exc
+
+    dsn = require_url(settings)
+    with _pools_lock:
+        pool = _pools.get(dsn)
+        if pool is None:
+            pool = ConnectionPool(
+                dsn,
+                min_size=0,
+                max_size=4,
+                open=True,
+                check=ConnectionPool.check_connection,
+            )
+            atexit.register(pool.close)
+            _pools[dsn] = pool
+    return pool
+
+
 @contextmanager
 def connect(settings: Settings):
-    psycopg = _psycopg()
-    conn = psycopg.connect(require_url(settings), autocommit=False)
-    try:
+    # pool.connection() commits on clean exit, rolls back on exception, and
+    # returns the connection to the pool — the same transaction contract the
+    # previous one-connection-per-call implementation provided.
+    with _pool(settings).connection() as conn:
         yield conn
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
+
+
+def _schema_done(settings: Settings, schema: str) -> bool:
+    return (require_url(settings), schema) in _ensured_schemas
+
+
+def _schema_mark(settings: Settings, schema: str) -> None:
+    # Marked only after the DDL succeeded; concurrent first calls may both run
+    # the CREATE IF NOT EXISTS pass, which is harmless.
+    _ensured_schemas.add((require_url(settings), schema))
 
 
 def vector_literal(vector: Sequence[float]) -> str:
@@ -68,6 +113,8 @@ def _executemany(conn, sql: str, params: list) -> None:
 
 
 def ensure_memory_schema(settings: Settings) -> None:
+    if _schema_done(settings, "memory"):
+        return
     with connect(settings) as conn:
         conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
         conn.execute(
@@ -128,6 +175,7 @@ def ensure_memory_schema(settings: Settings) -> None:
             "CREATE TABLE IF NOT EXISTS assistant_memory_meta "
             "(key TEXT PRIMARY KEY, value TEXT NOT NULL)"
         )
+    _schema_mark(settings, "memory")
 
 
 def _note_from_row(row: dict) -> Note:
@@ -178,7 +226,7 @@ def write_note(settings: Settings, note: Note) -> Path:
                 note.kind,
                 note.salience,
                 note.confidence,
-                __import__('json').dumps(note.tags),
+                json.dumps(note.tags),
                 note.source,
                 note.created,
                 note.updated,
@@ -252,7 +300,7 @@ def delete_note(settings: Settings, name: str) -> Note | None:
                 note.kind,
                 note.salience,
                 note.confidence,
-                __import__('json').dumps(note.tags),
+                json.dumps(note.tags),
                 note.source,
                 note.created,
                 note.updated,
@@ -548,6 +596,8 @@ def reindex_memory(settings: Settings) -> int:
 
 
 def ensure_docs_schema(settings: Settings) -> None:
+    if _schema_done(settings, "docs"):
+        return
     with connect(settings) as conn:
         conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
         conn.execute(
@@ -575,6 +625,7 @@ def ensure_docs_schema(settings: Settings) -> None:
             "CREATE TABLE IF NOT EXISTS assistant_docs_meta "
             "(key TEXT PRIMARY KEY, value TEXT NOT NULL)"
         )
+    _schema_mark(settings, "docs")
 
 
 def docs_meta_get(conn, key: str) -> str | None:
@@ -775,6 +826,8 @@ def reindex_documents(settings: Settings, chunker, embedder) -> int:
 
 
 def ensure_calendar_schema(settings: Settings) -> None:
+    if _schema_done(settings, "calendar"):
+        return
     with connect(settings) as conn:
         conn.execute(
             """
@@ -819,6 +872,7 @@ def ensure_calendar_schema(settings: Settings) -> None:
             )
             """
         )
+    _schema_mark(settings, "calendar")
 
 
 def _event_from_row(row: dict):
@@ -940,6 +994,8 @@ def delete_event(settings: Settings, event_id: str):
 
 
 def ensure_tasks_schema(settings: Settings) -> None:
+    if _schema_done(settings, "tasks"):
+        return
     with connect(settings) as conn:
         conn.execute(
             """
@@ -981,6 +1037,7 @@ def ensure_tasks_schema(settings: Settings) -> None:
             )
             """
         )
+    _schema_mark(settings, "tasks")
 
 
 def _task_from_row(row: dict):
@@ -1218,6 +1275,8 @@ def claim_task_reminders(settings: Settings, reminders: list[dict], fired_at: st
 
 
 def ensure_telegram_schema(settings: Settings) -> None:
+    if _schema_done(settings, "telegram"):
+        return
     with connect(settings) as conn:
         conn.execute(
             """
@@ -1227,6 +1286,7 @@ def ensure_telegram_schema(settings: Settings) -> None:
             )
             """
         )
+    _schema_mark(settings, "telegram")
 
 
 def paired_telegram_chats(settings: Settings) -> list[int]:

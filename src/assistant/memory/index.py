@@ -215,16 +215,16 @@ def list_entries(
 
 
 def bump_turn_counter(settings: Settings) -> int:
-    if settings.storage_backend == "postgres":
-        from .. import storage_postgres
-
-        return storage_postgres.bump_turn_counter(settings)
     """Increment and return the persistent chat-turn counter.
 
     Drives the periodic-consolidation cadence; lives in the ``meta`` table so it
     survives server restarts (an in-process counter would reset and could starve
     consolidation under frequent restarts).
     """
+    if settings.storage_backend == "postgres":
+        from .. import storage_postgres
+
+        return storage_postgres.bump_turn_counter(settings)
     conn = _connect(settings)
     try:
         conn.execute(
@@ -301,10 +301,6 @@ def get_stats(settings: Settings, name: str) -> tuple[int, str] | None:
 
 @locked
 def reindex(settings: Settings) -> int:
-    if settings.storage_backend == "postgres":
-        from .. import storage_postgres
-
-        return storage_postgres.reindex_memory(settings)
     """Rebuild the vector index from the markdown files (the source of truth).
 
     Self-heals drift from hand-edits and migrates on an embedding-model change:
@@ -320,6 +316,10 @@ def reindex(settings: Settings) -> int:
 
     Returns the number of notes indexed.
     """
+    if settings.storage_backend == "postgres":
+        from .. import storage_postgres
+
+        return storage_postgres.reindex_memory(settings)
     from . import store
     from .embeddings import embed_passages
 

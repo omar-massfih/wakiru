@@ -238,8 +238,8 @@ def run_reminders(settings: Settings | None = None, agent=None) -> list[dict]:
         with _connect(settings) as conn:
             _prune_ledger(conn, current)
             for reminder in due:
-            # Claim every lead window the event is currently inside, so the
-            # larger leads can't fire a duplicate nudge on a later tick.
+                # Claim every lead window the event is currently inside, so the
+                # larger leads can't fire a duplicate nudge on a later tick.
                 claimed = 0
                 for lead in reminder["covered_leads"]:
                     cursor = conn.execute(

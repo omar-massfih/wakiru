@@ -24,13 +24,12 @@ in its own module; this one handles the per-turn path.
 
 from __future__ import annotations
 
-import json
 import logging
-import re
 from datetime import date
 
 from ..config import Settings, get_settings
 from ..llm import complete_text
+from ..ops_parse import parse_ops
 from . import index, store
 from .embeddings import embed_one, embed_query
 from .locks import locked
@@ -360,21 +359,11 @@ def _format_memories(settings: Settings, query: str) -> str:
     )
 
 
+_ALLOWED_OPS = frozenset({"save", "update", "forget"})
+
+
 def _parse_ops(text: str) -> list[dict]:
-    text = text.strip()
-    if text.startswith("```"):
-        text = re.sub(r"^```[a-zA-Z]*\n?|\n?```$", "", text).strip()
-    start, end = text.find("["), text.rfind("]")
-    if start == -1 or end == -1 or end < start:
-        return []
-    try:
-        data = json.loads(text[start : end + 1])
-    except json.JSONDecodeError:
-        return []
-    return [
-        d for d in data
-        if isinstance(d, dict) and d.get("op") in {"save", "update", "forget"}
-    ]
+    return parse_ops(text, _ALLOWED_OPS)
 
 
 def update_memory(

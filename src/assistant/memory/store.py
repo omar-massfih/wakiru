@@ -176,10 +176,6 @@ def read_note(path: Path) -> Note:
 
 
 def unique_name(settings: Settings, slug: str, keep: str | None = None) -> str:
-    if settings.storage_backend == "postgres":
-        from .. import storage_postgres
-
-        return storage_postgres.unique_name(settings, slug, keep)
     """A note name that won't clobber a *different* existing note.
 
     If ``slug`` is free, or already belongs to ``keep`` (the note we intend to
@@ -187,6 +183,10 @@ def unique_name(settings: Settings, slug: str, keep: str | None = None) -> str:
     free name is found. This prevents two unrelated facts whose descriptions
     slugify identically from silently overwriting each other.
     """
+    if settings.storage_backend == "postgres":
+        from .. import storage_postgres
+
+        return storage_postgres.unique_name(settings, slug, keep)
     existing = {n.name for n in list_notes(settings)}
     if slug == keep or slug not in existing:
         return slug
@@ -227,16 +227,16 @@ def list_notes(settings: Settings) -> list[Note]:
 
 
 def find_note(settings: Settings, name: str) -> Note | None:
-    if settings.storage_backend == "postgres":
-        from .. import storage_postgres
-
-        return storage_postgres.find_note(settings, name)
     """Look up a note by name without scanning the whole store.
 
     A note's path is deterministic per kind, so probe the three candidate
     paths directly — this runs several times per save, and a full ``rglob``
     scan grows linearly with the store.
     """
+    if settings.storage_backend == "postgres":
+        from .. import storage_postgres
+
+        return storage_postgres.find_note(settings, name)
     root = memory_root(settings)
     for kind_dir in _KINDS:
         path = root / kind_dir / f"{name}.md"
@@ -249,17 +249,17 @@ def find_note(settings: Settings, name: str) -> Note | None:
 
 
 def purge_stale_files(settings: Settings, name: str, keep_kind: str) -> None:
-    if settings.storage_backend == "postgres":
-        from .. import storage_postgres
-
-        storage_postgres.purge_stale_files(settings, name, keep_kind)
-        return
     """Delete any ``<name>.md`` living under a kind dir other than ``keep_kind``.
 
     Guarantees one file per note name even when a note changes kind (e.g. an
     episode promoted to semantic), so a rename across directories never leaves a
     stale duplicate behind.
     """
+    if settings.storage_backend == "postgres":
+        from .. import storage_postgres
+
+        storage_postgres.purge_stale_files(settings, name, keep_kind)
+        return
     root = memory_root(settings)
     keep_dir = keep_kind if keep_kind in _KINDS else _DEFAULT_KIND
     for kind_dir in _KINDS:
@@ -269,10 +269,6 @@ def purge_stale_files(settings: Settings, name: str, keep_kind: str) -> None:
 
 
 def delete_note(settings: Settings, name: str) -> Note | None:
-    if settings.storage_backend == "postgres":
-        from .. import storage_postgres
-
-        return storage_postgres.delete_note(settings, name)
     """Soft-delete a note by name; return it if it existed.
 
     The file is moved into ``.trash/`` (timestamp-prefixed) rather than
@@ -280,6 +276,10 @@ def delete_note(settings: Settings, name: str) -> Note | None:
     confirmation — stays recoverable by hand until :func:`prune_trash` ages it
     out during consolidation.
     """
+    if settings.storage_backend == "postgres":
+        from .. import storage_postgres
+
+        return storage_postgres.delete_note(settings, name)
     note = find_note(settings, name)
     if note is None:
         return None

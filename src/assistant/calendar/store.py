@@ -297,10 +297,6 @@ def update_event(settings: Settings, event_id: str, **fields: str | None) -> Eve
 
 
 def restore_event(settings: Settings, event: Event) -> Event:
-    if settings.storage_backend == "postgres":
-        from .. import storage_postgres
-
-        return storage_postgres.restore_event(settings, event)
     """Re-insert a full event snapshot verbatim, overwriting any current row
     with the same id.
 
@@ -309,6 +305,10 @@ def restore_event(settings: Settings, event: Event) -> Event:
     (recreate the deleted row) or to put back a full pre-mutation snapshot
     after a reschedule/skip/move.
     """
+    if settings.storage_backend == "postgres":
+        from .. import storage_postgres
+
+        return storage_postgres.restore_event(settings, event)
     with _connect(settings) as conn:
         conn.execute(
             "INSERT OR REPLACE INTO events"

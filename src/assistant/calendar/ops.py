@@ -17,14 +17,13 @@ swallowed so the chat reply is never affected.
 
 from __future__ import annotations
 
-import json
 import logging
-import re
 import uuid
 
 from .. import notify
 from ..config import Settings, get_settings
 from ..llm import complete_text
+from ..ops_parse import parse_ops
 from . import recurrence, store, sync, undo
 from .context import (
     format_when,
@@ -78,22 +77,11 @@ Assistant: {assistant}
 """
 
 
+_ALLOWED_OPS = frozenset({"create", "reschedule", "cancel", "skip", "move"})
+
+
 def _parse_ops(text: str) -> list[dict]:
-    text = text.strip()
-    if text.startswith("```"):
-        text = re.sub(r"^```[a-zA-Z]*\n?|\n?```$", "", text).strip()
-    start, end = text.find("["), text.rfind("]")
-    if start == -1 or end == -1 or end < start:
-        return []
-    try:
-        data = json.loads(text[start : end + 1])
-    except json.JSONDecodeError:
-        return []
-    return [
-        d for d in data
-        if isinstance(d, dict)
-        and d.get("op") in {"create", "reschedule", "cancel", "skip", "move"}
-    ]
+    return parse_ops(text, _ALLOWED_OPS)
 
 
 # Ops whose schema defines "title" as the NEW value, not an identifier. Looking
