@@ -250,6 +250,9 @@ class Settings(BaseSettings):
     # prose). Off by default: on a server others can reach, fetching arbitrary
     # URLs on request is an SSRF primitive.
     enable_docs_url_ingest: bool = False
+    # Byte cap for POST /documents/upload. Larger than the 2 MB text-body cap
+    # because PDF/DOCX containers are bulkier than the prose they yield.
+    docs_upload_max_bytes: int = Field(10_000_000, ge=1)
 
     # --- Tasks / to-dos ---
     # Master switch: inject open tasks into each turn (the read path) so the model

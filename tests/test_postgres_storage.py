@@ -160,6 +160,76 @@ def test_postgres_undo_ledgers_delegate(monkeypatch: pytest.MonkeyPatch) -> None
     assert calls == ["calendar", "task"]
 
 
+def test_postgres_task_undo_reverts_latest_batch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression: the Postgres branch of tasks undo_latest must revert the batch
+    and return the user-facing summary, not silently no-op (mis-pasted guard)."""
+    settings = Settings(storage_backend="postgres", database_url="postgres://example")
+
+    from assistant import storage_postgres
+    from assistant.calendar.context import now
+    from assistant.tasks import store as task_store
+    from assistant.tasks import undo as task_undo
+
+    applied_at = now(settings).isoformat(timespec="seconds")
+    rows = [
+        {
+            "id": 7, "thread_id": "thread", "batch_id": "b1", "task_id": "t1",
+            "op": "add", "summary": "added: Pay bill", "before_json": None,
+            "applied_at": applied_at, "undone_at": None,
+        }
+    ]
+    undone: list[list[int]] = []
+    monkeypatch.setattr(storage_postgres, "task_write_rows", lambda _s, thread_id: rows)
+    monkeypatch.setattr(
+        storage_postgres, "delete_task",
+        lambda _s, task_id: task_store.Task(id=task_id, title="Pay bill"),
+    )
+    monkeypatch.setattr(
+        storage_postgres, "mark_task_writes_undone",
+        lambda _s, ids, at: undone.append(ids),
+    )
+
+    assert task_undo.undo_latest(settings, "thread", 15) == "Undone: removed: Pay bill"
+    assert undone == [[7]]
+
+    monkeypatch.setattr(storage_postgres, "task_write_rows", lambda _s, thread_id: [])
+    assert task_undo.undo_latest(settings, "thread", 15) == "Nothing to undo."
+
+
+def test_postgres_calendar_undo_reverts_latest_batch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Mirror of the tasks test so the calendar twin stays pinned too."""
+    settings = Settings(storage_backend="postgres", database_url="postgres://example")
+
+    from assistant import storage_postgres
+    from assistant.calendar import store as calendar_store
+    from assistant.calendar import undo as calendar_undo
+    from assistant.calendar.context import now
+
+    applied_at = now(settings).isoformat(timespec="seconds")
+    rows = [
+        {
+            "id": 3, "thread_id": "thread", "batch_id": "b1", "event_id": "e1",
+            "op": "create", "summary": "created: Dentist", "before_json": None,
+            "applied_at": applied_at, "undone_at": None,
+        }
+    ]
+    undone: list[list[int]] = []
+    monkeypatch.setattr(storage_postgres, "calendar_write_rows", lambda _s, thread_id: rows)
+    monkeypatch.setattr(
+        storage_postgres, "delete_event",
+        lambda _s, event_id: calendar_store.Event(
+            id=event_id, title="Dentist", start="2026-07-09T12:00:00+02:00"
+        ),
+    )
+    monkeypatch.setattr(
+        storage_postgres, "mark_calendar_writes_undone",
+        lambda _s, ids, at: undone.append(ids),
+    )
+
+    assert calendar_undo.undo_latest(settings, "thread", 15) == "Undone: removed: Dentist"
+    assert undone == [[3]]
+
+
 def test_postgres_reminder_ledgers_delegate(monkeypatch: pytest.MonkeyPatch) -> None:
     settings = Settings(storage_backend="postgres", database_url="postgres://example")
 

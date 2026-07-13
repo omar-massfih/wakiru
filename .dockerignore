@@ -4,7 +4,10 @@ __pycache__
 *.py[cod]
 .pytest_cache
 .ruff_cache
-.env
+.mypy_cache
+.env*
 .DS_Store
 memory/
+models/
 .cursor/
+.vercel/

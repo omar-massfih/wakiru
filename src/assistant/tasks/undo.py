@@ -144,16 +144,6 @@ def undo_latest(settings: Settings, thread_id: str, window_minutes: int) -> str:
     if settings.storage_backend == "postgres":
         from .. import storage_postgres
 
-        rows = storage_postgres.task_write_rows(settings, thread_id)
-        if not rows:
-            return None
-        applied_at = parse_dt(str(rows[0]["applied_at"]))
-        if applied_at is None or applied_at < cutoff:
-            return None
-        return applied_at
-    if settings.storage_backend == "postgres":
-        from .. import storage_postgres
-
         all_rows = storage_postgres.task_write_rows(settings, thread_id)
         if not all_rows:
             return "Nothing to undo."

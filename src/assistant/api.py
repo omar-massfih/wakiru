@@ -444,12 +444,26 @@ def docs_add(req: DocRequest) -> dict:
 @app.post("/documents/upload", dependencies=[Depends(require_token)])
 async def docs_upload(file: UploadFile, title: str = Form("")) -> dict:
     """Ingest an uploaded file (PDF, DOCX, or any text-like format)."""
-    content = await file.read()
+    settings = get_settings()
+    # Read in bounded chunks: multipart bodies bypass the pydantic max_length
+    # caps, so an unmetered read() would buffer an arbitrarily large upload.
+    limit = settings.docs_upload_max_bytes
+    pieces: list[bytes] = []
+    received = 0
+    while chunk := await file.read(1 << 20):
+        received += len(chunk)
+        if received > limit:
+            raise HTTPException(
+                status_code=413,
+                detail=f"Upload exceeds the {limit}-byte limit (DOCS_UPLOAD_MAX_BYTES).",
+            )
+        pieces.append(chunk)
+    content = b"".join(pieces)
     try:
         text = docs_extract.extract_text(file.filename or "", content)
     except docs_extract.ExtractionError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    doc = docs_store.add_document(get_settings(), title or file.filename or "", text)
+    doc = docs_store.add_document(settings, title or file.filename or "", text)
     return {"id": doc.id, "title": doc.title, "chunks": doc.chunks, "added": doc.added}
 
 

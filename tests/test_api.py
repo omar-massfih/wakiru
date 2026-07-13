@@ -547,3 +547,29 @@ def test_doc_under_the_limit_ingests(client, monkeypatch) -> None:
 def test_oversized_search_query_is_rejected(client) -> None:
     resp = client(None).get("/documents/search", params={"q": "x" * 1_001})
     assert resp.status_code == 422
+
+
+def test_oversized_upload_is_rejected(tmp_path, monkeypatch) -> None:
+    import assistant.api as api
+
+    settings = Settings(memory_dir=str(tmp_path / "m"), docs_upload_max_bytes=1_000)
+    monkeypatch.setattr(api, "get_settings", lambda: settings)
+    resp = TestClient(api.app).post(
+        "/documents/upload", files={"file": ("big.txt", b"x" * 1_001, "text/plain")}
+    )
+    assert resp.status_code == 413
+
+
+def test_upload_under_the_limit_ingests(tmp_path, monkeypatch) -> None:
+    import assistant.api as api
+
+    settings = Settings(memory_dir=str(tmp_path / "m"), docs_upload_max_bytes=1_000)
+    monkeypatch.setattr(api, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        "assistant.memory.embeddings._embed",
+        lambda texts, prefix="", settings=None: [[1.0] + [0.0] * 63 for _ in texts],
+    )
+    resp = TestClient(api.app).post(
+        "/documents/upload", files={"file": ("ok.txt", b"short doc", "text/plain")}
+    )
+    assert resp.status_code == 200
