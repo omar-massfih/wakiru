@@ -246,9 +246,10 @@ def test_cacheable_system_message_marks_only_anthropic() -> None:
     assert marked.content[0]["text"] == "base"
 
 
-def test_reply_prompt_carries_the_base_system_prompt(monkeypatch, tmp_path) -> None:
+def test_reply_prompt_carries_the_persona(monkeypatch, tmp_path) -> None:
     """The persistent persona block must lead every reply-path prompt."""
-    from assistant import agent as agent_module
+    from assistant import persona
+    from assistant.agent import build_agent
     from assistant.chat import run_chat
 
     seen: dict[str, str] = {}
@@ -266,9 +267,9 @@ def test_reply_prompt_carries_the_base_system_prompt(monkeypatch, tmp_path) -> N
         enable_tasks=False,
         enable_docs=False,
     )
-    agent = agent_module.build_agent(settings)
+    agent = build_agent(settings)
     run_chat(agent, "hello", "t-prompt", settings=settings)
-    assert agent_module.BASE_SYSTEM_PROMPT.splitlines()[0] in seen["prompt"]
+    assert persona.system_prompt(settings).splitlines()[0] in seen["prompt"]
 
 
 # --- background working-memory summarization -------------------------------- #

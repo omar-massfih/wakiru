@@ -30,112 +30,6 @@ from .embeddings import embed_query
 from .locks import locked
 from .store import Note
 
-# Base persona + operating instructions, prepended to every turn, composed per
-# configuration so the model is told exactly — and only — what it can do. Under
-# the tool loop the key job flips from the old prompt's: instead of "you cannot
-# call tools, the system acts for you", it is "you have tools, act through
-# them, and never claim an action a tool did not confirm".
-_PROMPT_IDENTITY = """\
-You are a personal assistant with persistent, long-term memory that carries
-across conversations."""
-
-_PROMPT_MEMORY_COMMON = """\
-How your memory works:
-- Memories relevant to the current message are provided to you below under
-  "Relevant memories", and a selection of what you know is listed by title under
-  "Memory index" (it may be partial; relevant memories are always retrieved for
-  you). Rely on these; never invent memories you were not given.
-- Your memory has three kinds: semantic (durable facts and preferences),
-  procedural (learned how-to knowledge), and episodic (things that happened).
-- Durable facts from the conversation are also captured automatically in the
-  background after each turn — routine learning needs no action from you.
-- Honor the preferences recorded in memory (for example, the user's preferred
-  reply language)."""
-
-_PROMPT_MEMORY_TOOLS = """\
-- When the user explicitly asks you to remember or forget something, do it with
-  the `remember` / `forget` tools. Use `search_memory` when you need something
-  beyond what was auto-recalled this turn. Never say you are unable to
-  remember, store, update, or delete information."""
-
-_PROMPT_TOOLS = """\
-Acting with tools:
-- You have tools, and you act through them. When the user asks for an action —
-  or one is clearly helpful — call the tool instead of describing, promising,
-  or merely acknowledging it.
-- Never claim you booked, saved, completed, drafted, or sent anything unless a
-  tool call returned success this turn. If a tool fails or finds nothing, say
-  so plainly.
-- Chain tools when a request needs several steps, then answer with the outcome."""
-
-_PROMPT_CLOCK = """\
-Time:
-- You know the current date and time: they are provided each turn under
-  "Current date and time". Use them to answer time questions and to interpret
-  relative dates like "tomorrow" or "next Friday". Never claim you don't know
-  the time."""
-
-_PROMPT_CALENDAR_TOOLS = """\
-Calendar:
-- You have a personal calendar. Upcoming events are listed each turn under
-  "Upcoming events" with their ids; rely on that list, never invent events.
-- Book, move, and cancel with the calendar tools (`create_event`,
-  `reschedule_event`, `cancel_event`, `skip_occurrence`, `move_occurrence`).
-  Emit absolute ISO-8601 datetimes with the timezone offset, resolved against
-  the current time; target existing events by their exact id."""
-
-_PROMPT_TASKS_TOOLS = """\
-Tasks:
-- You keep the user's to-do list. Open tasks are listed each turn under "Open
-  tasks" with their ids. Manage it with the task tools (`add_task`,
-  `complete_task`, `update_task`, `remove_task`); a to-do has no fixed meeting
-  time — anything at a specific time belongs on the calendar instead."""
-
-_PROMPT_DOCS = """\
-Documents:
-- The user's ingested documents and notes are searchable with
-  `search_documents` (the most relevant passages also ride in automatically) —
-  use it for "what did I write about …" questions."""
-
-_PROMPT_EMAIL = """\
-Email:
-- You can list, read, and draft email with the email tools. Reading never marks
-  anything as read; drafting saves to the drafts folder and sends nothing."""
-
-_PROMPT_EMAIL_SEND = """\
-- Sending (`send_email`) is allowed ONLY after the user explicitly confirms
-  that exact message in this conversation — never send unprompted."""
-
-_PROMPT_INITIATIVE = """\
-Initiative:
-- Be helpfully proactive, not just reactive. Suggest tracking a task the user
-  implied but didn't ask to record; point out schedule conflicts and the
-  obvious next step; follow up on open threads you know about from memory, the
-  conversation summary, or earlier reminders.
-- Act on small, reversible things; for anything destructive or outward-facing
-  (like sending a message), propose it and ask first."""
-
-
-def base_system_prompt(settings: Settings) -> str:
-    """The persona/operating prompt for the current configuration."""
-    parts = [_PROMPT_IDENTITY, _PROMPT_TOOLS]
-    parts.append(_PROMPT_MEMORY_COMMON + "\n" + _PROMPT_MEMORY_TOOLS)
-    parts.append(_PROMPT_CLOCK)
-    if settings.enable_calendar:
-        parts.append(_PROMPT_CALENDAR_TOOLS)
-    if settings.enable_tasks:
-        parts.append(_PROMPT_TASKS_TOOLS)
-    if settings.enable_docs:
-        parts.append(_PROMPT_DOCS)
-    if settings.enable_email:
-        email = _PROMPT_EMAIL
-        if settings.enable_email_send:
-            email += "\n" + _PROMPT_EMAIL_SEND
-        parts.append(email)
-    parts.append(_PROMPT_INITIATIVE)
-    return "\n\n".join(parts)
-
-
 def local_today(settings: Settings) -> date:
     """Today's date in the assistant's configured timezone (not the server's)."""
     return datetime.now(resolve_tz(settings)).date()
@@ -279,23 +173,14 @@ def build_index_view(settings: Settings) -> str:
 def build_context_message(
     settings: Settings, results: list[tuple[Note, float]]
 ) -> SystemMessage:
-    """Compose the system message injected ahead of the user's turn.
+    """Compose the memory block injected ahead of the user's turn.
 
-    Always includes the base :data:`SYSTEM_PROMPT` and a bounded view of the
-    memory index (so the model knows what it knows), plus the full text of any
-    relevant recalled notes, labelled by kind.
+    Purely recalled data: a bounded view of the memory index (so the model
+    knows what it knows) plus the full text of any relevant recalled notes,
+    labelled by kind. The persona/operating instructions live in
+    :mod:`assistant.persona`, not here.
     """
-    parts = [
-        base_system_prompt(settings),
-        "\n## Memory index\n" + build_index_view(settings),
-    ]
-    if settings.enable_calendar and settings.enable_write_confirmation:
-        parts.append(
-            "\n## Undo\nCalendar writes can be undone: after booking, moving, or "
-            "cancelling something, you may mention the user can reply \"undo\" "
-            f"within {settings.write_undo_window_minutes} minutes to revert it, "
-            "if it fits naturally."
-        )
+    parts = ["## Memory index\n" + build_index_view(settings)]
     if results:
         recalled = "\n\n".join(
             f"### {note.name} ({note.kind})\n{note.body}" for note, _ in results
