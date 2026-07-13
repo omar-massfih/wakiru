@@ -227,6 +227,10 @@ class Settings(BaseSettings):
     # allowed when email is on; sending is not, unless this is deliberately set.
     # The assistant never sends in the background — only on an explicit request.
     enable_email_send: bool = False
+    # Minutes between background refreshes of the unread-mail snapshot that is
+    # injected into each turn's context (IMAP never runs on the reply path).
+    # 0 disables both the refresh and the per-turn mail block.
+    email_snapshot_minutes: int = 15
 
     # --- Documents / notes ---
     # Master switch: ingest documents (chunked + embedded) and surface the most

@@ -2,23 +2,18 @@
 
 Graph shape::
 
-    START -> recall -> agenda -> tasks -> profile -> agent
-    agent  -> tools -> agent   (while the model calls tools, up to a cap)
-    agent  -> END              (a plain-text reply ends the turn)
+    START -> context -> agent
+    agent -> tools -> agent   (while the model calls tools, up to a cap)
+    agent -> END              (a plain-text reply ends the turn)
 
-* **recall** — semantic memory lookup for the current turn (the latest message
-  expanded with recent context, so follow-ups retrieve well); the retrieved
-  context is stashed ephemerally (overwritten each turn, never accumulated) and
-  the recalled notes are reinforced.
-* **agenda** — the current time plus upcoming calendar events, stashed
-  ephemerally so the model has a clock and knows what's scheduled.
-* **tasks** — the open to-do list, stashed ephemerally so the model knows what's
-  outstanding.
-* **profile** — the user's durable preferences (notes tagged ``profile``:
-  working hours, locations, quiet hours, tone), so replies and scheduling
-  suggestions fit the person.
-* **agent** — feed ``[recall] + [profile] + [agenda] + [tasks] + history`` to
-  the model with the tool registry bound (:mod:`assistant.tools`).
+* **context** — one assembly pass over the provider registry
+  (:mod:`assistant.context_providers`): recalled memories (the latest message
+  expanded with recent context, so follow-ups retrieve well), the user's
+  profile, the agenda, open tasks, and the unread-mail snapshot. Stashed
+  ephemerally (overwritten each turn, never accumulated); recalled notes are
+  reinforced as a side effect.
+* **agent** — feed ``persona + context blocks + summary + history`` to the
+  model with the tool registry bound (:mod:`assistant.tools`).
 * **tools** — execute the model's tool calls (calendar, tasks, memory, docs,
   email) through guarded write paths, so the undo ledger and ambiguity guards
   keep working. The loop is bounded by ``tool_max_rounds``; past it, pending
@@ -59,26 +54,20 @@ from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
 from . import persona
-from .calendar import agenda_context
 from .config import Settings, get_settings
-from .docs import docs_context
+from .context_providers import build_context
 from .docs import store as docs_store
 from .llm import build_model
-from .memory import index, recall_context
-from .memory.profile import profile_context
-from .tasks import tasks_context
+from .memory import index
 from .tools import ToolContext, available_tools, execute_tool
 
 logger = logging.getLogger(__name__)
 
 
 class BrainState(MessagesState):
-    """Conversation state plus ephemeral per-turn recall + a rolling summary."""
+    """Conversation state plus ephemeral per-turn context + a rolling summary."""
 
-    recall: str
-    agenda: str
-    tasks: str
-    profile: str
+    context: dict[str, str]
     summary: str
     batch_id: str
     tool_rounds: int
@@ -280,66 +269,32 @@ def build_agent(settings: Settings | None = None) -> CompiledStateGraph:
         model.bind_tools([spec.to_openai_tool() for spec in specs]) if specs else model
     )
 
-    def recall(state: BrainState) -> dict:
+    def context(state: BrainState, config: RunnableConfig) -> dict:
+        """Assemble every enabled feature's context block for this turn.
+
+        One node instead of one per feature: the provider registry
+        (:mod:`assistant.context_providers`) decides what rides in, so a new
+        feature plugs into the prompt without touching the graph. Ephemeral —
+        overwritten each turn, never accumulated.
+        """
         query = expanded_recall_query(
             state["messages"], state.get("summary", ""), settings
         )
-        content = recall_context(settings, query).content
-        # Fold in the most relevant document excerpts on the same channel, so
-        # "what did I write about X" is answered from ingested docs too.
-        try:
-            docs = docs_context(settings, query)
-        except Exception:
-            logger.exception("document recall failed; continuing without it")
-            docs = ""
-        if docs:
-            content = f"{content}\n\n{docs}" if content else docs
+        thread_id = config.get("configurable", {}).get("thread_id", "")
+        blocks = build_context(settings, query, thread_id)
         # First node of the turn: reset the per-turn tool-loop state too.
         return {
-            "recall": content,
+            "context": blocks,
             "batch_id": uuid.uuid4().hex,
             "tool_rounds": 0,
             "tools_exhausted": False,
         }
 
-    def agenda(state: BrainState) -> dict:
-        """Give the model a clock and today's schedule (ephemeral, per turn)."""
-        if not settings.enable_calendar:
-            return {"agenda": ""}
-        try:
-            return {"agenda": agenda_context(settings)}
-        except Exception:
-            logger.exception("building agenda context failed; continuing without it")
-            return {"agenda": ""}
-
-    def tasks(state: BrainState) -> dict:
-        """Give the model the open to-do list (ephemeral, per turn)."""
-        if not settings.enable_tasks:
-            return {"tasks": ""}
-        try:
-            return {"tasks": tasks_context(settings)}
-        except Exception:
-            logger.exception("building tasks context failed; continuing without it")
-            return {"tasks": ""}
-
-    def profile(state: BrainState) -> dict:
-        """Give the model the user's durable preferences (ephemeral, per turn)."""
-        try:
-            return {"profile": profile_context(settings)}
-        except Exception:
-            logger.exception("building profile context failed; continuing without it")
-            return {"profile": ""}
-
     def call_agent(state: BrainState) -> dict:
         prefix: list[BaseMessage] = [persona.system_message(settings)]
-        if state.get("recall"):
-            prefix.append(SystemMessage(content=state["recall"]))
-        if state.get("profile"):
-            prefix.append(SystemMessage(content=state["profile"]))
-        if state.get("agenda"):
-            prefix.append(SystemMessage(content=state["agenda"]))
-        if state.get("tasks"):
-            prefix.append(SystemMessage(content=state["tasks"]))
+        for _name, block in (state.get("context") or {}).items():
+            if block:
+                prefix.append(SystemMessage(content=block))
         if state.get("summary"):
             prefix.append(
                 SystemMessage(content="Conversation so far:\n" + state["summary"])
@@ -390,16 +345,10 @@ def build_agent(settings: Settings | None = None) -> CompiledStateGraph:
         return END
 
     graph = StateGraph(BrainState)
-    graph.add_node("recall", recall)
-    graph.add_node("agenda", agenda)
-    graph.add_node("tasks", tasks)
-    graph.add_node("profile", profile)
+    graph.add_node("context", context)
     graph.add_node("agent", call_agent)
-    graph.add_edge(START, "recall")
-    graph.add_edge("recall", "agenda")
-    graph.add_edge("agenda", "tasks")
-    graph.add_edge("tasks", "profile")
-    graph.add_edge("profile", "agent")
+    graph.add_edge(START, "context")
+    graph.add_edge("context", "agent")
     if specs:
         graph.add_node("tools", run_tools)
         graph.add_conditional_edges("agent", route_after_agent, ["tools", END])

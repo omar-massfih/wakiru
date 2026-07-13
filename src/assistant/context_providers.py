@@ -1,0 +1,123 @@
+"""Per-turn context assembly — every feature feeds the brain the same way.
+
+The graph used to wire one hand-written node per feature (recall, agenda,
+tasks, profile), and anything without a node — email — simply never reached
+the model. This registry replaces that: a feature contributes context by
+registering a :class:`ContextProvider` (a name, an enabled-flag, and a
+provide function), and :func:`build_context` runs every enabled provider for
+the turn. Registry order is prompt order.
+
+Providers are isolated: one failing provider logs and contributes nothing,
+exactly as the old per-node try/excepts did. A provider must be fast — it runs
+on the reply path — so anything slow (network I/O like IMAP) must serve from a
+cache refreshed off-path (see :mod:`assistant.mail.snapshot`).
+"""
+
+from __future__ import annotations
+
+import logging
+from collections.abc import Callable
+from dataclasses import dataclass
+
+from .config import Settings
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class TurnContext:
+    """What a provider may look at when composing its block."""
+
+    settings: Settings
+    query: str  # the expanded recall query for this turn
+    thread_id: str
+
+
+@dataclass(frozen=True)
+class ContextProvider:
+    """One feature's per-turn contribution to the prompt."""
+
+    name: str  # state key + log label
+    enabled: Callable[[Settings], bool]
+    provide: Callable[[TurnContext], str]  # "" contributes nothing
+
+
+def _recall(ctx: TurnContext) -> str:
+    """Recalled memories plus the most relevant document excerpts.
+
+    Folded into one block so "what did I write about X" is answered from
+    ingested docs as readily as from memory notes.
+    """
+    from .docs import docs_context
+    from .memory import recall_context
+
+    content = recall_context(ctx.settings, ctx.query).content
+    if not isinstance(content, str):
+        content = str(content)
+    if ctx.settings.enable_docs:
+        try:
+            docs = docs_context(ctx.settings, ctx.query)
+        except Exception:
+            logger.exception("document recall failed; continuing without it")
+            docs = ""
+        if docs:
+            content = f"{content}\n\n{docs}" if content else docs
+    return content
+
+
+def _profile(ctx: TurnContext) -> str:
+    from .memory.profile import profile_context
+
+    return profile_context(ctx.settings)
+
+
+def _agenda(ctx: TurnContext) -> str:
+    from .calendar import agenda_context
+
+    return agenda_context(ctx.settings)
+
+
+def _tasks(ctx: TurnContext) -> str:
+    from .tasks import tasks_context
+
+    return tasks_context(ctx.settings)
+
+
+def _mail(ctx: TurnContext) -> str:
+    """The cached unread-mail snapshot — never live IMAP on the reply path."""
+    from .mail.snapshot import current
+
+    return current(ctx.settings)
+
+
+def default_providers() -> list[ContextProvider]:
+    """The standard registry, in prompt order."""
+    return [
+        ContextProvider("recall", lambda s: True, _recall),
+        ContextProvider("profile", lambda s: s.enable_profile, _profile),
+        ContextProvider("agenda", lambda s: s.enable_calendar, _agenda),
+        ContextProvider("tasks", lambda s: s.enable_tasks, _tasks),
+        ContextProvider(
+            "mail", lambda s: s.enable_email and s.email_snapshot_minutes > 0, _mail
+        ),
+    ]
+
+
+def build_context(
+    settings: Settings,
+    query: str,
+    thread_id: str,
+    providers: list[ContextProvider] | None = None,
+) -> dict[str, str]:
+    """Run every enabled provider for one turn, each isolated from the others."""
+    ctx = TurnContext(settings=settings, query=query, thread_id=thread_id)
+    blocks: dict[str, str] = {}
+    for provider in providers if providers is not None else default_providers():
+        if not provider.enabled(settings):
+            continue
+        try:
+            blocks[provider.name] = provider.provide(ctx)
+        except Exception:
+            logger.exception("context provider %r failed; continuing without it", provider.name)
+            blocks[provider.name] = ""
+    return blocks
