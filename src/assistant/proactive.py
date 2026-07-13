@@ -1,22 +1,16 @@
 """Proactive loop-in — connect unprompted pushes back to the conversation.
 
-Reminders and the daily briefing are computed by wall-clock tickers, outside
-any conversation. Historically they were fire-and-forget: the push landed on
-the user's phone but the assistant had no record of it, so "what was that
-reminder about?" drew a blank. This module closes that loop two ways:
+Reminders, the briefing, and heartbeat messages are pushed by background
+paths, outside any conversation. Historically they were fire-and-forget: the
+push landed on the user's phone but the assistant had no record of it, so
+"what was that reminder about?" drew a blank. :func:`record_push` closes the
+loop: it appends what was delivered to each target conversation's working
+memory (as an ``AIMessage``, exactly as the user saw it), so the next turn on
+that thread knows about it and can follow up.
 
-* :func:`record_push` appends what was delivered to each authorized chat's
-  working memory (as an ``AIMessage``, exactly as the user saw it), so the
-  next turn on that thread knows about it and can follow up.
-* :func:`compose_briefing` writes the daily briefing *with* the user's profile
-  context through the configured provider (replacing the old raw-codex polish
-  pass), so the one proactive message that is prose reads like the assistant,
-  not a template.
-
-Background compositions here bind no tools; the heartbeat
-(:mod:`assistant.heartbeat`) binds the restricted ``mode="heartbeat"``
-registry, which can never contain ``send_email`` — either way, no background
-path can send mail.
+Nothing here binds tools; the heartbeat (:mod:`assistant.heartbeat`) binds
+the restricted ``mode="heartbeat"`` registry, which can never contain
+``send_email`` — either way, no background path can send mail.
 """
 
 from __future__ import annotations
@@ -29,14 +23,6 @@ from langgraph.graph.state import CompiledStateGraph
 from .config import Settings
 
 logger = logging.getLogger(__name__)
-
-_BRIEFING_INSTRUCTION = (
-    "You are the user's personal assistant composing their daily morning "
-    "briefing. Rewrite the digest below as a short, friendly briefing — a few "
-    "sentences, plain text, no headings. Lead with what matters most today. "
-    "Do not invent anything that is not in the digest. You cannot call tools "
-    "or take actions here."
-)
 
 
 def target_threads(settings: Settings) -> list[str]:
@@ -94,23 +80,3 @@ def record_push(
         record_to_thread(agent, settings, thread_id, text)
 
 
-def compose_briefing(settings: Settings, digest: str) -> str:
-    """One profile-aware LLM pass over the digest; the raw digest is the fallback."""
-    from .llm import complete_text
-    from .memory.profile import profile_context
-
-    system = _BRIEFING_INSTRUCTION
-    try:
-        profile = profile_context(settings)
-    except Exception:
-        logger.exception("briefing: profile context failed; composing without it")
-        profile = ""
-    if profile:
-        system += "\n\n" + profile
-
-    try:
-        reply = complete_text(digest, settings, system=system)
-    except Exception:
-        logger.exception("briefing composition failed; sending the raw digest")
-        return digest
-    return reply.strip() or digest

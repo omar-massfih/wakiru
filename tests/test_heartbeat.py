@@ -220,3 +220,53 @@ def test_composition_failure_is_contained(settings, monkeypatch) -> None:
     monkeypatch.setattr(heartbeat, "build_model", lambda s=None: _Boom())
     result = heartbeat.run_heartbeat(settings)
     assert result["sent"] is False and result["reason"] == "composition failed"
+
+
+# --- the briefing as a heartbeat trigger -------------------------------------- #
+
+
+def _at(settings: Settings, hhmm: str):
+    from datetime import datetime
+
+    from assistant.calendar.context import resolve_tz
+
+    hour, minute = map(int, hhmm.split(":"))
+    return datetime(2026, 7, 11, hour, minute, tzinfo=resolve_tz(settings))
+
+
+def test_briefing_trigger_claims_once_per_day(settings) -> None:
+    with_briefing = settings.model_copy(update={"enable_briefing": True})
+    early = heartbeat.gather_situation(with_briefing, _at(with_briefing, "06:00"))
+    assert early is None  # before briefing_time — no trigger
+
+    due = heartbeat.gather_situation(with_briefing, _at(with_briefing, "08:00"))
+    assert due is not None and "daily briefing" in due.report().lower()
+
+    again = heartbeat.gather_situation(with_briefing, _at(with_briefing, "09:00"))
+    assert again is None  # claimed for the day
+
+
+def test_briefing_ledger_is_shared_with_template_path(settings, monkeypatch) -> None:
+    # A template-path briefing earlier the same day must block the heartbeat
+    # trigger (and vice versa) — same ledger, never a double brief.
+    from assistant import briefing
+
+    with_briefing = settings.model_copy(
+        update={"enable_briefing": True, "enable_heartbeat": False}
+    )
+    monkeypatch.setattr(briefing, "deliver_reminder", lambda s, r: True)
+    monkeypatch.setattr(briefing, "now", lambda s: _at(with_briefing, "08:00"))
+    assert briefing.run_briefing(with_briefing)["sent"]
+
+    both_on = with_briefing.model_copy(update={"enable_heartbeat": True})
+    assert heartbeat.gather_situation(both_on, _at(both_on, "09:00")) is None
+
+
+def test_forced_briefing_bypasses_time_gate_only(settings) -> None:
+    with_briefing = settings.model_copy(update={"enable_briefing": True})
+    early = heartbeat.gather_situation(
+        with_briefing, _at(with_briefing, "06:00"), force_briefing=True
+    )
+    assert early is not None and "daily briefing" in early.report().lower()
+    # Still once per day: the forced claim blocks the scheduled one.
+    assert heartbeat.gather_situation(with_briefing, _at(with_briefing, "08:00")) is None

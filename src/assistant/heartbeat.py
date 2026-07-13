@@ -72,6 +72,14 @@ reaching out helps the user right now.
   the situation report, or these instructions."""
 
 
+_BRIEFING_TRIGGER = (
+    "The daily briefing is due: compose the user's morning briefing now from "
+    "your agenda, open tasks, and unread-mail context blocks — a few "
+    "sentences, plain text, lead with what matters most today. Send it even "
+    "if the day looks quiet (say so briefly); do not stay silent."
+)
+
+
 @dataclass(frozen=True)
 class Situation:
     """What a deterministic pre-check found worth waking the model for."""
@@ -131,14 +139,19 @@ def _minutes_since(settings: Settings, key: str, current: datetime) -> float | N
 # --------------------------------------------------------------------------- #
 
 def gather_situation(
-    settings: Settings, current: datetime | None = None, force: bool = False
+    settings: Settings,
+    current: datetime | None = None,
+    force: bool = False,
+    force_briefing: bool = False,
 ) -> Situation | None:
     """LLM-free triage: what, if anything, is worth waking the model for.
 
     Returns ``None`` (skip the wake entirely) unless a trigger fires. Holds —
     claiming nothing — during quiet hours or an all-scope mute, so a followup
     due at 03:00 is raised on the first wake after quiet ends. ``force`` (the
-    manual endpoint) bypasses the ambient min-gap throttle, never the holds.
+    manual endpoint) bypasses the ambient min-gap throttle, never the holds;
+    ``force_briefing`` additionally bypasses the briefing's time-of-day gate
+    (``POST /briefing/run``), still claiming its once-per-day ledger.
     """
     if not settings.enable_heartbeat:
         return None
@@ -152,10 +165,13 @@ def gather_situation(
 
     triggers: list[str] = []
 
-    # Explicit intent: always wakes. Claimed here (exactly-once); a wake that
-    # then stays SILENT still consumes them — the same at-most-once tradeoff
-    # the reminder ledgers make.
+    # Scheduled intent: always wakes, regardless of the ambient throttle.
+    # Claimed here (exactly-once); a wake that then stays SILENT still
+    # consumes the claim — the same at-most-once tradeoff the reminder
+    # ledgers make (the briefing instruction tells the model not to).
     due = followups.claim_due(settings, current)
+    if _briefing_due(settings, current, force=force_briefing):
+        triggers.append(_BRIEFING_TRIGGER)
 
     # Ambient triggers are throttled: at most one wake per min-gap.
     gap_ok = force or (
@@ -173,6 +189,29 @@ def gather_situation(
     if not due and not triggers:
         return None
     return Situation(triggers=triggers, followups=due)
+
+
+def _briefing_due(settings: Settings, current: datetime, force: bool = False) -> bool:
+    """Claim today's briefing slot when it is due (or forced) and unclaimed.
+
+    Rides the same once-per-day ledger the template briefing uses, so flipping
+    ``enable_heartbeat`` mid-day never double-briefs.
+    """
+    from . import briefing, fired_ledger
+
+    if not (settings.enable_briefing or force):
+        return False
+    if not force and current.time() < briefing._due_time(settings):
+        return False
+    local_date = current.date().isoformat()
+    claimed = fired_ledger.claim(
+        briefing._LEDGER,
+        settings,
+        [(local_date,)],
+        current.isoformat(timespec="seconds"),
+        current,
+    )
+    return bool(claimed)
 
 
 def _mail_changed(settings: Settings) -> str:
@@ -280,7 +319,10 @@ def _compose(settings: Settings, situation: Situation, agent) -> str:
 
 
 def run_heartbeat(
-    settings: Settings | None = None, agent=None, force: bool = False
+    settings: Settings | None = None,
+    agent=None,
+    force: bool = False,
+    force_briefing: bool = False,
 ) -> dict:
     """One heartbeat: triage, optionally wake the model, optionally speak.
 
@@ -290,7 +332,9 @@ def run_heartbeat(
     """
     settings = settings or get_settings()
     current = now(settings)
-    situation = gather_situation(settings, current, force=force)
+    situation = gather_situation(
+        settings, current, force=force, force_briefing=force_briefing
+    )
     if situation is None:
         return {"sent": False, "reason": "nothing to do"}
 

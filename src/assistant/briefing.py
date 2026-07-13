@@ -1,11 +1,13 @@
 """Daily briefing — one proactive digest per day, pushed like a reminder.
 
-Composes the existing read paths (agenda, open tasks, unread mail when email is
-on) into a single morning note and fans it out through
-:func:`assistant.notify.deliver_reminder`. Nothing here has its own data model:
-the only state is a fired ledger (same exactly-once pattern as
-:mod:`assistant.calendar.reminders`) so the ticker and a manual
-``POST /briefing/run`` can both drive :func:`run_briefing` safely.
+Assembles the existing read paths (agenda, open tasks, unread mail when email
+is on) into a single morning digest. With the heartbeat enabled the digest is
+composed by the model in Wakiru's own voice (the briefing is a heartbeat wake
+trigger); without it, the assembled sections are delivered verbatim through
+:func:`assistant.notify.deliver_reminder`. Nothing here has its own data
+model: the only state is a fired ledger (the shared
+:mod:`assistant.fired_ledger` driver) so the ticker, the heartbeat, and a
+manual ``POST /briefing/run`` can all drive it without double-sending.
 
 The briefing becomes *due* at ``briefing_time`` (local wall clock in
 ``TIMEZONE``) and fires on the first call at or after it that day — a server
@@ -62,25 +64,22 @@ def build_briefing(settings: Settings) -> str:
     return "\n\n".join(p for p in parts if p)
 
 
-def _polish(settings: Settings, digest: str) -> str:
-    """One profile-aware LLM pass over the digest; the raw digest is the fallback."""
-    if not settings.briefing_llm_polish:
-        return digest
-    from .proactive import compose_briefing
-
-    return compose_briefing(settings, digest)
-
-
 def run_briefing(
     settings: Settings | None = None, force: bool = False, agent=None
 ) -> dict:
     """Fire today's briefing if it is due and unsent; return what happened.
 
+    With the heartbeat enabled, the briefing is one of its wake triggers: the
+    model composes it in Wakiru's own voice, and this function is a thin
+    dispatcher into :func:`assistant.heartbeat.run_heartbeat` (same
+    once-per-day ledger, so flipping the flag never double-briefs). With the
+    heartbeat off, the assembled digest is delivered verbatim — no LLM cost.
+
     ``force=True`` (the manual endpoint) skips the time-of-day gate but still
     claims the ledger, so a forced briefing replaces — not duplicates — the
     scheduled one. With ``agent`` given (and ``enable_proactive_loop_in``), the
-    delivered briefing is also recorded into each authorized chat's working
-    memory, so the conversation knows what it was sent.
+    delivered briefing is also recorded into each conversation's working
+    memory, so the chat knows what it was sent.
     """
     settings = settings or get_settings()
     if not settings.enable_briefing and not force:
@@ -90,6 +89,12 @@ def run_briefing(
     local_date = current.date().isoformat()
     if not force and current.time() < _due_time(settings):
         return {"sent": False, "reason": "not due yet"}
+
+    if settings.enable_heartbeat:
+        from .heartbeat import run_heartbeat
+
+        return run_heartbeat(settings, agent=agent, force=force, force_briefing=force)
+
     if not force:
         # A quiet window reaching past briefing_time holds the briefing (nothing
         # is claimed) until the first tick after quiet ends.
@@ -108,13 +113,13 @@ def run_briefing(
     if not claimed:
         return {"sent": False, "reason": "already sent today"}
 
-    message = _polish(settings, build_briefing(settings))
+    message = build_briefing(settings)
     delivered = deliver_reminder(
         settings, {"title": "Daily briefing", "message": message}
     )
     if not delivered:
         # Claim stands even if no channel is configured — retrying every tick
-        # would re-run the LLM polish for a push that can never land.
+        # would rebuild a push that can never land.
         logger.warning("briefing built but no delivery channel accepted it")
     else:
         from .proactive import record_push

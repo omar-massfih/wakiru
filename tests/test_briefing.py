@@ -1,7 +1,8 @@
 """Daily briefing tests — the due-time gate, the once-per-day ledger, delivery.
 
-No network and no LLM: delivery and the polish call are monkeypatched. The
-ledger runs for real against a tmp SQLite file.
+No network and no LLM: delivery is monkeypatched, and the heartbeat is off in
+the fixture so the template path runs. The ledger runs for real against a tmp
+SQLite file.
 """
 
 from __future__ import annotations
@@ -19,7 +20,6 @@ def settings(tmp_path) -> Settings:
     return Settings(
         memory_dir=str(tmp_path / "memory"),
         enable_briefing=True,
-        briefing_llm_polish=False,  # keep run_codex out of these tests
         enable_email=False,
     )
 
@@ -77,38 +77,55 @@ def test_force_skips_time_gate_but_claims_the_day(settings, delivered, monkeypat
     assert len(delivered) == 1
 
 
-def test_polish_failure_falls_back_to_raw_digest(settings, delivered, monkeypatch) -> None:
-    settings.briefing_llm_polish = True
-
-    class _BoomModel:
-        def invoke(self, *_a, **_k):
-            raise RuntimeError("model unavailable")
-
-    # compose_briefing imports build_model from assistant.llm at call time.
-    monkeypatch.setattr("assistant.llm.build_model", lambda s=None: _BoomModel())
+def test_template_path_sends_digest_verbatim_without_llm(settings, delivered, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "assistant.llm.build_model",
+        lambda s=None: pytest.fail("the template briefing must not call the model"),
+    )
     _freeze_clock(monkeypatch, settings, "08:00")
     assert briefing.run_briefing(settings)["sent"]
     assert "Upcoming events" in delivered[0]["message"]
 
 
-def test_polish_composes_with_profile_context(settings, delivered, monkeypatch) -> None:
-    settings.briefing_llm_polish = True
-    seen: dict = {}
+def test_heartbeat_enabled_delegates_composition(settings, delivered, monkeypatch) -> None:
+    settings.enable_heartbeat = True
+    calls: dict = {}
 
-    class _EchoModel:
-        def invoke(self, messages):
-            seen["system"] = messages[0].content
-            return type("Msg", (), {"content": "God morgen! One meeting today."})()
+    def fake_run_heartbeat(s, agent=None, force=False, force_briefing=False):
+        calls.update(force=force, force_briefing=force_briefing)
+        return {"sent": True, "delivered": True, "message": "God morgen!"}
 
-    monkeypatch.setattr("assistant.llm.build_model", lambda s=None: _EchoModel())
-    monkeypatch.setattr(
-        "assistant.memory.profile.profile_context", lambda s: "## User profile\n- Norsk."
-    )
+    monkeypatch.setattr("assistant.heartbeat.run_heartbeat", fake_run_heartbeat)
     _freeze_clock(monkeypatch, settings, "08:00")
-    assert briefing.run_briefing(settings)["sent"]
-    assert delivered[0]["message"] == "God morgen! One meeting today."
-    assert "User profile" in seen["system"]
-    assert "cannot call tools" in seen["system"]  # no actions from a background path
+
+    result = briefing.run_briefing(settings)
+    assert result["message"] == "God morgen!"
+    assert calls == {"force": False, "force_briefing": False}
+    assert delivered == []  # delivery happens inside the heartbeat, not here
+
+
+def test_heartbeat_delegation_still_respects_due_time(settings, monkeypatch) -> None:
+    settings.enable_heartbeat = True
+    monkeypatch.setattr(
+        "assistant.heartbeat.run_heartbeat",
+        lambda *a, **k: pytest.fail("not due yet — the heartbeat must not run"),
+    )
+    _freeze_clock(monkeypatch, settings, "06:00")
+    assert briefing.run_briefing(settings) == {"sent": False, "reason": "not due yet"}
+
+
+def test_heartbeat_forced_briefing_passes_force_through(settings, monkeypatch) -> None:
+    settings.enable_heartbeat = True
+    calls: dict = {}
+
+    def fake_run_heartbeat(s, agent=None, force=False, force_briefing=False):
+        calls.update(force=force, force_briefing=force_briefing)
+        return {"sent": True}
+
+    monkeypatch.setattr("assistant.heartbeat.run_heartbeat", fake_run_heartbeat)
+    _freeze_clock(monkeypatch, settings, "06:00")  # before due time
+    assert briefing.run_briefing(settings, force=True)["sent"]
+    assert calls == {"force": True, "force_briefing": True}
 
 
 class _RecordingAgent:

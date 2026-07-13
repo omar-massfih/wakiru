@@ -298,11 +298,10 @@ class Settings(BaseSettings):
     # email is on) through the same channels reminders use.
     enable_briefing: bool = False
     # Local wall-clock time (HH:MM, in TIMEZONE) the briefing becomes due. The
-    # ticker fires it on the first tick at/after this time, exactly once per day.
+    # ticker fires it on the first tick at/after this time, exactly once per
+    # day. With the heartbeat enabled the model composes the briefing in its
+    # own voice; without it the assembled digest goes out verbatim (no LLM).
     briefing_time: str = "07:30"
-    # Rewrite the raw digest into a short natural-language morning note with one
-    # LLM call. False sends the assembled sections verbatim (no LLM cost).
-    briefing_llm_polish: bool = True
     # Record proactive pushes (reminders, the briefing) into each authorized
     # chat's working memory, so the conversation knows what was already sent
     # ("what was that reminder about?" works). No extra LLM cost.
