@@ -22,6 +22,16 @@ def test_humanize() -> None:
     assert phrasing._humanize(timedelta(days=1)) == "in 1 day"
 
 
+def test_humanize_rounds_up_to_clean_boundaries() -> None:
+    # The ticker fires seconds after each band boundary, so the countdown must
+    # read as the clean boundary — "in 45 min", never the jittery "in 44 min".
+    assert phrasing._humanize(timedelta(minutes=44, seconds=46)) == "in 45 min"
+    assert phrasing._humanize(timedelta(minutes=14, seconds=26)) == "in 15 min"
+    assert phrasing._humanize(timedelta(minutes=59, seconds=56)) == "in 1 hour"
+    assert phrasing._humanize(timedelta(0)) == "now"
+    assert phrasing._humanize(timedelta(seconds=-40)) == "now"  # at-start nudge
+
+
 def test_humanize_ago() -> None:
     assert phrasing._humanize_ago(timedelta(seconds=10)) == "just now"
     assert phrasing._humanize_ago(timedelta(minutes=15)) == "15 min ago"

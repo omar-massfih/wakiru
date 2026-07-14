@@ -30,6 +30,12 @@ _LEDGER = fired_ledger.FiredLedgerSpec(
 )
 
 
+# How long after its start an event still gets its one "starting now" nudge —
+# wide enough to cover ticker jitter and a short restart landing exactly on the
+# boundary. The ledger still dedupes, so the at-start band fires at most once.
+START_GRACE = timedelta(minutes=5)
+
+
 def _repeat_slot(remaining: timedelta, repeat_minutes: int) -> int:
     """Bucket a countdown into a stable per-interval slot (floored whole minutes).
 
@@ -45,7 +51,9 @@ def due_reminders(settings: Settings, current: datetime | None = None) -> list[d
     """Reminders that should fire as of ``current`` (defaults to the assistant's now).
 
     An event is due when it starts within the next L minutes for a configured lead
-    L (and is not already past). An event inside several lead windows at once (e.g.
+    L, plus one final "starting now" band just after it begins (within
+    :data:`START_GRACE`, keyed as lead/slot 0 or below so the countdown bands stay
+    distinct). An event inside several lead windows at once (e.g.
     booked half an hour ahead with leads of a day and an hour) yields ONE reminder,
     not one per lead: ``lead_minutes`` is the smallest due lead and ``covered_leads``
     lists every lead window the event is currently inside, so the caller can claim
@@ -69,8 +77,10 @@ def due_reminders(settings: Settings, current: datetime | None = None) -> list[d
     current = current or now(settings)
     horizon = current + timedelta(minutes=max(leads))
     # Expand recurring series so each occurrence is nudged on its own; the ledger
-    # keys on the occurrence start, so a weekly standup fires once per week.
-    events = recurrence.occurrences_in(settings, current, horizon)
+    # keys on the occurrence start, so a weekly standup fires once per week. The
+    # window opens START_GRACE early so a just-started event is still seen for
+    # its at-start nudge.
+    events = recurrence.occurrences_in(settings, current - START_GRACE, horizon)
 
     repeat = settings.reminder_repeat_minutes
     max_lead = max(leads)
@@ -82,10 +92,12 @@ def due_reminders(settings: Settings, current: datetime | None = None) -> list[d
         remaining = start - current
         if repeat > 0:
             # Repeat mode: begin at the outermost lead, then re-notify every
-            # `repeat` minutes until the event starts. Each countdown band is a
-            # distinct slot, claimed (and pushed) exactly once. Nothing fires once
-            # the event has started (remaining < 0).
-            if not (timedelta(0) <= remaining <= timedelta(minutes=max_lead)):
+            # `repeat` minutes until the event starts, plus ONE "starting now"
+            # nudge just after it begins (the single negative slot the grace
+            # window allows). Each countdown band is a distinct slot, claimed
+            # (and pushed) exactly once.
+            grace = min(START_GRACE, timedelta(minutes=repeat))
+            if not (-grace <= remaining <= timedelta(minutes=max_lead)):
                 continue
             slot = _repeat_slot(remaining, repeat)
             reminders.append(
@@ -105,6 +117,10 @@ def due_reminders(settings: Settings, current: datetime | None = None) -> list[d
             lead for lead in leads
             if timedelta(0) <= remaining <= timedelta(minutes=lead)
         )
+        if not due_leads and -START_GRACE <= remaining < timedelta(0):
+            # The at-start band: one final "starting now" nudge, keyed as lead 0
+            # so it dedupes independently of the ahead-of-time leads.
+            due_leads = [0]
         if due_leads:
             reminders.append(
                 {

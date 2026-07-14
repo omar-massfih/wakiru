@@ -15,7 +15,7 @@ from datetime import datetime, timedelta
 
 from .. import fired_ledger
 from ..calendar.context import now
-from ..calendar.reminders import _repeat_slot
+from ..calendar.reminders import START_GRACE, _repeat_slot
 from ..calendar.store import parse_dt
 from ..config import Settings, get_settings
 from ..notify import deliver_reminder
@@ -86,6 +86,9 @@ def due_task_reminders(settings: Settings, current: datetime | None = None) -> l
             lead for lead in leads
             if timedelta(0) <= remaining <= timedelta(minutes=lead)
         )
+        if not due_leads and -START_GRACE <= remaining < timedelta(0):
+            # The at-due band, mirroring the calendar's at-start nudge (lead 0).
+            due_leads = [0]
         if due_leads:
             reminders.append(
                 {

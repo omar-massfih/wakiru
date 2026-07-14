@@ -14,6 +14,7 @@ Messages never include the ⏰ prefix — the delivery channels prepend it.
 from __future__ import annotations
 
 import hashlib
+import math
 from datetime import datetime, timedelta
 
 from .calendar.context import resolve_tz
@@ -22,8 +23,12 @@ from .config import Settings
 
 
 def _humanize(delta: timedelta) -> str:
-    """Render a positive time-until as a short phrase: 'in 30 min' / 'in 1 hour'."""
-    minutes = round(delta.total_seconds() / 60)
+    """Render a positive time-until as a short phrase: 'in 30 min' / 'in 1 hour'.
+
+    Minutes round UP: the ticker fires seconds after each band boundary, so a
+    remaining 44m46s must read "in 45 min" — never the jittery "in 44 min".
+    """
+    minutes = math.ceil(delta.total_seconds() / 60)
     if minutes < 1:
         return "now"
     if minutes < 60:

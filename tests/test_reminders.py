@@ -68,8 +68,20 @@ def test_event_outside_lead_not_fired(settings) -> None:
 
 
 def test_past_event_not_fired(settings) -> None:
-    _event_in(settings, "Missed", minutes=-10)
+    _event_in(settings, "Missed", minutes=-10)  # beyond START_GRACE
     assert reminders.run_reminders(settings) == []
+
+
+def test_at_start_nudge_fires_once(settings) -> None:
+    # The moment the user asked to be reminded at gets its own push: an event
+    # that just started (the ticker lands a little late) fires the at-start
+    # band, keyed as lead 0, exactly once.
+    _event_in(settings, "Standup", minutes=-1)
+    fired = reminders.run_reminders(settings)
+    assert len(fired) == 1
+    assert fired[0]["lead_minutes"] == 0
+    assert "now" in fired[0]["message"]
+    assert reminders.run_reminders(settings) == []  # claimed; later ticks silent
 
 
 # --- dedupe ledger -------------------------------------------------------- #
@@ -346,6 +358,27 @@ def test_repeat_silent_after_start(tmp_path, monkeypatch) -> None:
 
     monkeypatch.setattr(reminders, "now", lambda s: base + timedelta(minutes=25))
     assert reminders.run_reminders(settings) == []  # 15 min past start -> nothing
+
+
+def test_repeat_at_start_band_fires_once(tmp_path, monkeypatch) -> None:
+    settings = Settings(
+        memory_dir=str(tmp_path / "memory"),
+        timezone="Europe/Oslo",
+        reminder_lead_minutes=[60],
+        reminder_repeat_minutes=15,
+    )
+    base = context.now(settings).replace(second=0, microsecond=0)
+    start = (base + timedelta(minutes=10)).isoformat(timespec="seconds")
+    store.create_event(settings, title="Kickoff", start=start)
+
+    # The tick lands 40s after the start (ticker jitter): one "starting now".
+    monkeypatch.setattr(reminders, "now", lambda s: base + timedelta(minutes=10, seconds=40))
+    fired = reminders.run_reminders(settings)
+    assert len(fired) == 1
+    assert "now" in fired[0]["message"]
+    # Next tick, still inside the grace window: the band is claimed, no repeat.
+    monkeypatch.setattr(reminders, "now", lambda s: base + timedelta(minutes=11, seconds=40))
+    assert reminders.run_reminders(settings) == []
 
 
 def test_repeat_skip_occurrence_stops_remaining_nudges(tmp_path, monkeypatch) -> None:
