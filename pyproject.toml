@@ -96,5 +96,5 @@ disable_error_code = [
 ]
 
 [[tool.mypy.overrides]]
-module = ["sqlite_vec"]
-ignore_missing_imports = true  # ships no py.typed marker
+module = ["sqlite_vec", "faster_whisper"]
+ignore_missing_imports = true  # ship no py.typed marker

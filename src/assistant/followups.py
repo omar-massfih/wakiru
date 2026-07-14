@@ -69,7 +69,7 @@ def _connect(settings: Settings) -> Iterator[sqlite3.Connection]:
 
 
 def _from_row(row: sqlite3.Row) -> Followup:
-    return Followup(**{key: row[key] for key in row.keys()})
+    return Followup(**dict(row))
 
 
 def add(

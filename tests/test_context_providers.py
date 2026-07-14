@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import pytest
 
-from assistant import context_providers
 from assistant.config import Settings
 from assistant.context_providers import ContextProvider, build_context
 

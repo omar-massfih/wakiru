@@ -221,12 +221,16 @@ def start_socket_mode(
     """
     # Imported lazily: slack-sdk is only needed when Socket Mode is configured.
     from slack_sdk.socket_mode.builtin import SocketModeClient
+    from slack_sdk.socket_mode.client import BaseSocketModeClient
     from slack_sdk.socket_mode.request import SocketModeRequest
     from slack_sdk.socket_mode.response import SocketModeResponse
     from slack_sdk.web import WebClient
 
+    app_token = settings.slack_app_token
+    if not app_token:
+        raise RuntimeError("Socket Mode needs slack_app_token (an xapp- token).")
     client = SocketModeClient(
-        app_token=settings.slack_app_token,
+        app_token=app_token,
         web_client=WebClient(token=settings.slack_bot_token),
     )
 
@@ -238,7 +242,7 @@ def start_socket_mode(
         except Exception:
             logger.exception("socket-mode slack turn failed")
 
-    def _listener(client_: SocketModeClient, request: SocketModeRequest) -> None:
+    def _listener(client_: BaseSocketModeClient, request: SocketModeRequest) -> None:
         client_.send_socket_mode_response(
             SocketModeResponse(envelope_id=request.envelope_id)
         )

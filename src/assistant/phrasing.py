@@ -14,7 +14,7 @@ Messages never include the ⏰ prefix — the delivery channels prepend it.
 from __future__ import annotations
 
 import hashlib
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from .calendar.context import resolve_tz
 from .calendar.store import parse_dt
@@ -59,12 +59,18 @@ def _pick(variants: list[str], *identity: object) -> str:
     return variants[digest[0] % len(variants)]
 
 
-def _clock(settings: Settings, iso: str) -> str | None:
-    """The local wall-clock time (HH:MM) of an ISO instant, if parseable."""
+def _local_dt(settings: Settings, iso: str) -> datetime | None:
+    """An ISO instant as a local wall-clock datetime, if parseable."""
     dt = parse_dt(iso)
     if dt is None:
         return None
-    return dt.astimezone(resolve_tz(settings)).strftime("%H:%M")
+    return dt.astimezone(resolve_tz(settings))
+
+
+def _clock(settings: Settings, iso: str) -> str | None:
+    """The local wall-clock time (HH:MM) of an ISO instant, if parseable."""
+    dt = _local_dt(settings, iso)
+    return None if dt is None else dt.strftime("%H:%M")
 
 
 def event_reminder_message(
@@ -76,9 +82,10 @@ def event_reminder_message(
     slot: int,
 ) -> str:
     """A natural one-line nudge for an event starting in ``remaining``."""
-    clock = _clock(settings, start_iso)
-    if clock is None:
+    local = _local_dt(settings, start_iso)
+    if local is None:
         return f"{title} {_humanize(remaining)}"
+    clock = local.strftime("%H:%M")
     rel = _humanize(remaining)
     minutes = remaining.total_seconds() / 60
     if minutes < 1:
@@ -98,7 +105,7 @@ def event_reminder_message(
             f"Reminder: {title} at {clock} ({rel}).",
         ]
     else:
-        day = parse_dt(start_iso).astimezone(resolve_tz(settings)).strftime("%A")
+        day = local.strftime("%A")
         variants = [
             f"Looking ahead: {title} {rel} ({day} at {clock}).",
             f"Coming up {rel}: {title}, {day} at {clock}.",
@@ -117,9 +124,10 @@ def task_reminder_message(
     """A natural one-line nudge for a task due in ``remaining`` (or overdue)."""
     if remaining < timedelta(0):
         return _overdue_task_message(settings, task_id, title, due_iso, -remaining, slot)
-    clock = _clock(settings, due_iso)
-    if clock is None:
+    local = _local_dt(settings, due_iso)
+    if local is None:
         return f"Task due: {title} {_humanize(remaining)}"
+    clock = local.strftime("%H:%M")
     rel = _humanize(remaining)
     minutes = remaining.total_seconds() / 60
     if minutes < 10:
@@ -134,7 +142,7 @@ def task_reminder_message(
             f"Reminder: {title} is due at {clock} ({rel}).",
         ]
     else:
-        day = parse_dt(due_iso).astimezone(resolve_tz(settings)).strftime("%A")
+        day = local.strftime("%A")
         variants = [
             f"Looking ahead: {title} is due {rel} ({day} at {clock}).",
             f"Coming due {rel}: {title}, {day} at {clock}.",

@@ -459,7 +459,7 @@ def docs_add(req: DocRequest) -> dict:
     settings = get_settings()
     if (req.text is None) == (req.url is None):
         raise HTTPException(status_code=422, detail="Give exactly one of 'text' or 'url'.")
-    title, text = req.title, req.text
+    title = req.title
     if req.url is not None:
         if not settings.enable_docs_url_ingest:
             raise HTTPException(
@@ -471,6 +471,9 @@ def docs_add(req: DocRequest) -> dict:
         except docs_extract.ExtractionError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         title = title or fetched_title
+    else:
+        assert req.text is not None  # the exactly-one gate above
+        text = req.text
     doc = docs_store.add_document(settings, title, text)
     return {"id": doc.id, "title": doc.title, "chunks": doc.chunks, "added": doc.added}
 

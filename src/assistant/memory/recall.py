@@ -30,6 +30,7 @@ from .embeddings import embed_query
 from .locks import locked
 from .store import Note
 
+
 def local_today(settings: Settings) -> date:
     """Today's date in the assistant's configured timezone (not the server's)."""
     return datetime.now(resolve_tz(settings)).date()

@@ -564,7 +564,7 @@ def handle_update(
     message = update.get("message") or {}
     chat_id = (message.get("chat") or {}).get("id")
     text = message.get("text")
-    voice = message.get("voice")
+    voice = message.get("voice") or {}
     if token is None or chat_id is None or not (text or voice):
         return None  # not a text/voice message (sticker, photo, member event, …)
 

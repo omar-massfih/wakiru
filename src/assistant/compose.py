@@ -48,7 +48,7 @@ def compose_push(
             if block:
                 prefix.append(SystemMessage(content=block))
         prefix.append(SystemMessage(content=instruction))
-        reply = build_model(settings).invoke(prefix + [HumanMessage(content=facts)])
+        reply = build_model(settings).invoke([*prefix, HumanMessage(content=facts)])
         content = reply.content
         if not isinstance(content, str):
             # Anthropic can return a list of content blocks; keep the text ones.
