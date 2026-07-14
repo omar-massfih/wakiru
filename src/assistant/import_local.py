@@ -126,7 +126,7 @@ def import_turn_counter(local: Settings, pg: Settings) -> None:
         return
     storage_postgres.ensure_memory_schema(pg)
     with storage_postgres.connect(pg) as conn:
-        storage_postgres._meta_set(conn, "turn_count", str(turn_count))
+        storage_postgres.meta_set(conn, "turn_count", str(turn_count))
 
 
 def import_checkpoints(local: Settings, pg: Settings) -> int:

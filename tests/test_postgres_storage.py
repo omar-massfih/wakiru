@@ -151,8 +151,9 @@ def test_postgres_connect_pools_and_schema_runs_once(monkeypatch: pytest.MonkeyP
             yield FakeConn()
 
     monkeypatch.setattr(psycopg_pool, "ConnectionPool", FakePool)
-    monkeypatch.setattr(storage_postgres, "_pools", {})
-    monkeypatch.setattr(storage_postgres, "_ensured_schemas", set())
+    # Process-wide pool/schema state lives on the core submodule.
+    monkeypatch.setattr(storage_postgres.core, "_pools", {})
+    monkeypatch.setattr(storage_postgres.core, "_ensured_schemas", set())
 
     settings = Settings(storage_backend="postgres", database_url="postgres://example")
     with storage_postgres.connect(settings):
