@@ -285,8 +285,8 @@ class Settings(BaseSettings):
     enable_reminders: bool = True
     # Fire a reminder this many minutes before an event. A list, so several leads
     # per event work (e.g. [1440, 60] = a day before and an hour before). The
-    # default single lead means at most one push per event.
-    reminder_lead_minutes: list[int] = [60]
+    # default nudges twice: an hour out and again 15 minutes out.
+    reminder_lead_minutes: list[int] = [60, 15]
     # ntfy topic URL / generic webhook the reminder is POSTed to. None => reminders
     # are still computed and returned by the endpoint, just not pushed anywhere.
     reminder_webhook_url: str | None = None
