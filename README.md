@@ -50,9 +50,10 @@ Telegram bot  /
   not injected each turn. Drafting is the default write; **sending** needs a second,
   independent switch (`ENABLE_EMAIL_SEND`) and never happens in the background.
 - **`telegram.py`** — the Telegram channel (see below): a stdlib-only long-polling
-  bridge started alongside the server when a bot token is configured. Free text goes to
-  the model; the slash commands `/help`, `/tasks`, `/calendar`, `/memory`, and `/reset`
-  are answered locally (no model call), and `"undo"` reverts the last calendar/task write.
+  bridge started alongside the server when a bot token is configured. Everything goes to
+  the model — slash commands like `/tasks` or `/memory` become natural turns it answers
+  itself, and `"undo"` makes it call the `undo` tool; only `/reset` (and the pairing
+  handshake) is answered locally, so it works even when the model or history is broken.
 - **`cli.py`** — a terminal REPL over the same `chat.py` seam (`assistant-cli`), for chatting
   without the HTTP server or a bot token; it uses one stable thread so history persists.
 - **`slack.py`** — the Slack channel: an Events API bridge (`POST /slack/events`) authenticated

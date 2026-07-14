@@ -555,53 +555,59 @@ def test_poll_loop_survives_poison_updates_and_outages(tmp_path, monkeypatch) ->
 # --- slash commands -------------------------------------------------------- #
 
 
-def test_help_command_answers_without_model_or_upkeep(tmp_path, calls, monkeypatch) -> None:
+def _capture_run_chat(monkeypatch, reply: str = "model reply") -> list[str]:
+    """Stub telegram.run_chat, recording the turn text each call receives."""
+    turns: list[str] = []
+
+    def fake_run_chat(agent, text, thread_id, settings=None):
+        turns.append(text)
+        return reply
+
+    monkeypatch.setattr(telegram, "run_chat", fake_run_chat)
+    return turns
+
+
+def test_help_command_becomes_a_model_turn_with_upkeep(tmp_path, calls, monkeypatch) -> None:
     settings = _settings(tmp_path, telegram_allowed_chat_ids=[7])
-    monkeypatch.setattr(
-        telegram, "run_chat", lambda *a, **k: pytest.fail("commands must not call the model")
-    )
+    turns = _capture_run_chat(monkeypatch, reply="Hei! Jeg er Wakiru.")
     upkeep = telegram.handle_update(None, settings, _update(chat_id=7, text="/help"))
-    assert upkeep is None  # commands never schedule upkeep
-    sends = _sends(calls)
-    assert len(sends) == 1
-    assert "personal assistant" in sends[0]["text"].lower()
+    assert turns == [telegram._COMMAND_PROMPTS["help"]]
+    assert _sends(calls)[0]["text"] == "Hei! Jeg er Wakiru."
+    assert upkeep is not None  # a command turn is a turn — upkeep runs
 
 
-def test_tasks_command_lists_open_tasks(tmp_path, calls, monkeypatch) -> None:
-    settings = _settings(tmp_path, telegram_allowed_chat_ids=[7], timezone="Europe/Oslo")
-    from assistant.tasks import store as tstore
-
-    tstore.create_task(settings, "call plumber")
-    monkeypatch.setattr(telegram, "run_chat", lambda *a, **k: pytest.fail("no model"))
+def test_tasks_command_maps_to_a_natural_turn(tmp_path, calls, monkeypatch) -> None:
+    settings = _settings(tmp_path, telegram_allowed_chat_ids=[7])
+    turns = _capture_run_chat(monkeypatch)
     telegram.handle_update(None, settings, _update(chat_id=7, text="/tasks"))
-    assert "call plumber" in _sends(calls)[0]["text"]
+    assert turns == [telegram._COMMAND_PROMPTS["tasks"]]
+    assert _sends(calls)[0]["text"] == "model reply"
 
 
-def test_unknown_command_shows_help(tmp_path, calls, monkeypatch) -> None:
+def test_unknown_command_runs_as_its_text(tmp_path, calls, monkeypatch) -> None:
     settings = _settings(tmp_path, telegram_allowed_chat_ids=[7])
-    monkeypatch.setattr(telegram, "run_chat", lambda *a, **k: pytest.fail("no model"))
-    telegram.handle_update(None, settings, _update(chat_id=7, text="/wat"))
-    assert "Commands:" in _sends(calls)[0]["text"]
+    turns = _capture_run_chat(monkeypatch)
+    telegram.handle_update(None, settings, _update(chat_id=7, text="/wat is this"))
+    assert turns == ["wat is this"]
 
 
-def test_slash_with_no_command_shows_help(tmp_path, calls, monkeypatch) -> None:
+def test_slash_with_no_command_asks_for_the_intro(tmp_path, calls, monkeypatch) -> None:
     settings = _settings(tmp_path, telegram_allowed_chat_ids=[7])
-    monkeypatch.setattr(telegram, "run_chat", lambda *a, **k: pytest.fail("no model"))
+    turns = _capture_run_chat(monkeypatch)
     # "/" followed by only whitespace has no first word — indexing it used to
     # raise IndexError, leaving the chat with no reply at all.
     for text in ("/", "/ ", "/   "):
         telegram.handle_update(None, settings, _update(chat_id=7, text=text))
-    sends = _sends(calls)
-    assert len(sends) == 3
-    assert all("Commands:" in s["text"] for s in sends)
+    assert turns == [telegram._COMMAND_PROMPTS["help"]] * 3
+    assert len(_sends(calls)) == 3
 
 
 def test_command_with_botname_suffix_is_stripped(tmp_path, calls, monkeypatch) -> None:
     settings = _settings(tmp_path, telegram_allowed_chat_ids=[7])
-    monkeypatch.setattr(telegram, "run_chat", lambda *a, **k: pytest.fail("no model"))
+    turns = _capture_run_chat(monkeypatch)
     # In groups Telegram appends @BotName; it must still resolve to /help.
     telegram.handle_update(None, settings, _update(chat_id=7, text="/help@MyAssistantBot"))
-    assert "personal assistant" in _sends(calls)[0]["text"].lower()
+    assert turns == [telegram._COMMAND_PROMPTS["help"]]
 
 
 def test_reset_command_clears_history(tmp_path, calls, monkeypatch) -> None:

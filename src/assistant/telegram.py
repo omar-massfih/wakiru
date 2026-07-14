@@ -454,8 +454,9 @@ def get_updates(token: str, offset: int | None) -> list[dict]:
     return result if isinstance(result, list) else []
 
 
-# Slash commands the bot advertises (via setMyCommands) and handles locally —
-# free text and the "undo" keyword still flow through the model as before.
+# Slash commands the bot advertises (via setMyCommands). Only /reset is
+# answered locally; the rest map to natural-language turns the model answers
+# itself, from its own context and memory (_COMMAND_PROMPTS below).
 _COMMANDS = [
     ("start", "Show what I can do"),
     ("help", "Show what I can do"),
@@ -466,18 +467,14 @@ _COMMANDS = [
     ("email", "Show unread mail (if email is enabled)"),
 ]
 
-_HELP_TEXT = (
-    "I'm your personal assistant. Just talk to me in plain language — I remember "
-    "what matters, track your calendar and to-dos, and can remind you about them.\n\n"
-    "Commands:\n"
-    "/help — this message\n"
-    "/tasks — your open to-do list\n"
-    "/calendar — upcoming events\n"
-    "/email — unread mail (if enabled)\n"
-    "/memory — what I remember about you\n"
-    "/reset — forget this conversation's history\n\n"
-    'Tip: reply "undo" right after I change your calendar or tasks to revert it.'
-)
+_COMMAND_PROMPTS = {
+    "start": "Introduce yourself: who are you and what can you do for me here?",
+    "help": "Introduce yourself: who are you and what can you do for me here?",
+    "tasks": "Show my open to-do list.",
+    "calendar": "What's coming up on my calendar?",
+    "email": "Any unread mail?",
+    "memory": "What do you remember about me?",
+}
 
 
 def set_commands(token: str) -> None:
@@ -505,61 +502,29 @@ def _reset_thread(agent: CompiledStateGraph, thread_id: str) -> None:
     agent.update_state(config, {"messages": removals, "summary": ""}, as_node="agent")
 
 
-def _command_reply(agent: CompiledStateGraph, settings: Settings, command: str, thread_id: str) -> str:
-    """Produce the reply text for a slash command (no model call, no upkeep)."""
-    if command in ("start", "help"):
-        return _HELP_TEXT
-    if command == "reset":
-        try:
-            _reset_thread(agent, thread_id)
-        except Exception:
-            logger.exception("reset failed for thread %s", thread_id)
-            return "Couldn't reset — try again."
-        return "Done — I've forgotten this conversation's history."
-    if command == "tasks":
-        from .tasks import tasks_context
-
-        return tasks_context(settings)
-    if command == "calendar":
-        from .calendar import agenda_context
-
-        return agenda_context(settings)
-    if command == "email":
-        from .mail import unread_summary
-
-        return unread_summary(settings)
-    if command == "memory":
-        from .memory import store as memory_store
-
-        notes = memory_store.list_notes(settings)
-        if not notes:
-            return "I don't have any durable memories yet."
-        by_kind: dict[str, int] = {}
-        for note in notes:
-            by_kind[note.kind] = by_kind.get(note.kind, 0) + 1
-        counts = ", ".join(f"{k}: {v}" for k, v in sorted(by_kind.items()))
-        lines = [f"I'm holding {len(notes)} memories ({counts}).", ""]
-        lines += [f"- {n.description or n.name}" for n in notes[:20]]
-        if len(notes) > 20:
-            lines.append(f"…and {len(notes) - 20} more.")
-        return "\n".join(lines)
-    return _HELP_TEXT  # unknown command → show help
+def _reset_reply(agent: CompiledStateGraph, thread_id: str) -> str:
+    """Perform /reset and report it — deterministic on purpose: clearing a
+    broken history must not depend on the model (or that history) working."""
+    try:
+        _reset_thread(agent, thread_id)
+    except Exception:
+        logger.exception("reset failed for thread %s", thread_id)
+        return "Couldn't reset — try again."
+    return "Done — I've forgotten this conversation's history."
 
 
-def _dispatch_command(
-    agent: CompiledStateGraph, settings: Settings, token: str, chat_id: int, text: str, thread_id: str
-) -> bool:
-    """Handle a ``/command`` message; return True if it was a command (so the
-    caller skips the model turn and its upkeep). Non-slash text returns False."""
-    if not text.startswith("/"):
-        return False
-    # "/tasks@MyBot arg" -> "tasks"; commands take no args here. Split before
-    # indexing: a bare "/" or a "/" followed only by spaces has no first word.
+def _command_turn(text: str) -> str:
+    """The natural-language turn a non-reset ``/command`` message becomes.
+
+    Known commands map to plain requests the model answers from its injected
+    context (agenda, tasks, mail, memory) in its own voice; an unknown command
+    runs as its text minus the slash, and a bare "/" asks for the intro.
+    """
+    # "/tasks@MyBot arg" -> "tasks". Split before indexing: a bare "/" or a
+    # "/" followed only by spaces has no first word.
     parts = text[1:].split()
     command = parts[0].split("@")[0].lower() if parts else ""
-    reply = _command_reply(agent, settings, command, thread_id)
-    send_message(token, chat_id, reply)
-    return True
+    return _COMMAND_PROMPTS.get(command) or text[1:].strip() or _COMMAND_PROMPTS["help"]
 
 
 def _transcribe_voice(token: str, settings: Settings, voice: dict) -> str:
@@ -643,10 +608,15 @@ def handle_update(
 
     thread_id = f"telegram:{chat_id}"
 
-    # Slash commands are answered locally (help/reset/tasks/calendar/memory) with
-    # no model call and no upkeep — they never reach run_chat.
-    if _dispatch_command(agent, settings, token, chat_id, text, thread_id):
-        return None
+    # Slash commands: only /reset is answered locally (it must work even when
+    # the model or the checkpointed history is broken). Every other command
+    # becomes a natural-language turn the model answers itself.
+    if text.startswith("/"):
+        parts = text[1:].split()
+        if (parts[0].split("@")[0].lower() if parts else "") == "reset":
+            send_message(token, chat_id, _reset_reply(agent, thread_id))
+            return None
+        text = _command_turn(text)
 
     try:
         with _typing(token, chat_id):
