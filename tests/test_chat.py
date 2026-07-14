@@ -1,20 +1,16 @@
-"""Chat core tests — the "undo" short-circuit and its upkeep gate.
+"""Chat core tests — every message is the model's turn, plus upkeep and errors.
 
 No real graph or Codex call: a minimal stub stands in for the compiled agent,
-and only ``run_chat``/``run_upkeep`` are exercised against a real (tmp_path)
-calendar store, matching the style of test_calendar.py / test_undo.py.
+and only ``run_chat``/``run_upkeep`` are exercised, matching the style of
+test_calendar.py / test_undo.py.
 """
 
 from __future__ import annotations
-
-import uuid
-from datetime import timedelta
 
 import pytest
 from langchain_core.messages import AIMessageChunk
 
 from assistant import chat
-from assistant.calendar import context, ops, store
 from assistant.config import Settings
 
 THREAD = "telegram:1"
@@ -30,17 +26,6 @@ def settings(tmp_path) -> Settings:
     )
 
 
-def _iso_in(settings: Settings, **delta) -> str:
-    return (context.now(settings) + timedelta(**delta)).isoformat(timespec="minutes")
-
-
-class _FailingAgent:
-    """An agent stub whose ``invoke`` fails the test if ever called."""
-
-    def invoke(self, *args, **kwargs):
-        pytest.fail("agent.invoke must not be called for an undo short-circuit")
-
-
 class _CannedAgent:
     """An agent stub that returns a fixed reply, so ordinary turns can be observed."""
 
@@ -53,30 +38,7 @@ class _CannedAgent:
         return {"messages": [type("Msg", (), {"content": self.reply})()]}
 
 
-def _seed_booking(settings: Settings) -> None:
-    start = _iso_in(settings, days=2)
-    ops.apply_op(
-        settings,
-        {"op": "create", "title": "Dentist", "start": start},
-        THREAD,
-        uuid.uuid4().hex,
-    )
-
-
 # --- run_chat --------------------------------------------------------------- #
-
-
-def test_run_chat_undo_short_circuits_without_invoking_agent(settings) -> None:
-    _seed_booking(settings)
-    reply = chat.run_chat(_FailingAgent(), "undo", THREAD, settings=settings)
-    assert reply.startswith("Undone:")
-    assert store.list_events(settings) == []
-
-
-def test_run_chat_undo_variant_with_trailing_text(settings) -> None:
-    _seed_booking(settings)
-    reply = chat.run_chat(_FailingAgent(), "undo that", THREAD, settings=settings)
-    assert reply.startswith("Undone:")
 
 
 def test_run_chat_plain_message_goes_through_agent(settings) -> None:
@@ -86,13 +48,12 @@ def test_run_chat_plain_message_goes_through_agent(settings) -> None:
     assert agent.invoked
 
 
-def test_run_chat_undo_disabled_by_config_falls_through_to_agent(tmp_path) -> None:
-    settings = Settings(
-        memory_dir=str(tmp_path / "memory"), enable_write_confirmation=False
-    )
-    agent = _CannedAgent("sure, undoing what?")
+def test_run_chat_undo_message_reaches_the_agent(settings) -> None:
+    # "undo" is a normal turn now: the model interprets it and calls the
+    # `undo` tool itself (see test_tools.py) — no keyword short-circuit.
+    agent = _CannedAgent("Undone: removed Dentist.")
     reply = chat.run_chat(agent, "undo", THREAD, settings=settings)
-    assert reply == "sure, undoing what?"
+    assert reply == "Undone: removed Dentist."
     assert agent.invoked
 
 
@@ -138,33 +99,30 @@ def test_run_chat_stream_skips_empty_chunks(settings) -> None:
     assert chunks == ["hi"]
 
 
-def test_run_chat_stream_undo_short_circuits(settings) -> None:
-    _seed_booking(settings)
-    agent = _StreamingAgent(["must not stream"])
+def test_run_chat_stream_undo_message_streams_through_agent(settings) -> None:
+    agent = _StreamingAgent(["Undone: removed Dentist."])
     chunks = _collect(chat.run_chat_stream(agent, "undo", THREAD, settings=settings))
-    assert len(chunks) == 1 and chunks[0].startswith("Undone:")
-    assert not agent.streamed  # deterministic undo never touches the model
-    assert store.list_events(settings) == []
+    assert chunks == ["Undone: removed Dentist."]
+    assert agent.streamed
 
 
 # --- run_upkeep --------------------------------------------------------------- #
-
-
-def test_run_upkeep_skips_all_upkeep_for_undo_turn(settings, monkeypatch) -> None:
-    for name in ("update_memory", "maybe_summarize"):
-        monkeypatch.setattr(
-            chat,
-            name,
-            lambda *a, _name=name, **k: pytest.fail(f"{_name} must not run for an undo turn"),
-        )
-    chat.run_upkeep(_FailingAgent(), settings, "undo", "Undone: removed Dentist.", THREAD)
 
 
 def test_run_upkeep_runs_memory_and_summary_for_normal_turn(settings, monkeypatch) -> None:
     called = {}
     monkeypatch.setattr(chat, "update_memory", lambda *a, **k: called.setdefault("memory", True))
     monkeypatch.setattr(chat, "maybe_summarize", lambda *a, **k: called.setdefault("summary", True))
-    chat.run_upkeep(_FailingAgent(), settings, "book a dentist", "Done!", THREAD)
+    chat.run_upkeep(_CannedAgent(""), settings, "book a dentist", "Done!", THREAD)
+    assert called == {"memory": True, "summary": True}
+
+
+def test_run_upkeep_runs_for_undo_turn_too(settings, monkeypatch) -> None:
+    # An undo turn is a turn like any other now — its upkeep runs.
+    called = {}
+    monkeypatch.setattr(chat, "update_memory", lambda *a, **k: called.setdefault("memory", True))
+    monkeypatch.setattr(chat, "maybe_summarize", lambda *a, **k: called.setdefault("summary", True))
+    chat.run_upkeep(_CannedAgent(""), settings, "undo", "Undone: removed Dentist.", THREAD)
     assert called == {"memory": True, "summary": True}
 
 

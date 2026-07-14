@@ -89,7 +89,8 @@ def test_reminder_etiquette_follows_reminders_flag() -> None:
 
 def test_undo_hint_follows_write_confirmation() -> None:
     on = persona.system_prompt(_settings(write_undo_window_minutes=15))
-    assert 'reply "undo" within 15 minutes' in on
+    assert "call the `undo` tool" in on
+    assert '"undo" within 15 minutes' in on
     off = persona.system_prompt(_settings(enable_write_confirmation=False))
     assert "undo" not in off.lower().replace("undone", "")
 

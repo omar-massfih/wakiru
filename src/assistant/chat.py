@@ -20,7 +20,6 @@ from .agent import maybe_summarize
 from .codex_runner import CodexError, CodexTimeoutError
 from .config import Settings, get_settings
 from .memory import consolidate_memory, index, update_memory
-from .undo import undo_latest
 
 logger = logging.getLogger(__name__)
 
@@ -42,16 +41,6 @@ def error_reply(exc: Exception) -> str:
     return "Something unexpected broke on my end — it's logged. Try once more."
 
 
-def _is_undo_command(settings: Settings, message: str) -> bool:
-    """Whether ``message`` asks to undo the last calendar or task write on this thread."""
-    if not settings.enable_write_confirmation:
-        return False
-    if not (settings.enable_calendar or settings.enable_tasks):
-        return False
-    text = message.strip().lower()
-    return text == "undo" or text.startswith("undo ")
-
-
 def run_chat(
     agent: CompiledStateGraph,
     message: str,
@@ -60,18 +49,13 @@ def run_chat(
 ) -> str:
     """Run one turn on ``thread_id`` and return the reply.
 
-    A message that asks to undo the last calendar write ("undo", "undo that", …)
-    is resolved deterministically against the undo ledger and short-circuits the
-    LLM entirely — no ambiguity, no added latency, matching :func:`run_upkeep`'s
-    equivalent skip so the turn is never double-processed.
+    Every message is the model's to interpret — including "undo", which it
+    resolves by calling the ``undo`` tool against the ledger.
 
     Raises :class:`assistant.codex_runner.CodexError` when the model fails; each
     channel translates that into its own error surface (HTTP 502, a chat apology).
     """
     settings = settings or get_settings()
-    if _is_undo_command(settings, message):
-        return undo_latest(settings, thread_id, settings.write_undo_window_minutes)
-
     config = {"configurable": {"thread_id": thread_id}}
     result = agent.invoke({"messages": [HumanMessage(content=message)]}, config=config)
     reply = result["messages"][-1].content
@@ -91,17 +75,12 @@ async def run_chat_stream(
     CLI's ``--json`` event stream (:func:`assistant.codex_runner.run_codex_stream`);
     worst case a provider emits the whole reply as one chunk.
 
-    An "undo" command short-circuits exactly like :func:`run_chat` and yields the
-    deterministic ledger result as a single chunk. The caller is responsible for
-    running :func:`run_upkeep` once the stream is exhausted.
+    The caller is responsible for running :func:`run_upkeep` once the stream
+    is exhausted.
 
     Raises :class:`assistant.codex_runner.CodexError` when the model fails.
     """
     settings = settings or get_settings()
-    if _is_undo_command(settings, message):
-        yield undo_latest(settings, thread_id, settings.write_undo_window_minutes)
-        return
-
     config = {"configurable": {"thread_id": thread_id}}
     async for chunk, _meta in agent.astream(
         {"messages": [HumanMessage(content=message)]},
@@ -134,11 +113,6 @@ def run_upkeep(
     thread) so it never adds latency. Each step is isolated so a failure in one
     never starves the others.
     """
-    if _is_undo_command(settings, message):
-        # Handled synchronously in run_chat; nothing here to learn — the reply
-        # already reported the undo and there is no new fact worth remembering.
-        return
-
     # Thread registry: every channel funnels through here, so this one touch
     # keeps the registry of live conversations current (Slack loop-in, and the
     # heartbeat's "time since last contact").

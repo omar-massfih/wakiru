@@ -268,3 +268,40 @@ def test_remember_profile_tag_reaches_profile_context(settings) -> None:
         {"content": "The user works 09:00-17:00 in Bergen.", "profile": True},
     )
     assert "Bergen" in profile_context(settings)
+
+
+# --- the undo tool ------------------------------------------------------------ #
+
+
+def test_undo_tool_gated_on_write_confirmation_and_a_writable_subsystem() -> None:
+    assert "undo" in {s.name for s in available_tools(Settings())}
+    assert "undo" not in {
+        s.name for s in available_tools(Settings(enable_write_confirmation=False))
+    }
+    assert "undo" not in {
+        s.name
+        for s in available_tools(
+            Settings(enable_calendar=False, enable_tasks=False)
+        )
+    }
+    # And never in the background: a heartbeat wake has no conversation.
+    assert "undo" not in {
+        s.name for s in available_tools(Settings(), mode="heartbeat")
+    }
+
+
+def test_undo_tool_reverts_the_latest_write_on_the_thread(settings) -> None:
+    execute_tool(
+        tool_map(settings)["create_event"],
+        _ctx(settings),
+        {"title": "Dentist", "start": _iso_in(settings, days=2)},
+    )
+    result = execute_tool(tool_map(settings)["undo"], _ctx(settings), {})
+    assert result.startswith("Undone:")
+    assert calendar_store.list_events(settings) == []
+
+
+def test_undo_tool_with_nothing_to_revert_says_so(settings) -> None:
+    result = execute_tool(tool_map(settings)["undo"], _ctx(settings), {})
+    assert not result.startswith("Undone:")
+    assert result  # a user-ready explanation, never empty

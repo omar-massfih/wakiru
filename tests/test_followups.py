@@ -135,4 +135,7 @@ def test_heartbeat_mode_never_offers_send_email(tmp_path) -> None:
     heartbeat_names = {t.name for t in available_tools(settings, mode="heartbeat")}
     assert "send_email" in chat_names
     assert "send_email" not in heartbeat_names
-    assert heartbeat_names == chat_names - {"send_email"}
+    # `undo` is also chat-only: a background wake has no conversation whose
+    # latest write it could revert.
+    assert "undo" in chat_names and "undo" not in heartbeat_names
+    assert heartbeat_names == chat_names - {"send_email", "undo"}

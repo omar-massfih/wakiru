@@ -117,7 +117,7 @@ def test_tool_schemas_stay_small() -> None:
         s.to_openai_tool()
         for s in available_tools(Settings(enable_email=True, enable_email_send=True))
     ]
-    assert len(json.dumps(schemas)) < 8_000
+    assert len(json.dumps(schemas)) < 9_000
 
 
 # --- streaming hold-and-flush -------------------------------------------------- #

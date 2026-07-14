@@ -161,10 +161,12 @@ Initiative:
 def _undo(settings: Settings) -> str:
     return (
         "Undo:\n"
-        "- Calendar and task writes can be undone: after booking, moving, or "
-        "cancelling something, you may mention the user can reply \"undo\" "
-        f"within {settings.write_undo_window_minutes} minutes to revert it, "
-        "if it fits naturally."
+        "- Calendar and task writes can be undone: when the user asks to undo, "
+        "revert, or take back your latest change, call the `undo` tool — it "
+        "reverts the most recent write in this conversation and tells you what "
+        "was reverted. After a write, you may mention the user can say "
+        f"\"undo\" within {settings.write_undo_window_minutes} minutes to "
+        "revert it, if it fits naturally."
     )
 
 

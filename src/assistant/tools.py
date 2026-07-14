@@ -590,6 +590,31 @@ def _followup_tools() -> list[ToolSpec]:
 
 
 # --------------------------------------------------------------------------- #
+# Undo — revert the latest calendar/task write on this conversation
+# --------------------------------------------------------------------------- #
+
+def _undo(ctx: ToolContext) -> str:
+    from .undo import undo_latest
+
+    return undo_latest(
+        ctx.settings, ctx.thread_id, ctx.settings.write_undo_window_minutes
+    )
+
+
+def _undo_tools() -> list[ToolSpec]:
+    return [
+        ToolSpec(
+            "undo",
+            "Revert the user's most recent calendar or task write in this "
+            "conversation. Call it when they ask to undo, revert, or take "
+            "back your latest change; the result says what was reverted.",
+            _params({}, []),
+            _undo,
+        )
+    ]
+
+
+# --------------------------------------------------------------------------- #
 # Registry + dispatch
 # --------------------------------------------------------------------------- #
 
@@ -598,7 +623,8 @@ def available_tools(settings: Settings, mode: str = "chat") -> list[ToolSpec]:
 
     ``mode="heartbeat"`` is the background variant: identical except that
     ``send_email`` is structurally absent — no prompt, bug, or jailbreak can
-    make a background wake send mail.
+    make a background wake send mail — and so is ``undo``, since a background
+    wake has no conversation whose latest write it could revert.
     """
     tools: list[ToolSpec] = []
     if settings.enable_calendar:
@@ -607,6 +633,10 @@ def available_tools(settings: Settings, mode: str = "chat") -> list[ToolSpec]:
         tools += _task_tools()
     if settings.enable_reminders:
         tools += _reminder_tools()
+    if settings.enable_write_confirmation and (
+        settings.enable_calendar or settings.enable_tasks
+    ):
+        tools += _undo_tools()
     tools += _memory_tools()
     if settings.enable_docs:
         tools += _docs_tools()
@@ -615,7 +645,7 @@ def available_tools(settings: Settings, mode: str = "chat") -> list[ToolSpec]:
     if settings.enable_heartbeat:
         tools += _followup_tools()
     if mode == "heartbeat":
-        tools = [spec for spec in tools if spec.name != "send_email"]
+        tools = [spec for spec in tools if spec.name not in ("send_email", "undo")]
     return tools
 
 
