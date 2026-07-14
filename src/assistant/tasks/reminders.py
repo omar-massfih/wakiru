@@ -149,19 +149,33 @@ def run_task_reminders(settings: Settings | None = None, agent=None) -> list[dic
         sent_indexes = sorted({owner[key_index] for key_index in claimed})
         sent = [due[index] for index in sent_indexes]
 
+    if not sent:
+        return sent
+
+    # One composed push per batch with the template text as fallback — the
+    # same shape as assistant.calendar.reminders.run_reminders.
+    from ..compose import compose_push
     from ..proactive import record_push
 
-    for reminder in sent:
-        try:
-            delivered = deliver_reminder(settings, reminder)
-        except Exception:
-            logger.exception("task reminder delivery failed: %s", reminder["message"])
-            continue
-        if delivered:
-            record_push(agent, settings, f"⏰ {reminder['message']}")
+    text = compose_push(
+        settings,
+        instruction=(
+            "Compose ONE short reminder nudge covering every due or overdue "
+            "task below, in your own voice, in the user's language. Include "
+            "each task's due time. Reply with the message only — no preamble, "
+            "no quotes."
+        ),
+        facts="\n".join(f"- {r['message']} (due: {r['due']})" for r in sent),
+        query=" ".join(r["title"] for r in sent),
+        fallback="\n".join(r["message"] for r in sent),
+    )
+    try:
+        delivered = deliver_reminder(settings, {"title": "Reminder", "message": text})
+    except Exception:
+        logger.exception("task reminder delivery failed: %s", text)
+        return sent
+    if delivered:
+        record_push(agent, settings, f"⏰ {text}")
 
-    if sent:
-        logger.info(
-            "fired %d task reminder(s): %s", len(sent), "; ".join(r["message"] for r in sent)
-        )
+    logger.info("fired %d task reminder(s): %s", len(sent), text)
     return sent

@@ -287,11 +287,12 @@ def test_postgres_reminder_ledgers_delegate(monkeypatch: pytest.MonkeyPatch) -> 
     from assistant.calendar import reminders as calendar_reminders
     from assistant.tasks import reminders as task_reminders
 
-    monkeypatch.setattr(calendar_reminders, "due_reminders", lambda _settings, current=None: [{"event_id": "e1", "start": "s", "covered_leads": [60], "message": "event"}])
-    monkeypatch.setattr(task_reminders, "due_task_reminders", lambda _settings, current=None: [{"task_id": "t1", "due": "d", "covered_leads": [60], "message": "task"}])
+    monkeypatch.setattr(calendar_reminders, "due_reminders", lambda _settings, current=None: [{"event_id": "e1", "title": "Event", "start": "s", "covered_leads": [60], "message": "event"}])
+    monkeypatch.setattr(task_reminders, "due_task_reminders", lambda _settings, current=None: [{"task_id": "t1", "title": "Task", "due": "d", "covered_leads": [60], "message": "task"}])
     monkeypatch.setattr(storage_postgres, "claim_calendar_reminders", lambda _settings, due, fired_at, current: due)
     monkeypatch.setattr(storage_postgres, "claim_task_reminders", lambda _settings, due, fired_at, current: due)
     monkeypatch.setattr(storage_postgres, "list_mutes", lambda _settings: [])
+    monkeypatch.setattr("assistant.compose.compose_push", lambda s, **kw: kw["fallback"])
     monkeypatch.setattr(calendar_reminders, "deliver_reminder", lambda _settings, reminder: None)
     monkeypatch.setattr(task_reminders, "deliver_reminder", lambda _settings, reminder: None)
 

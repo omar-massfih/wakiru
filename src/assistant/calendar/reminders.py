@@ -184,21 +184,38 @@ def run_reminders(settings: Settings | None = None, agent=None) -> list[dict]:
         sent_indexes = sorted({owner[key_index] for key_index in claimed})
         sent = [due[index] for index in sent_indexes]
 
+    if not sent:
+        return sent
+
+    # One push per batch, composed by the model in the assistant's own voice
+    # (memory and agenda ride in); the deterministic template text every
+    # reminder already carries is the fallback, so a model failure degrades to
+    # exactly the old behavior and never loses the nudge. Deferred import for
+    # the same package-cycle reason as phrasing above.
+    from ..compose import compose_push
     from ..proactive import record_push
 
-    for reminder in sent:
-        try:
-            delivered = deliver_reminder(settings, reminder)
-        except Exception:
-            # The claim is already committed; a push that blows up must not
-            # take the rest of this batch down with it.
-            logger.exception("reminder delivery failed: %s", reminder["message"])
-            continue
-        if delivered:
-            # Recorded with the same ⏰ prefix the chat channels show, so the
-            # thread's history matches what the user actually saw.
-            record_push(agent, settings, f"⏰ {reminder['message']}")
+    text = compose_push(
+        settings,
+        instruction=(
+            "Compose ONE short reminder nudge covering every due item below, "
+            "in your own voice, in the user's language. Include each item's "
+            "clock time. Reply with the message only — no preamble, no quotes."
+        ),
+        facts="\n".join(f"- {r['message']} (starts: {r['start']})" for r in sent),
+        query=" ".join(r["title"] for r in sent),
+        fallback="\n".join(r["message"] for r in sent),
+    )
+    try:
+        delivered = deliver_reminder(settings, {"title": "Reminder", "message": text})
+    except Exception:
+        # The claim is already committed; delivery is best-effort by design.
+        logger.exception("reminder delivery failed: %s", text)
+        return sent
+    if delivered:
+        # Recorded with the same ⏰ prefix the chat channels show, so the
+        # thread's history matches what the user actually saw.
+        record_push(agent, settings, f"⏰ {text}")
 
-    if sent:
-        logger.info("fired %d reminder(s): %s", len(sent), "; ".join(r["message"] for r in sent))
+    logger.info("fired %d reminder(s): %s", len(sent), text)
     return sent

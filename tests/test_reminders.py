@@ -1,7 +1,9 @@
 """Reminder tests — due computation, the dedupe ledger, pruning, and delivery.
 
-Everything runs for real (plain SQLite + stdlib datetime); the only thing faked is
-the outbound webhook POST, so these stay fast and offline.
+Everything runs for real (plain SQLite + stdlib datetime); faked are the
+outbound webhook POST and the model composition (stubbed to its deterministic
+fallback — compose_push's own behavior lives in test_compose.py), so these
+stay fast and offline.
 """
 
 from __future__ import annotations
@@ -23,6 +25,14 @@ def settings(tmp_path) -> Settings:
         enable_reminders=True,
         reminder_lead_minutes=[60],
         reminder_webhook_url=None,  # no push; run_reminders still computes + records
+    )
+
+
+@pytest.fixture(autouse=True)
+def _compose_fallback(monkeypatch) -> None:
+    """Stand-in composer: behaves like a failed model (returns the fallback)."""
+    monkeypatch.setattr(
+        "assistant.compose.compose_push", lambda s, **kw: kw["fallback"]
     )
 
 
@@ -168,9 +178,10 @@ def test_webhook_delivery(tmp_path, monkeypatch) -> None:
     assert len(fired) == 1
     assert len(calls) == 1
     assert calls[0]["url"] == "https://ntfy.example/topic"
+    # One batched push; with composition falling back, its body is the template.
     assert calls[0]["body"] == fired[0]["message"]
     assert "Dentist" in calls[0]["body"] and "30 min" in calls[0]["body"]
-    assert calls[0]["title"] == "Dentist"
+    assert calls[0]["title"] == "Reminder"
 
 
 def test_no_webhook_url_skips_post(settings, monkeypatch) -> None:
@@ -185,9 +196,9 @@ def test_no_webhook_url_skips_post(settings, monkeypatch) -> None:
 
 def test_non_latin1_title_still_delivers(tmp_path, monkeypatch) -> None:
     # urllib encodes headers as Latin-1; an emoji title used to raise inside the
-    # ledger transaction and wedge every reminder until the event passed.
-    import base64
-
+    # ledger transaction and wedge every reminder until the event passed. The
+    # push title is a fixed "Reminder" now, but the emoji still rides in the
+    # body and the claim must survive delivery.
     settings = Settings(
         memory_dir=str(tmp_path / "memory"),
         timezone="Europe/Oslo",
@@ -196,12 +207,12 @@ def test_non_latin1_title_still_delivers(tmp_path, monkeypatch) -> None:
     )
     _event_in(settings, "Trening 💪", minutes=30)
 
-    calls: list[str] = []
+    calls: list[dict] = []
 
     def fake_urlopen(request, timeout=None):
         title = request.headers.get("Title")
         title.encode("latin-1")  # what http.client does; must not raise
-        calls.append(title)
+        calls.append({"title": title, "body": request.data.decode("utf-8")})
         return _FakeResponse()
 
     monkeypatch.setattr("assistant.notify.urllib.request.urlopen", fake_urlopen)
@@ -209,10 +220,8 @@ def test_non_latin1_title_still_delivers(tmp_path, monkeypatch) -> None:
     fired = reminders.run_reminders(settings)
     assert len(fired) == 1
     assert len(_ledger_rows(settings)) == 1
-    # RFC 2047 encoded word (ntfy decodes these) round-trips the real title.
-    assert calls[0].startswith("=?utf-8?B?")
-    payload = calls[0].removeprefix("=?utf-8?B?").removesuffix("?=")
-    assert base64.b64decode(payload).decode("utf-8") == "Trening 💪"
+    assert len(calls) == 1
+    assert "Trening 💪" in calls[0]["body"]
 
 
 def test_latin1_title_passes_through_unencoded(tmp_path, monkeypatch) -> None:
@@ -221,28 +230,46 @@ def test_latin1_title_passes_through_unencoded(tmp_path, monkeypatch) -> None:
     assert _header_value("Møte på jobb") == "Møte på jobb"  # Latin-1-safe as-is
 
 
-def test_delivery_crash_keeps_claim_and_batch(settings, monkeypatch) -> None:
-    # Delivery runs outside the ledger transaction and per-reminder guarded: a
-    # push that blows up must neither roll back the claim (which would make the
-    # tick re-fail forever) nor starve the rest of the batch.
+def test_delivery_crash_keeps_claim(settings, monkeypatch) -> None:
+    # Delivery runs outside the ledger transaction and guarded: a push that
+    # blows up must not roll back the claims (which would make the tick
+    # re-fail forever).
     _event_in(settings, "First", minutes=10)
     _event_in(settings, "Second", minutes=20)
 
-    delivered: list[str] = []
-
     def boom(settings_, reminder):
-        if reminder["title"] == "First":
-            raise UnicodeEncodeError("latin-1", "x", 0, 1, "boom")
-        delivered.append(reminder["title"])
-        return True
+        raise UnicodeEncodeError("latin-1", "x", 0, 1, "boom")
 
     monkeypatch.setattr(reminders, "deliver_reminder", boom)
 
     fired = reminders.run_reminders(settings)
     assert {r["title"] for r in fired} == {"First", "Second"}
-    assert delivered == ["Second"]  # the crash didn't take the batch down
     assert len(_ledger_rows(settings)) == 2  # both claims survived the crash
     assert reminders.run_reminders(settings) == []  # and are not re-fired
+
+
+def test_batch_composes_one_push_covering_all_due(settings, monkeypatch) -> None:
+    # Several due reminders become ONE composed push; the model gets the
+    # template lines as facts and the joined templates as fallback.
+    _event_in(settings, "First", minutes=10)
+    _event_in(settings, "Second", minutes=20)
+
+    composed: dict = {}
+
+    def fake_compose(s, **kwargs):
+        composed.update(kwargs)
+        return "Snart: First (10 min) og Second (20 min)."
+
+    monkeypatch.setattr("assistant.compose.compose_push", fake_compose)
+    pushes: list[dict] = []
+    monkeypatch.setattr(reminders, "deliver_reminder", lambda s, r: pushes.append(r) or True)
+
+    fired = reminders.run_reminders(settings)
+    assert {r["title"] for r in fired} == {"First", "Second"}
+    assert len(pushes) == 1
+    assert pushes[0]["message"] == "Snart: First (10 min) og Second (20 min)."
+    assert "First" in composed["facts"] and "Second" in composed["facts"]
+    assert all(r["message"] in composed["fallback"] for r in fired)
 
 
 def test_event_inside_several_lead_windows_fires_once(tmp_path) -> None:

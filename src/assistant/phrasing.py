@@ -1,12 +1,12 @@
-"""Natural phrasing for reflex reminders — deterministic, no LLM.
+"""Deterministic reminder phrasing — the reflex path's fallback text.
 
-The reflex tick path (:mod:`assistant.calendar.reminders`,
-:mod:`assistant.tasks.reminders`) must stay fast and reliable: a compose step
-that can stall would risk a claimed-but-never-delivered reminder. So the human
-touch here is purely textual — each message carries the local wall-clock time
-and one of a few natural phrasings, chosen by a stable hash of the reminder's
-identity. The same reminder always renders the same text (idempotent re-runs,
-and the recorded push matches what was delivered); different reminders vary.
+Reminder nudges are normally composed by the model in the assistant's own
+voice (:func:`assistant.compose.compose_push`); these templates seed the facts
+the model composes from and are what its composition falls back to when it
+fails or stalls, so a claimed reminder is never lost. Each message carries the
+local wall-clock time and one of a few natural phrasings, chosen by a stable
+hash of the reminder's identity: the same reminder always renders the same
+text, different reminders vary.
 
 Messages never include the ⏰ prefix — the delivery channels prepend it.
 """

@@ -32,6 +32,14 @@ def settings(tmp_path) -> Settings:
     )
 
 
+@pytest.fixture(autouse=True)
+def _compose_fallback(monkeypatch) -> None:
+    """Stand-in composer: behaves like a failed model (returns the fallback)."""
+    monkeypatch.setattr(
+        "assistant.compose.compose_push", lambda s, **kw: kw["fallback"]
+    )
+
+
 def _iso_in(settings: Settings, **delta) -> str:
     return (context.now(settings) + timedelta(**delta)).isoformat(timespec="minutes")
 

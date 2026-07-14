@@ -168,9 +168,11 @@ Replies longer than Telegram's 4096-char limit are split at newline boundaries.
 ## Proactive reminders
 
 The calendar can nudge you *before* an event, unprompted — "Heads up: Dentist
-at 14:00 (in 1 hour)." — instead of only answering when you ask. Reflex nudges
-are phrased naturally but deterministically (`src/assistant/phrasing.py`, no
-LLM on the tick path), carrying the local wall-clock time. Every delivered push (reminders and the
+at 14:00 (in 1 hour)." — instead of only answering when you ask. Nudges are
+composed by the model in the assistant's own voice, with its memory and agenda
+in context; if the model fails, deterministic templates
+(`src/assistant/phrasing.py`) carry the nudge instead, so a claimed reminder
+is never lost. Every delivered push (reminders and the
 daily briefing) is also recorded into each paired Telegram chat's working memory,
 and into Slack conversations living in `SLACK_NOTIFY_CHANNEL`
 (`ENABLE_PROACTIVE_LOOP_IN`, on by default), so the conversation knows what it
