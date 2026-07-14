@@ -75,8 +75,9 @@ async def _reminder_tick_loop() -> None:
 async def _heartbeat_loop() -> None:
     """Wake the deliberative layer on its own (slow) cadence.
 
-    ``run_heartbeat`` starts with an LLM-free triage, so a tick with nothing to
-    do costs nothing. Same best-effort discipline as the other tickers.
+    Every tick outside quiet hours wakes the model to look around and judge
+    for itself — ``heartbeat_minutes`` is the token-cost dial. Same
+    best-effort discipline as the other tickers.
     """
     while True:
         try:

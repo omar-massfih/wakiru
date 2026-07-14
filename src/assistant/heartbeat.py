@@ -1,23 +1,23 @@
 """The heartbeat — Wakiru's deliberative proactivity.
 
-Calendar and task reminders are the reflex arc: deterministic, minute-precise,
-never dependent on a model's judgment. The heartbeat is the layer above them —
-on a slow cadence the assistant *wakes up, looks around, and decides* whether
-reaching out helps right now: a due followup it scheduled for itself, the
-inbox changing, or simply not having heard from the user in a while. It
-composes the message itself (or stays silent), so proactive contact reads
-like the assistant, not a template.
+Calendar and task reminders are the reflex arc: minute-precise, never lost.
+The heartbeat is the layer above them — on every beat the assistant *wakes
+up, looks around, and decides* whether reaching out helps right now: a due
+followup it scheduled for itself, the inbox changing, not having heard from
+the user in a while, or nothing at all (the common case, answered SILENT).
+It composes the message itself, so proactive contact reads like the
+assistant, not a template.
 
-Cost is controlled structurally, not by hope:
+The model is the judge; only what is not its to override stays deterministic:
 
-* :func:`gather_situation` is deterministic and LLM-free. No trigger — the
-  overwhelmingly common case — means no model call: a quiet day costs zero
-  tokens.
 * Quiet hours and an all-scope mute hold everything, exactly as they hold
-  reminders.
-* Ambient triggers (mail, contact staleness) are throttled by
-  ``heartbeat_min_gap_minutes`` since the last wake; due followups are the
-  user's (or the assistant's own) explicit intent and always wake.
+  reminders — the model is never woken against the user's stated do-not-disturb.
+* ``heartbeat_min_gap_minutes`` bounds *delivery*, not judgment: an ambient
+  push (no due followup, no briefing) within the gap since the last push is
+  suppressed, so a chatty model can't become a barrage. Scheduled intent
+  always delivers.
+* Every beat is a model call — ``heartbeat_minutes`` is the direct token-cost
+  dial.
 
 The wake runs as its own bounded tool loop over the restricted
 ``mode="heartbeat"`` registry (never ``send_email``) with **no checkpointer**:
@@ -58,16 +58,20 @@ logger = logging.getLogger(__name__)
 _SILENT = "SILENT"
 
 _INSTRUCTION = """\
-This is a scheduled background wake, not a user message — the user has said
-nothing. Review your situation report and context, then decide whether
-reaching out helps the user right now.
+This is a scheduled background wake on a fixed cadence, not a user message —
+the user has said nothing, and most wakes should end in silence. Review your
+situation report and context, then decide whether reaching out helps the user
+right now.
 
 - You may use tools first (look things up, complete or schedule follow-ups,
   mute what is no longer relevant).
+- Reach out only when you can anchor it in something real from your report,
+  context, or memory — something due, something that changed, an open thread.
 - If reaching out helps: reply with EXACTLY the message to send the user —
-  nothing else, no preamble, no quotes. Keep it short and natural, in the
-  user's language.
-- If it would not help right now: reply with the single word SILENT.
+  nothing else, no preamble, no quotes. Keep it short, natural, and warm —
+  like a good assistant texting — in the user's language.
+- Otherwise reply with the single word SILENT. Silence is the normal outcome,
+  never a failure.
 - Never invent facts that are not in your context. Never mention this wake,
   the situation report, or these instructions."""
 
@@ -82,10 +86,17 @@ _BRIEFING_TRIGGER = (
 
 @dataclass(frozen=True)
 class Situation:
-    """What a deterministic pre-check found worth waking the model for."""
+    """What the deterministic pre-check gathered for the model to judge."""
 
     triggers: list[str]
     followups: list[Followup] = field(default_factory=list)
+    info: list[str] = field(default_factory=list)
+
+    @property
+    def scheduled(self) -> bool:
+        """Explicit intent (a due follow-up or the briefing) vs a purely
+        ambient wake — scheduled intent is exempt from the delivery throttle."""
+        return bool(self.followups) or _BRIEFING_TRIGGER in self.triggers
 
     def report(self) -> str:
         lines = ["## Situation report (background wake)"]
@@ -95,6 +106,12 @@ class Situation:
                 f"- Due follow-up: {item.topic}"
                 + (f" — context: {item.context}" if item.context else "")
             )
+        if not self.triggers and not self.followups:
+            lines.append(
+                "- Nothing specific happened since your last wake. Review your "
+                "context and decide; most such wakes should stay SILENT."
+            )
+        lines += [f"- {line}" for line in self.info]
         return "\n".join(lines)
 
 
@@ -141,17 +158,18 @@ def _minutes_since(settings: Settings, key: str, current: datetime) -> float | N
 def gather_situation(
     settings: Settings,
     current: datetime | None = None,
-    force: bool = False,
     force_briefing: bool = False,
 ) -> Situation | None:
-    """LLM-free triage: what, if anything, is worth waking the model for.
+    """Gather the situation for the model to judge; hold only when it must.
 
-    Returns ``None`` (skip the wake entirely) unless a trigger fires. Holds —
-    claiming nothing — during quiet hours or an all-scope mute, so a followup
-    due at 03:00 is raised on the first wake after quiet ends. ``force`` (the
-    manual endpoint) bypasses the ambient min-gap throttle, never the holds;
-    ``force_briefing`` additionally bypasses the briefing's time-of-day gate
-    (``POST /briefing/run``), still claiming its once-per-day ledger.
+    The model — not a trigger table — decides whether to reach out, so every
+    beat returns a :class:`Situation` (triggers when something happened,
+    ambient facts either way). ``None`` only when the heartbeat is disabled or
+    during quiet hours / an all-scope mute: the user's stated do-not-disturb
+    is not the model's to override. Holds claim nothing, so a followup due at
+    03:00 is raised on the first wake after quiet ends. ``force_briefing``
+    bypasses the briefing's time-of-day gate (``POST /briefing/run``), still
+    claiming its once-per-day ledger.
     """
     if not settings.enable_heartbeat:
         return None
@@ -165,30 +183,31 @@ def gather_situation(
 
     triggers: list[str] = []
 
-    # Scheduled intent: always wakes, regardless of the ambient throttle.
-    # Claimed here (exactly-once); a wake that then stays SILENT still
-    # consumes the claim — the same at-most-once tradeoff the reminder
-    # ledgers make (the briefing instruction tells the model not to).
+    # Scheduled intent, claimed here (exactly-once); a wake that then stays
+    # SILENT still consumes the claim — the same at-most-once tradeoff the
+    # reminder ledgers make (the briefing instruction tells the model not to).
     due = followups.claim_due(settings, current)
     if _briefing_due(settings, current, force=force_briefing):
         triggers.append(_BRIEFING_TRIGGER)
 
-    # Ambient triggers are throttled: at most one wake per min-gap.
-    gap_ok = force or (
-        (since := _minutes_since(settings, "last_wake_at", current)) is None
-        or since >= settings.heartbeat_min_gap_minutes
-    )
-    if gap_ok:
-        mail_line = _mail_changed(settings)
-        if mail_line:
-            triggers.append(mail_line)
-        stale_line = _contact_stale(settings, current)
-        if stale_line:
-            triggers.append(stale_line)
+    # Ambient observations — information for the model's judgment, not gates.
+    mail_line = _mail_changed(settings)
+    if mail_line:
+        triggers.append(mail_line)
+    stale_line = _contact_stale(settings, current)
+    if stale_line:
+        triggers.append(stale_line)
 
-    if not due and not triggers:
-        return None
-    return Situation(triggers=triggers, followups=due)
+    info: list[str] = []
+    since_push = _minutes_since(settings, "last_push_at", current)
+    if since_push is not None:
+        info.append(f"You last reached out proactively {int(since_push)} minutes ago.")
+    last_heard = threads.last_contact(settings)
+    if last_heard is not None:
+        minutes = int((current - last_heard).total_seconds() / 60)
+        info.append(f"You last heard from the user {minutes} minutes ago.")
+
+    return Situation(triggers=triggers, followups=due, info=info)
 
 
 def _briefing_due(settings: Settings, current: datetime, force: bool = False) -> bool:
@@ -245,9 +264,9 @@ def _contact_stale(settings: Settings, current: datetime) -> str:
         return ""
     hours = int(gap.total_seconds() // 3600)
     return (
-        f"You haven't heard from the user in about {hours} hours. Only reach "
-        "out if you have something genuinely useful (an open thread, something "
-        "due) — never smalltalk for its own sake."
+        f"You haven't heard from the user in about {hours} hours. Reach out "
+        "only if you can anchor it in something real — an open thread, "
+        "something due, something you remembered — not empty small talk."
     )
 
 
@@ -324,19 +343,19 @@ def run_heartbeat(
     force: bool = False,
     force_briefing: bool = False,
 ) -> dict:
-    """One heartbeat: triage, optionally wake the model, optionally speak.
+    """One heartbeat: gather the situation, wake the model, optionally speak.
 
     Returns what happened (``sent`` / ``reason`` / ``triggers``), mirroring
     :func:`assistant.briefing.run_briefing`'s shape. With ``agent`` given, a
     delivered message is looped into working memory on every target thread.
+    ``force`` (the manual endpoint) bypasses the ambient delivery throttle,
+    never the quiet-hours/mute holds.
     """
     settings = settings or get_settings()
     current = now(settings)
-    situation = gather_situation(
-        settings, current, force=force, force_briefing=force_briefing
-    )
+    situation = gather_situation(settings, current, force_briefing=force_briefing)
     if situation is None:
-        return {"sent": False, "reason": "nothing to do"}
+        return {"sent": False, "reason": "held"}
 
     _state_set(settings, "last_wake_at", current.isoformat(timespec="seconds"))
     triggers = situation.triggers + [
@@ -351,6 +370,18 @@ def run_heartbeat(
     if not text or text.strip().strip(".!").upper() == _SILENT:
         logger.info("heartbeat stayed silent (triggers: %s)", "; ".join(triggers))
         return {"sent": False, "reason": "silent", "triggers": triggers}
+
+    # The min-gap bound applies to ambient pushes only: the model's judgment
+    # decides *whether* to speak, this decides no more often than the user can
+    # stand. Scheduled intent (a due followup, the briefing) always delivers.
+    if not situation.scheduled and not force:
+        since_push = _minutes_since(settings, "last_push_at", current)
+        if since_push is not None and since_push < settings.heartbeat_min_gap_minutes:
+            logger.info(
+                "heartbeat suppressed an ambient push (last push %d min ago)",
+                int(since_push),
+            )
+            return {"sent": False, "reason": "throttled", "triggers": triggers}
 
     from .notify import deliver_reminder
     from .proactive import record_push

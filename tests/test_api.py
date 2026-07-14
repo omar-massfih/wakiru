@@ -174,11 +174,11 @@ def test_reminders_run_shape_on_empty_store(client) -> None:
 
 
 def test_heartbeat_run_noop_when_disabled(client, monkeypatch) -> None:
-    # Heartbeat is off by default: the triage skips before any model wiring,
-    # so the endpoint answers without an agent or LLM in play.
+    # Heartbeat is off by default: the disabled hold skips before any model
+    # wiring, so the endpoint answers without an agent or LLM in play.
     monkeypatch.setattr("assistant.api._agent", lambda: None)
     body = client(None).post("/heartbeat/run").json()
-    assert body == {"sent": False, "reason": "nothing to do"}
+    assert body == {"sent": False, "reason": "held"}
 
 
 def test_heartbeat_run_requires_token_when_set(client, monkeypatch) -> None:

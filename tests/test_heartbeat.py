@@ -1,4 +1,4 @@
-"""Heartbeat tests — LLM-free triage, the holds, the wake loop, and delivery.
+"""Heartbeat tests — the holds, the every-beat wake, judgment, and delivery.
 
 The model is faked (a scripted tool-calling chat model, as in test_agent.py);
 everything else — the followup store, mutes, quiet hours, the state KV —
@@ -62,16 +62,21 @@ def _due_followup(settings: Settings, topic: str = "ask about the interview") ->
     followups.add(settings, now(settings) - timedelta(minutes=5), topic, "It was at NAV")
 
 
-# --- gather_situation: the LLM-free triage ----------------------------------- #
+# --- gather_situation: holds and the situation report ------------------------- #
 
 
-def test_no_triggers_means_no_wake_and_no_model_call(settings, monkeypatch) -> None:
+def test_trigger_less_beat_still_wakes_the_model(settings, monkeypatch) -> None:
+    # Nothing happened — the model is still woken to judge, and SILENT
+    # (the normal outcome) delivers nothing.
+    model = _wire_model(monkeypatch, [AIMessage(content="SILENT")])
     monkeypatch.setattr(
-        heartbeat, "build_model",
-        lambda s=None: pytest.fail("no trigger must mean no model call"),
+        "assistant.notify.deliver_reminder",
+        lambda *a, **k: pytest.fail("SILENT must not deliver"),
     )
     result = heartbeat.run_heartbeat(settings)
-    assert result == {"sent": False, "reason": "nothing to do"}
+    assert result["sent"] is False and result["reason"] == "silent"
+    joined = "\n".join(str(m.content) for m in model.prompts[0])
+    assert "Nothing specific happened" in joined
 
 
 def test_disabled_never_wakes(settings) -> None:
@@ -103,14 +108,19 @@ def test_due_followup_is_claimed_exactly_once(settings) -> None:
     assert situation is not None
     assert [f.topic for f in situation.followups] == ["ask about the interview"]
     assert "It was at NAV" in situation.report()
-    assert heartbeat.gather_situation(settings) is None  # consumed
+    assert situation.scheduled
+    again = heartbeat.gather_situation(settings)  # consumed — next beat is ambient
+    assert again is not None and again.followups == [] and not again.scheduled
 
 
-def test_contact_staleness_triggers_and_respects_gap(settings) -> None:
+def test_contact_staleness_is_reported(settings) -> None:
     stale = settings.model_copy(update={"heartbeat_contact_gap_hours": 24})
     threads.touch(stale, "telegram:7")
-    # Fresh contact: no trigger.
-    assert heartbeat.gather_situation(stale) is None
+    # Fresh contact: no staleness line, but the beat still gathers.
+    fresh = heartbeat.gather_situation(stale)
+    assert fresh is not None
+    assert "haven't heard from the user" not in fresh.report()
+    assert "last heard from the user" in fresh.report()  # ambient fact, always
     # Backdate the contact stamp two days.
     old = (now(stale) - timedelta(days=2)).isoformat(timespec="seconds")
     with threads._connect(stale) as conn:
@@ -118,14 +128,8 @@ def test_contact_staleness_triggers_and_respects_gap(settings) -> None:
     situation = heartbeat.gather_situation(stale)
     assert situation is not None and "haven't heard from the user" in situation.report()
 
-    # A recent wake throttles the ambient trigger (min-gap) …
-    heartbeat._state_set(stale, "last_wake_at", now(stale).isoformat(timespec="seconds"))
-    assert heartbeat.gather_situation(stale) is None
-    # … but force (the manual endpoint) bypasses the throttle.
-    assert heartbeat.gather_situation(stale, force=True) is not None
 
-
-def test_mail_change_triggers_once_per_snapshot(settings, monkeypatch) -> None:
+def test_mail_change_is_reported_once_per_snapshot(settings, monkeypatch) -> None:
     mail_on = settings.model_copy(update={"enable_email": True})
     monkeypatch.setattr(
         "assistant.mail.snapshot.current",
@@ -133,9 +137,11 @@ def test_mail_change_triggers_once_per_snapshot(settings, monkeypatch) -> None:
     )
     first = heartbeat.gather_situation(mail_on)
     assert first is not None and "unread-mail snapshot changed" in first.report()
-    # The same snapshot never re-triggers (hash consumed), even after the gap.
-    heartbeat._state_set(mail_on, "last_wake_at", "")
-    assert heartbeat.gather_situation(mail_on) is None
+    # The same snapshot never re-raises (hash consumed) — later beats gather
+    # without the mail line.
+    second = heartbeat.gather_situation(mail_on)
+    assert second is not None
+    assert "unread-mail snapshot changed" not in second.report()
 
 
 # --- run_heartbeat: the wake loop and delivery -------------------------------- #
@@ -168,6 +174,61 @@ def test_message_is_delivered_and_looped_in(settings, monkeypatch) -> None:
     assert result["sent"] is True and result["delivered"] is True
     assert delivered == [{"title": "Wakiru", "message": "Hei! Hvordan gikk intervjuet?"}]
     assert recorded == ["Hei! Hvordan gikk intervjuet?"]
+
+
+def test_ambient_push_is_throttled_by_min_gap(settings, monkeypatch) -> None:
+    # A purely ambient wake (no followup, no briefing) whose push would land
+    # within the min gap of the previous push is suppressed — the bound is on
+    # delivery, never on the model's judgment.
+    _wire_model(monkeypatch, [AIMessage(content="Tenkte på deg!")])
+    monkeypatch.setattr(
+        "assistant.notify.deliver_reminder",
+        lambda *a, **k: pytest.fail("a throttled push must not deliver"),
+    )
+    heartbeat._state_set(
+        settings, "last_push_at", now(settings).isoformat(timespec="seconds")
+    )
+    result = heartbeat.run_heartbeat(settings)
+    assert result["sent"] is False and result["reason"] == "throttled"
+
+
+def test_ambient_push_delivers_once_the_gap_has_passed(settings, monkeypatch) -> None:
+    _wire_model(monkeypatch, [AIMessage(content="Tenkte på deg!")])
+    delivered: list[dict] = []
+    monkeypatch.setattr(
+        "assistant.notify.deliver_reminder", lambda s, r: delivered.append(r) or True
+    )
+    old = now(settings) - timedelta(minutes=settings.heartbeat_min_gap_minutes + 1)
+    heartbeat._state_set(settings, "last_push_at", old.isoformat(timespec="seconds"))
+    result = heartbeat.run_heartbeat(settings)
+    assert result["sent"] is True and delivered
+
+
+def test_scheduled_intent_delivers_regardless_of_gap(settings, monkeypatch) -> None:
+    _due_followup(settings)
+    _wire_model(monkeypatch, [AIMessage(content="Hvordan gikk intervjuet?")])
+    delivered: list[dict] = []
+    monkeypatch.setattr(
+        "assistant.notify.deliver_reminder", lambda s, r: delivered.append(r) or True
+    )
+    heartbeat._state_set(
+        settings, "last_push_at", now(settings).isoformat(timespec="seconds")
+    )
+    result = heartbeat.run_heartbeat(settings)
+    assert result["sent"] is True and delivered
+
+
+def test_force_bypasses_the_ambient_throttle(settings, monkeypatch) -> None:
+    _wire_model(monkeypatch, [AIMessage(content="Tenkte på deg!")])
+    delivered: list[dict] = []
+    monkeypatch.setattr(
+        "assistant.notify.deliver_reminder", lambda s, r: delivered.append(r) or True
+    )
+    heartbeat._state_set(
+        settings, "last_push_at", now(settings).isoformat(timespec="seconds")
+    )
+    result = heartbeat.run_heartbeat(settings, force=True)
+    assert result["sent"] is True and delivered
 
 
 def test_wake_prompt_carries_persona_context_and_situation(settings, monkeypatch) -> None:
@@ -204,7 +265,8 @@ def test_wake_can_use_tools_before_answering(settings, monkeypatch) -> None:
     assert result["reason"] == "silent"
     assert [f.topic for f in followups.list_open(settings)] == ["check again tomorrow"]
     assert {s["function"]["name"] for s in model.bound_schemas} >= {"schedule_followup"}
-    assert "send_email" not in {s["function"]["name"] for s in model.bound_schemas}
+    bound = {s["function"]["name"] for s in model.bound_schemas}
+    assert "send_email" not in bound and "undo" not in bound
 
 
 def test_composition_failure_is_contained(settings, monkeypatch) -> None:
@@ -237,13 +299,16 @@ def _at(settings: Settings, hhmm: str):
 def test_briefing_trigger_claims_once_per_day(settings) -> None:
     with_briefing = settings.model_copy(update={"enable_briefing": True})
     early = heartbeat.gather_situation(with_briefing, _at(with_briefing, "06:00"))
-    assert early is None  # before briefing_time — no trigger
+    assert early is not None  # the beat gathers…
+    assert "daily briefing" not in early.report().lower()  # …but no trigger yet
 
     due = heartbeat.gather_situation(with_briefing, _at(with_briefing, "08:00"))
     assert due is not None and "daily briefing" in due.report().lower()
+    assert due.scheduled
 
     again = heartbeat.gather_situation(with_briefing, _at(with_briefing, "09:00"))
-    assert again is None  # claimed for the day
+    assert again is not None
+    assert "daily briefing" not in again.report().lower()  # claimed for the day
 
 
 def test_briefing_ledger_is_shared_with_template_path(settings, monkeypatch) -> None:
@@ -256,10 +321,14 @@ def test_briefing_ledger_is_shared_with_template_path(settings, monkeypatch) -> 
     )
     monkeypatch.setattr(briefing, "deliver_reminder", lambda s, r: True)
     monkeypatch.setattr(briefing, "now", lambda s: _at(with_briefing, "08:00"))
+    monkeypatch.setattr(
+        "assistant.compose.compose_push", lambda s, **kw: kw["fallback"]
+    )
     assert briefing.run_briefing(with_briefing)["sent"]
 
     both_on = with_briefing.model_copy(update={"enable_heartbeat": True})
-    assert heartbeat.gather_situation(both_on, _at(both_on, "09:00")) is None
+    later = heartbeat.gather_situation(both_on, _at(both_on, "09:00"))
+    assert later is not None and "daily briefing" not in later.report().lower()
 
 
 def test_forced_briefing_bypasses_time_gate_only(settings) -> None:
@@ -269,4 +338,6 @@ def test_forced_briefing_bypasses_time_gate_only(settings) -> None:
     )
     assert early is not None and "daily briefing" in early.report().lower()
     # Still once per day: the forced claim blocks the scheduled one.
-    assert heartbeat.gather_situation(with_briefing, _at(with_briefing, "08:00")) is None
+    scheduled = heartbeat.gather_situation(with_briefing, _at(with_briefing, "08:00"))
+    assert scheduled is not None
+    assert "daily briefing" not in scheduled.report().lower()

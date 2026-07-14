@@ -319,18 +319,19 @@ class Settings(BaseSettings):
 
     # --- Heartbeat (deliberative proactivity) ---
     # Periodically let the model itself review the situation (due followups,
-    # briefing, mail changes, contact staleness) and decide whether reaching
-    # out helps — or stay silent. Deterministic calendar/task reminders keep
+    # briefing, mail changes, contact staleness — or nothing at all) and
+    # decide whether reaching out helps — or stay silent. Reminders keep
     # running regardless: they are the reflex arc, this is the deliberative
     # layer. Off by default; also unlocks the schedule_followup tools.
     enable_heartbeat: bool = False
-    # Minutes between heartbeat wakes. The LLM only runs when a cheap
-    # pre-check finds a trigger, so a quiet day costs zero tokens. 0 disables
-    # the ticker (POST /heartbeat/run still works).
+    # Minutes between heartbeat wakes. EVERY wake is a model call (only quiet
+    # hours and an all-scope mute hold it), so this is the direct token-cost
+    # dial. 0 disables the ticker (POST /heartbeat/run still works).
     heartbeat_minutes: int = 30
-    # Minimum minutes between ambient heartbeat wakes (mail changes, contact
-    # staleness), so a busy inbox doesn't become a barrage. Due follow-ups are
-    # explicit intent and always wake regardless of the gap.
+    # Minimum minutes between ambient heartbeat *pushes* (a message the model
+    # composed with no due follow-up or briefing behind it), so a chatty model
+    # doesn't become a barrage. Bounds delivery, never the model's judgment;
+    # due follow-ups and the briefing always deliver regardless of the gap.
     heartbeat_min_gap_minutes: int = 120
     # Hours of user silence (across all channels) before "we haven't talked in
     # a while" becomes a heartbeat trigger. 0 disables the staleness trigger.
