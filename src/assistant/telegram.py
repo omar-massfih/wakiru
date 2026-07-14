@@ -28,6 +28,7 @@ import logging
 import os
 import secrets
 import tempfile
+import threading
 import urllib.error
 import urllib.request
 from collections.abc import Callable
@@ -38,8 +39,7 @@ from langgraph.graph.state import CompiledStateGraph
 from markdown_it import MarkdownIt
 from markdown_it.token import Token
 
-from .chat import run_chat, run_upkeep
-from .codex_runner import CodexError
+from .chat import error_reply, run_chat, run_upkeep
 from .config import Settings
 
 logger = logging.getLogger(__name__)
@@ -53,6 +53,9 @@ _POLL_SECONDS = 30
 _TIMEOUT_MARGIN_SECONDS = 15
 # Back-off after a failed poll so an outage doesn't spin the loop.
 _RETRY_SECONDS = 5
+# How often the typing bubble is re-sent while a turn runs (Telegram expires
+# each sendChatAction after ~5s).
+_TYPING_REFRESH_SECONDS = 4.0
 _SAFE_LINK_SCHEMES = {"http", "https", "mailto", "tg"}
 _MARKDOWN = MarkdownIt("default", {"html": False, "linkify": False, "typographer": False})
 
@@ -150,6 +153,31 @@ def _handle_pairing(settings: Settings, token: str, chat_id: int, text: str) -> 
         "This assistant isn't paired yet. Reply with the pairing code "
         "printed in its server log to pair this chat.",
     )
+
+
+@contextlib.contextmanager
+def _typing(token: str, chat_id: int):
+    """Keep the chat's "typing…" bubble alive while the body runs.
+
+    Telegram expires each ``sendChatAction`` after ~5 seconds — far shorter
+    than a model turn — so a daemon thread re-sends it until the reply is
+    ready. Every send is best-effort: presence must never break the turn.
+    """
+    stop = threading.Event()
+
+    def _keepalive() -> None:
+        while not stop.is_set():
+            with contextlib.suppress(urllib.error.URLError, OSError, RuntimeError):
+                _call(token, "sendChatAction", {"chat_id": chat_id, "action": "typing"})
+            stop.wait(_TYPING_REFRESH_SECONDS)
+
+    thread = threading.Thread(target=_keepalive, daemon=True, name="telegram-typing")
+    thread.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        thread.join(timeout=1)
 
 
 def _chunks(text: str) -> list[str]:
@@ -378,6 +406,43 @@ def send_message(token: str, chat_id: int, text: str) -> None:
         raise last_error
 
 
+def _mergeable_text(update: dict) -> tuple[int, str] | None:
+    """``(chat_id, text)`` when the update can join a coalesced run.
+
+    Only plain-text, non-command messages qualify; voice notes, media, and
+    slash commands are handled individually and break a run.
+    """
+    message = update.get("message") or {}
+    chat_id = (message.get("chat") or {}).get("id")
+    text = message.get("text")
+    if chat_id is None or not isinstance(text, str) or not text or text.startswith("/"):
+        return None
+    return chat_id, text
+
+
+def _coalesce(updates: list[dict]) -> list[dict]:
+    """Merge runs of consecutive plain-text messages from the same chat.
+
+    Messages sent while a turn was running are queued by Telegram and all
+    arrive in the next poll batch; answered one by one they read like a bot
+    replying to fragments of a thought. Merged texts are joined with newlines
+    into a synthetic update that keeps the *last* message's ``update_id``, so
+    offset semantics are unchanged.
+    """
+    merged: list[dict] = []
+    for update in updates:
+        current = _mergeable_text(update)
+        previous = _mergeable_text(merged[-1]) if merged else None
+        if current and previous and current[0] == previous[0]:
+            combined = dict(update)
+            combined["message"] = dict(update["message"])
+            combined["message"]["text"] = f"{previous[1]}\n{current[1]}"
+            merged[-1] = combined
+            continue
+        merged.append(update)
+    return merged
+
+
 def get_updates(token: str, offset: int | None) -> list[dict]:
     """One long-poll round; returns whatever updates arrived (possibly none)."""
     payload: dict = {"timeout": _POLL_SECONDS, "allowed_updates": ["message"]}
@@ -563,10 +628,9 @@ def handle_update(
                 f"That voice note is too long — keep it under {settings.voice_max_seconds}s.",
             )
             return None
-        with contextlib.suppress(urllib.error.URLError, OSError, RuntimeError):
-            _call(token, "sendChatAction", {"chat_id": chat_id, "action": "typing"})
         try:
-            text = _transcribe_voice(token, settings, voice)
+            with _typing(token, chat_id):
+                text = _transcribe_voice(token, settings, voice)
         except Exception:
             logger.exception("voice transcription failed for chat %s", chat_id)
             send_message(token, chat_id, "Sorry — I couldn't make out that voice note. Try again?")
@@ -584,15 +648,13 @@ def handle_update(
     if _dispatch_command(agent, settings, token, chat_id, text, thread_id):
         return None
 
-    # Show "typing…" while the model thinks (best-effort; it expires after ~5s).
-    with contextlib.suppress(urllib.error.URLError, OSError, RuntimeError):
-        _call(token, "sendChatAction", {"chat_id": chat_id, "action": "typing"})
-
     try:
-        reply = run_chat(agent, text, thread_id, settings=settings)
-    except CodexError as exc:
-        logger.error("telegram chat turn failed: %s", exc)
-        send_message(token, chat_id, "Sorry — I hit an error answering that. Try again.")
+        with _typing(token, chat_id):
+            reply = run_chat(agent, text, thread_id, settings=settings)
+    except Exception as exc:
+        # Whatever failed, the user must hear something better than silence.
+        logger.exception("telegram chat turn failed")
+        send_message(token, chat_id, error_reply(exc))
         return None
     send_message(token, chat_id, reply)
     return lambda: run_upkeep(agent, settings, text, reply, thread_id)
@@ -625,9 +687,13 @@ async def poll_loop(agent: CompiledStateGraph, settings: Settings) -> None:
             logger.exception("telegram getUpdates failed; retrying in %ss", _RETRY_SECONDS)
             await asyncio.sleep(_RETRY_SECONDS)
             continue
+        if updates:
+            # Advance past the whole batch first (updates arrive in id order):
+            # a poison update must not be redelivered forever.
+            offset = updates[-1]["update_id"] + 1
+        if settings.telegram_coalesce_messages:
+            updates = _coalesce(updates)
         for update in updates:
-            # Advance first: a poison update must not be redelivered forever.
-            offset = update["update_id"] + 1
             try:
                 upkeep = await asyncio.to_thread(handle_update, agent, settings, update)
             except Exception:

@@ -43,13 +43,15 @@ from collections.abc import Callable
 
 from langgraph.graph.state import CompiledStateGraph
 
-from .chat import run_chat, run_upkeep
-from .codex_runner import CodexError
+from .chat import error_reply, run_chat, run_upkeep
 from .config import Settings
 
 logger = logging.getLogger(__name__)
 
 _API_URL = "https://slack.com/api/chat.postMessage"
+_REACTIONS_URL = "https://slack.com/api/reactions.{method}"
+# Reaction shown on a message while its turn is being composed.
+_THINKING_REACTION = "hourglass_flowing_sand"
 _TIMEOUT_SECONDS = 10
 # Reject callbacks older than this; Slack's own guidance for replay protection.
 _MAX_SKEW_SECONDS = 60 * 5
@@ -117,6 +119,34 @@ def post_message(token: str, channel: str, text: str) -> None:
         logger.warning("slack chat.postMessage failed: %s", payload.get("error"))
 
 
+def _react(token: str, channel: str, ts: str, method: str) -> None:
+    """Add or remove the thinking reaction on one message, best-effort.
+
+    ``method`` is ``"add"`` or ``"remove"``. Never raises: presence is a
+    nicety, and a workspace without the ``reactions:write`` scope must still
+    get its reply (the API error is logged at debug and swallowed).
+    """
+    body = json.dumps(
+        {"channel": channel, "timestamp": ts, "name": _THINKING_REACTION}
+    ).encode("utf-8")
+    request = urllib.request.Request(
+        _REACTIONS_URL.format(method=method),
+        data=body,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json; charset=utf-8",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=_TIMEOUT_SECONDS) as response:
+            payload = json.loads(response.read() or b"{}")
+        if not payload.get("ok"):
+            logger.debug("slack reactions.%s failed: %s", method, payload.get("error"))
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        logger.debug("slack reactions.%s failed: %s", method, exc)
+
+
 def authorized_users(settings: Settings) -> list[str]:
     """The Slack user ids this bot will answer. Empty means nobody."""
     return list(settings.slack_allowed_user_ids)
@@ -158,12 +188,22 @@ def handle_event(
         return None
 
     thread_id = f"slack:{channel}:{user}"
+    ts = str(event.get("ts", ""))
+    if ts:
+        # Slack has no typing indicator for bots; a reaction on the incoming
+        # message is the "I'm on it" signal while the turn runs.
+        _react(token, channel, ts, "add")
     try:
         reply = run_chat(agent, text, thread_id, settings=settings)
-    except CodexError as exc:
-        logger.error("slack chat turn failed: %s", exc)
-        post_message(token, channel, "Sorry — I hit an error answering that. Try again.")
+    except Exception as exc:
+        # Both transports run this off the request path, so an unexplained
+        # failure would otherwise be silence to the user.
+        logger.exception("slack chat turn failed")
+        post_message(token, channel, error_reply(exc))
         return None
+    finally:
+        if ts:
+            _react(token, channel, ts, "remove")
     post_message(token, channel, reply)
     return lambda: run_upkeep(agent, settings, text, reply, thread_id)
 

@@ -186,3 +186,19 @@ def test_run_chat_stream_filters_tool_call_chunks(settings) -> None:
     agent = _ToolStreamingAgent(["all ", "done"])
     chunks = _collect(chat.run_chat_stream(agent, "hi", THREAD, settings=settings))
     assert chunks == ["all ", "done"]  # the structured call never reaches the wire
+
+
+def test_error_reply_distinguishes_failure_kinds() -> None:
+    from assistant.codex_runner import CodexError, CodexTimeoutError
+
+    timeout = chat.error_reply(CodexTimeoutError("Codex timed out after 300s."))
+    snag = chat.error_reply(CodexError("Codex exited with code 1"))
+    unexpected = chat.error_reply(ValueError("boom"))
+
+    assert "too long" in timeout
+    assert chat.error_reply(TimeoutError()) == timeout  # plain timeouts map alike
+    assert "snag" in snag
+    assert "unexpected" in unexpected.lower()
+    # No internals leak into any of them.
+    for text in (timeout, snag, unexpected):
+        assert "Codex" not in text and "boom" not in text

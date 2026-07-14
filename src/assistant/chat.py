@@ -17,11 +17,29 @@ from langgraph.graph.state import CompiledStateGraph
 
 from . import threads
 from .agent import maybe_summarize
+from .codex_runner import CodexError, CodexTimeoutError
 from .config import Settings, get_settings
 from .memory import consolidate_memory, index, update_memory
 from .undo import undo_latest
 
 logger = logging.getLogger(__name__)
+
+
+def error_reply(exc: Exception) -> str:
+    """A human explanation of a failed turn, by failure kind.
+
+    Chat channels (Telegram, Slack) show this instead of a one-size apology —
+    or worse, silence. Deliberately content-free about internals: the log has
+    the traceback, the user just needs to know whether retrying can help.
+    """
+    if isinstance(exc, CodexTimeoutError | TimeoutError):
+        return (
+            "That one took too long and I gave up partway. "
+            "Try again — or break it into smaller steps."
+        )
+    if isinstance(exc, CodexError):
+        return "My reasoning engine hit a snag. Give it a moment and try again."
+    return "Something unexpected broke on my end — it's logged. Try once more."
 
 
 def _is_undo_command(settings: Settings, message: str) -> bool:

@@ -38,6 +38,14 @@ class CodexError(RuntimeError):
     """Raised when the Codex CLI exits non-zero or times out."""
 
 
+class CodexTimeoutError(CodexError):
+    """Raised when a Codex invocation exceeds ``codex_timeout``.
+
+    A subclass so ``except CodexError`` callers keep working, while channels
+    can tell "took too long" from "broke" when explaining a failure.
+    """
+
+
 def build_command(
     output_file: str, settings: Settings, json_events: bool = False
 ) -> list[str]:
@@ -104,7 +112,7 @@ def run_codex(prompt: str, settings: Settings | None = None) -> str:
                 f"Codex binary {settings.codex_bin!r} not found on PATH."
             ) from exc
         except subprocess.TimeoutExpired as exc:
-            raise CodexError(
+            raise CodexTimeoutError(
                 f"Codex timed out after {settings.codex_timeout}s."
             ) from exc
 
@@ -237,7 +245,7 @@ def run_codex_stream(prompt: str, settings: Settings | None = None) -> Iterator[
                 proc.wait()
 
         if timed_out.is_set():
-            raise CodexError(f"Codex timed out after {settings.codex_timeout}s.")
+            raise CodexTimeoutError(f"Codex timed out after {settings.codex_timeout}s.")
         if failure or proc.returncode != 0:
             stderr = (stderr_text[0].strip() if stderr_text else "") or ""
             raise CodexError(

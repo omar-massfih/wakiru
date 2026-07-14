@@ -7,12 +7,13 @@ monkeypatched, so these stay fast and offline.
 
 from __future__ import annotations
 
+import time
 from urllib.error import HTTPError, URLError
 
 import pytest
 
 from assistant import notify, telegram
-from assistant.codex_runner import CodexError
+from assistant.codex_runner import CodexError, CodexTimeoutError
 from assistant.config import Settings
 
 
@@ -260,7 +261,7 @@ def test_authorized_chat_gets_reply_and_upkeep(tmp_path, calls, monkeypatch) -> 
     assert len(upkeep) == 1  # … but the deferred upkeep carries the turn
 
 
-def test_codex_error_sends_apology(tmp_path, calls, monkeypatch) -> None:
+def test_codex_error_sends_snag_reply(tmp_path, calls, monkeypatch) -> None:
     settings = _settings(tmp_path, telegram_allowed_chat_ids=[7])
 
     def boom(*args, **kwargs):
@@ -270,7 +271,159 @@ def test_codex_error_sends_apology(tmp_path, calls, monkeypatch) -> None:
     assert telegram.handle_update(None, settings, _update(chat_id=7)) is None
     sends = _sends(calls)
     assert len(sends) == 1
-    assert "error" in sends[0]["text"].lower()
+    assert "snag" in sends[0]["text"].lower()
+
+
+def test_timeout_error_sends_timeout_reply(tmp_path, calls, monkeypatch) -> None:
+    settings = _settings(tmp_path, telegram_allowed_chat_ids=[7])
+
+    def boom(*args, **kwargs):
+        raise CodexTimeoutError("Codex timed out after 300s.")
+
+    monkeypatch.setattr(telegram, "run_chat", boom)
+    assert telegram.handle_update(None, settings, _update(chat_id=7)) is None
+    sends = _sends(calls)
+    assert len(sends) == 1
+    assert "too long" in sends[0]["text"].lower()
+
+
+def test_unexpected_error_sends_reply_not_silence(tmp_path, calls, monkeypatch) -> None:
+    settings = _settings(tmp_path, telegram_allowed_chat_ids=[7])
+
+    def boom(*args, **kwargs):
+        raise ValueError("not a codex problem")
+
+    monkeypatch.setattr(telegram, "run_chat", boom)
+    # Before error_reply, a non-Codex failure escaped to the poll loop and the
+    # user heard nothing. Now the turn ends cleanly with an explanation.
+    assert telegram.handle_update(None, settings, _update(chat_id=7)) is None
+    sends = _sends(calls)
+    assert len(sends) == 1
+    assert "unexpected" in sends[0]["text"].lower()
+
+
+# --- typing keepalive ------------------------------------------------------- #
+
+
+def _typing_actions(calls: list[tuple[str, dict]]) -> list[dict]:
+    return [payload for method, payload in calls if method == "sendChatAction"]
+
+
+def test_typing_keepalive_repeats_until_exit(calls, monkeypatch) -> None:
+    monkeypatch.setattr(telegram, "_TYPING_REFRESH_SECONDS", 0.01)
+    with telegram._typing("tok", 7):
+        deadline = time.time() + 2
+        while len(_typing_actions(calls)) < 3:
+            assert time.time() < deadline, "typing keepalive never repeated"
+            time.sleep(0.005)
+    # The keepalive thread is joined on exit, so the count is final now.
+    count = len(_typing_actions(calls))
+    time.sleep(0.05)
+    assert len(_typing_actions(calls)) == count
+    assert all(p == {"chat_id": 7, "action": "typing"} for p in _typing_actions(calls))
+
+
+def test_typing_keepalive_swallows_transport_errors(monkeypatch) -> None:
+    monkeypatch.setattr(telegram, "_TYPING_REFRESH_SECONDS", 0.01)
+
+    def boom(*args, **kwargs):
+        raise URLError("network down")
+
+    monkeypatch.setattr(telegram, "_call", boom)
+    with telegram._typing("tok", 7):  # must not raise, in or after the body
+        time.sleep(0.03)
+
+
+def test_turn_keeps_typing_alive_while_model_runs(tmp_path, calls, monkeypatch) -> None:
+    settings = _settings(tmp_path, telegram_allowed_chat_ids=[7])
+    monkeypatch.setattr(telegram, "_TYPING_REFRESH_SECONDS", 0.01)
+
+    def slow_chat(agent, text, thread, **kw):
+        time.sleep(0.05)
+        return "ok"
+
+    monkeypatch.setattr(telegram, "run_chat", slow_chat)
+    telegram.handle_update(None, settings, _update(chat_id=7))
+    # More than the old one-shot: the bubble outlives Telegram's ~5s expiry.
+    assert len(_typing_actions(calls)) >= 2
+
+
+# --- message coalescing ------------------------------------------------------ #
+
+
+def test_coalesce_merges_consecutive_same_chat_texts() -> None:
+    updates = [
+        _update(7, "book dentist", 1),
+        _update(7, "thursday", 2),
+        _update(7, "morning if possible", 3),
+    ]
+    merged = telegram._coalesce(updates)
+    assert len(merged) == 1
+    assert merged[0]["update_id"] == 3  # offset semantics unchanged
+    assert merged[0]["message"]["text"] == "book dentist\nthursday\nmorning if possible"
+
+
+def test_coalesce_never_merges_across_chats() -> None:
+    updates = [_update(7, "a", 1), _update(8, "b", 2), _update(7, "c", 3)]
+    assert telegram._coalesce(updates) == updates
+
+
+def test_coalesce_breaks_on_commands_and_voice() -> None:
+    voice = {"update_id": 2, "message": {"chat": {"id": 7}, "voice": {"file_id": "x"}}}
+    updates = [
+        _update(7, "a", 1),
+        voice,
+        _update(7, "b", 3),
+        _update(7, "/tasks", 4),
+        _update(7, "c", 5),
+    ]
+    assert [u["update_id"] for u in telegram._coalesce(updates)] == [1, 2, 3, 4, 5]
+
+
+def test_coalesce_does_not_mutate_the_originals() -> None:
+    updates = [_update(7, "a", 1), _update(7, "b", 2)]
+    telegram._coalesce(updates)
+    assert updates[0]["message"]["text"] == "a"
+    assert updates[1]["message"]["text"] == "b"
+
+
+def _run_poll_once(settings, monkeypatch, batch: list[dict]) -> list[str]:
+    """Drive poll_loop through one batch; return the texts handle_update saw."""
+    import asyncio
+
+    handled: list[str] = []
+
+    def fake_handle(agent, s, update):
+        handled.append(update["message"]["text"])
+        return None
+
+    def fake_get_updates(token, offset):
+        if offset is None:
+            return batch
+        raise asyncio.CancelledError  # end the otherwise-infinite loop
+
+    monkeypatch.setattr(telegram, "handle_update", fake_handle)
+    monkeypatch.setattr(telegram, "get_updates", fake_get_updates)
+    monkeypatch.setattr(telegram, "set_commands", lambda token: None)
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(telegram.poll_loop(None, settings))
+    return handled
+
+
+def test_poll_loop_coalesces_a_batch_into_one_turn(tmp_path, monkeypatch) -> None:
+    settings = _settings(tmp_path)  # coalescing is on by default
+    handled = _run_poll_once(
+        settings, monkeypatch, [_update(7, "first", 1), _update(7, "second", 2)]
+    )
+    assert handled == ["first\nsecond"]
+
+
+def test_poll_loop_coalescing_can_be_disabled(tmp_path, monkeypatch) -> None:
+    settings = _settings(tmp_path, telegram_coalesce_messages=False)
+    handled = _run_poll_once(
+        settings, monkeypatch, [_update(7, "first", 1), _update(7, "second", 2)]
+    )
+    assert handled == ["first", "second"]
 
 
 # --- reminder fan-out --------------------------------------------------------- #
@@ -378,7 +531,8 @@ def test_poll_loop_survives_poison_updates_and_outages(tmp_path, monkeypatch) ->
     def fake_get_updates(token, offset):
         offsets.append(offset)
         if len(offsets) == 1:
-            return [_update(update_id=1), _update(update_id=2)]
+            # Distinct chats so coalescing never merges the poison update away.
+            return [_update(chat_id=8, update_id=1), _update(chat_id=9, update_id=2)]
         if len(offsets) == 2:
             # Runs in a worker thread, so blocking here is fine: prove the
             # previous turn's upkeep completed in the background, then fail.

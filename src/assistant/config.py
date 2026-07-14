@@ -336,6 +336,10 @@ class Settings(BaseSettings):
     # paired set — use it to pin the owner up front or add extra chats. Proactive
     # reminders are pushed to all authorized chats.
     telegram_allowed_chat_ids: list[int] = []
+    # Merge consecutive plain-text messages from the same chat (typically sent
+    # while a reply was still being composed) into one turn, so a thought split
+    # across several messages gets one considered answer instead of fragments.
+    telegram_coalesce_messages: bool = True
 
     # --- Voice notes (Telegram) ---
     # Transcribe incoming Telegram voice messages locally (faster-whisper) and

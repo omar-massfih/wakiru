@@ -167,7 +167,7 @@ def test_already_seen_is_bounded_and_ignores_empty_ids() -> None:
     assert len(slack._seen_events) <= slack._SEEN_MAX
 
 
-def test_codex_error_posts_apology(posted, monkeypatch) -> None:
+def test_codex_error_posts_snag_reply(posted, monkeypatch) -> None:
     from assistant.codex_runner import CodexError
 
     settings = _settings(slack_allowed_user_ids=["U1"])
@@ -177,7 +177,86 @@ def test_codex_error_posts_apology(posted, monkeypatch) -> None:
 
     monkeypatch.setattr(slack, "run_chat", boom)
     assert slack.handle_event(None, settings, _event()) is None
-    assert "hit an error" in posted[0][1]
+    assert "snag" in posted[0][1].lower()
+
+
+def test_unexpected_error_posts_explanation_not_silence(posted, monkeypatch) -> None:
+    settings = _settings(slack_allowed_user_ids=["U1"])
+
+    def boom(*a, **k):
+        raise ValueError("not a codex problem")
+
+    monkeypatch.setattr(slack, "run_chat", boom)
+    # Both transports run the turn off the request path; without this the
+    # user's only feedback for a non-Codex failure was silence.
+    assert slack.handle_event(None, settings, _event()) is None
+    assert "unexpected" in posted[0][1].lower()
+
+
+# --- thinking reaction --------------------------------------------------------- #
+
+
+@pytest.fixture
+def reactions(monkeypatch) -> list[tuple[str, str]]:
+    recorded: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        slack, "_react", lambda tok, ch, ts, method: recorded.append((method, ts))
+    )
+    return recorded
+
+
+def test_thinking_reaction_wraps_the_turn(posted, reactions, monkeypatch) -> None:
+    settings = _settings(slack_allowed_user_ids=["U1"])
+    monkeypatch.setattr(slack, "run_chat", lambda *a, **kw: "hi")
+    monkeypatch.setattr(slack, "run_upkeep", lambda *a: None)
+
+    slack.handle_event(None, settings, _event(ts="111.222"))
+    assert reactions == [("add", "111.222"), ("remove", "111.222")]
+
+
+def test_thinking_reaction_removed_when_the_turn_fails(posted, reactions, monkeypatch) -> None:
+    settings = _settings(slack_allowed_user_ids=["U1"])
+
+    def boom(*a, **k):
+        raise ValueError("boom")
+
+    monkeypatch.setattr(slack, "run_chat", boom)
+    slack.handle_event(None, settings, _event(ts="333.444"))
+    assert reactions == [("add", "333.444"), ("remove", "333.444")]
+
+
+def test_missing_ts_skips_the_reaction(posted, reactions, monkeypatch) -> None:
+    settings = _settings(slack_allowed_user_ids=["U1"])
+    monkeypatch.setattr(slack, "run_chat", lambda *a, **kw: "hi")
+    monkeypatch.setattr(slack, "run_upkeep", lambda *a: None)
+
+    slack.handle_event(None, settings, _event())  # no ts on the event
+    assert reactions == []
+    assert posted  # the reply still goes out
+
+
+def test_react_swallows_transport_and_api_errors(monkeypatch) -> None:
+    import urllib.error
+    import urllib.request
+
+    def down(*a, **k):
+        raise urllib.error.URLError("network down")
+
+    monkeypatch.setattr(urllib.request, "urlopen", down)
+    slack._react("tok", "C1", "1.2", "add")  # must not raise
+
+    class _MissingScope:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return b'{"ok": false, "error": "missing_scope"}'
+
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: _MissingScope())
+    slack._react("tok", "C1", "1.2", "add")  # API refusal must not raise either
 
 
 # --- socket mode -------------------------------------------------------------- #

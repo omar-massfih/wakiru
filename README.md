@@ -59,7 +59,9 @@ Telegram bot  /
   by HMAC signature over the raw body, or — when `SLACK_APP_TOKEN` is set — a Socket Mode
   websocket that needs no public URL (works behind NAT, like Telegram). Only allowlisted user
   ids are answered — with no pairing handshake, an empty allowlist fails closed. Reminders can
-  fan out to Slack too.
+  fan out to Slack too. While a turn runs, the incoming message gets an ⏳ reaction as an
+  "I'm on it" signal — grant the app the `reactions:write` scope for this (without it the
+  reaction is silently skipped and everything else still works).
 - **`webui.py`** — a single self-contained HTML page at `GET /ui` that streams replies from
   `/chat/stream`. No build step, no CDN. Prompts for `API_TOKEN` when one is configured.
 
