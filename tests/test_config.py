@@ -35,3 +35,10 @@ def test_defaults_keep_the_conservative_posture() -> None:
     assert settings.llm_provider == "codex"
     assert settings.enable_email is False  # the only external-service subsystem
     assert settings.enable_email_send is False  # sending needs a second switch
+
+
+def test_persona_and_quiet_defaults() -> None:
+    assert Settings().persona_style == "warm"
+    # conftest blanks QUIET_HOURS_DEFAULT in the test environment, so the
+    # declared default is asserted on the model itself.
+    assert Settings.model_fields["quiet_hours_default"].default == "22:00-07:30"

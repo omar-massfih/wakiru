@@ -91,10 +91,11 @@ _quiet_cache: dict[str, tuple[float, tuple[dtime, dtime] | None]] = {}
 
 
 def quiet_hours(settings: Settings) -> tuple[dtime, dtime] | None:
-    """The (start, end) quiet window from the profile, or ``None`` if unstated.
+    """The (start, end) quiet window: a stated profile note, else the config default.
 
     Fail-open by design: a storage error means "no quiet window" (pushes flow)
-    rather than an exception in the tick loop.
+    rather than an exception in the tick loop, and an empty
+    ``quiet_hours_default`` disables the fallback entirely.
     """
     if not settings.enable_profile:
         return None
@@ -125,6 +126,20 @@ def _parse_quiet_hours(settings: Settings) -> tuple[dtime, dtime] | None:
             start = _hour(match.group(1), match.group(2), match.group(3))
             if start:
                 return start, _DEFAULT_QUIET_END
+    return _default_quiet_window(settings)
+
+
+def _default_quiet_window(settings: Settings) -> tuple[dtime, dtime] | None:
+    """The configured fallback window when no profile note states one."""
+    raw = settings.quiet_hours_default.strip()
+    if not raw:
+        return None
+    if match := _TIME_RANGE_RE.search(raw):
+        start = _hour(match.group(1), match.group(2), match.group(3))
+        end = _hour(match.group(4), match.group(5), match.group(6))
+        if start and end:
+            return start, end
+    logger.warning("unparseable quiet_hours_default %r; assuming no quiet window", raw)
     return None
 
 
@@ -132,7 +147,8 @@ def in_quiet_hours(settings: Settings, current: datetime) -> bool:
     """Whether ``current`` falls inside the user's stated quiet window.
 
     A window that crosses midnight (22:00-07:00) is the common case and handled
-    explicitly. No profile / no quiet note => never quiet (fail open: pushes flow).
+    explicitly. Profile disabled, or no note and no configured default => never
+    quiet (fail open: pushes flow).
     """
     window = quiet_hours(settings)
     if window is None:

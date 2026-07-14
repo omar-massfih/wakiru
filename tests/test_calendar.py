@@ -104,7 +104,17 @@ def test_agenda_context_has_time_and_events(settings) -> None:
     block = context.agenda_context(settings)
     assert "Current date and time" in block
     assert str(context.now(settings).year) in block
+    assert context._part_of_day(context.now(settings).hour) in block
     assert "Team sync" in block
+
+
+def test_part_of_day_labels() -> None:
+    assert context._part_of_day(6) == "early morning"
+    assert context._part_of_day(10) == "morning"
+    assert context._part_of_day(14) == "afternoon"
+    assert context._part_of_day(19) == "evening"
+    assert context._part_of_day(23) == "late night"
+    assert context._part_of_day(2) == "late night"
 
 
 def test_agenda_context_empty_calendar(settings) -> None:

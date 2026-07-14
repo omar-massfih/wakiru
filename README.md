@@ -109,6 +109,31 @@ How it learns (`src/assistant/memory/`):
   injected into the prompt each turn, so context stays bounded no matter how much the
   assistant has learned.
 
+## Persona & voice
+
+The assistant speaks with one voice everywhere (`src/assistant/persona.py`). The
+register is configurable with `PERSONA_STYLE`: `warm` (default — a natural,
+direct personal assistant that matches your energy and allows itself a moment
+of warmth), `neutral` (professional and plain), or `minimal` (terse). The
+prompt stays byte-stable per style, so provider prompt caching keeps working.
+
+Tone also personalizes over time: communication preferences you state in
+conversation (language, brevity, humor, when not to be disturbed) are captured
+as `profile`-tagged memories and injected every turn. A good way to seed this
+after a fresh deploy is one onboarding message, e.g.:
+
+> Remember how I like to work: answer me in Norwegian unless I write in
+> English, keep replies short on weekdays, humor is welcome, and don't ping me
+> between 22:00 and 07:30.
+
+The extractor turns that into profile notes; a stated quiet-hours preference
+overrides the `QUIET_HOURS_DEFAULT` window (22:00–07:30 unless you change it),
+during which reminders, the briefing, and heartbeat check-ins hold.
+
+For the full "feels like a human assistant" experience on a personal deploy,
+also enable the proactive layer: `ENABLE_BRIEFING=true`, `ENABLE_HEARTBEAT=true`,
+and `HEARTBEAT_CONTACT_GAP_HOURS=24`.
+
 ## Talk to it on Telegram
 
 The assistant is also a Telegram bot, so it lives in your pocket instead of behind
@@ -142,8 +167,10 @@ Replies longer than Telegram's 4096-char limit are split at newline boundaries.
 
 ## Proactive reminders
 
-The calendar can nudge you *before* an event, unprompted — "Dentist in 1 hour" —
-instead of only answering when you ask. Every delivered push (reminders and the
+The calendar can nudge you *before* an event, unprompted — "Heads up: Dentist
+at 14:00 (in 1 hour)." — instead of only answering when you ask. Reflex nudges
+are phrased naturally but deterministically (`src/assistant/phrasing.py`, no
+LLM on the tick path), carrying the local wall-clock time. Every delivered push (reminders and the
 daily briefing) is also recorded into each paired Telegram chat's working memory,
 and into Slack conversations living in `SLACK_NOTIFY_CHANNEL`
 (`ENABLE_PROACTIVE_LOOP_IN`, on by default), so the conversation knows what it
@@ -162,8 +189,8 @@ REMINDER_WEBHOOK_URL=https://ntfy.sh/your-private-topic
 By default each configured lead fires once. Set `REMINDER_REPEAT_MINUTES` (e.g. `15`)
 to instead re-nudge on that cadence from the outermost lead onward, until the event
 starts — so an event no longer goes quiet after the first "in 1 hour". Dated tasks
-also keep nagging *past* their due time ("Task overdue: … (30 min ago)") until you
-mark them done, bounded by `REMINDER_OVERDUE_MAX_MINUTES` (default 24h).
+also keep nagging *past* their due time ("Still open: … — was due 30 min ago.")
+until you mark them done, bounded by `REMINDER_OVERDUE_MAX_MINUTES` (default 24h).
 
 Delivery fans out to every configured channel: the webhook (any endpoint that accepts
 a plain POST — ntfy, a Discord/Slack webhook, … — the message is the body, the event
@@ -307,8 +334,10 @@ completes (the CLI does not expose token deltas, so granularity is per message).
 - **Daily briefing** — one digest per day (agenda + due tasks + unread mail) pushed
   through the reminder channels at `BRIEFING_TIME`; `POST /briefing/run` on demand.
 - **Personalization** — durable memories tagged `profile` (working hours, locations,
-  quiet hours, tone) are injected every turn, and stated quiet hours hold
-  reminders/briefings until morning.
+  quiet hours, tone) are injected every turn, and quiet hours (a stated
+  preference, else `QUIET_HOURS_DEFAULT`) hold reminders/briefings until morning.
+- **Configurable voice** — `PERSONA_STYLE` selects the reply register
+  (warm/neutral/minimal); see "Persona & voice" above.
 - **External calendar sync** — `CALENDAR_ICS_URLS` mirrors Google/Outlook/CalDAV
   ICS feeds into the local calendar (read-only, one-way) every
   `CALENDAR_SYNC_MINUTES`; agenda, conflicts, and reminders see the real calendar.

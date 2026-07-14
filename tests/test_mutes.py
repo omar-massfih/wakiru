@@ -92,7 +92,8 @@ def test_muted_event_fires_nothing_until_mute_expires(settings, monkeypatch) -> 
     # Mute expired mid-window: the remaining band fires normally.
     monkeypatch.setattr(calendar_reminders, "now", lambda s: base + timedelta(minutes=45))
     fired = calendar_reminders.run_reminders(settings)
-    assert [r["message"] for r in fired] == ["Exercise in 15 min"]
+    assert len(fired) == 1
+    assert "Exercise" in fired[0]["message"] and "15 min" in fired[0]["message"]
 
 
 def test_mute_holds_only_its_event(settings, monkeypatch) -> None:

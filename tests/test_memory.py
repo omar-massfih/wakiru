@@ -623,3 +623,10 @@ def test_concurrent_same_slug_saves_do_not_clobber(settings) -> None:
     assert len(notes) == 2
     assert sorted(n.name for n in notes) == ["favorite-hobby", "favorite-hobby-2"]
     assert {n.body for n in notes} == set(bodies)
+
+
+def test_extract_prompt_flags_communication_preferences_as_profile() -> None:
+    # The extractor is told to profile-tag tone/communication preferences, so
+    # the dormant tone-personalization path gets fed (marker, not full prose).
+    assert "communication preferences as first-class profile facts" in learn._EXTRACT_PROMPT
+    assert '"tags": ["profile"]' in learn._EXTRACT_PROMPT

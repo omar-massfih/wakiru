@@ -59,6 +59,12 @@ class Settings(BaseSettings):
     # widen deliberately, matching codex_sandbox's conservative default.
     codex_web_search: bool = False
 
+    # --- Persona ---
+    # Voice register for the assistant's replies: "warm" (default), "neutral",
+    # or "minimal". Unknown values fall back to warm. The system prompt stays
+    # byte-stable per value, so prompt caching keeps paying off.
+    persona_style: str = "warm"
+
     # --- Tool loop ---
     # Max tool rounds per turn; past it, pending calls get a budget-exhausted
     # result and the model must answer with what it has.
@@ -94,6 +100,10 @@ class Settings(BaseSettings):
     # locations, quiet hours, tone) into every turn, and let the reminder/briefing
     # tickers honor stated quiet hours. Degrades to a no-op with no such notes.
     enable_profile: bool = True
+    # Default quiet window (local time, "HH:MM-HH:MM") used when no profile note
+    # states one. A stated preference in memory always wins. Empty string
+    # disables the default (legacy behavior: no note => never quiet).
+    quiet_hours_default: str = "22:00-07:30"
     # Cap per kind on how many index entries are injected into the prompt each
     # turn (-1 = unlimited, 0 = omit the kind entirely). Bounds the per-turn
     # context as notes accumulate; MEMORY.md on disk is never trimmed. Episodic

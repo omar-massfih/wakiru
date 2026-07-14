@@ -147,6 +147,19 @@ def overlapping_events(
     return [e for e in busy_events(settings, start, end) if e.id != ignore_id]
 
 
+def _part_of_day(hour: int) -> str:
+    """A coarse label so the model can greet and pace itself naturally."""
+    if 5 <= hour < 9:
+        return "early morning"
+    if 9 <= hour < 12:
+        return "morning"
+    if 12 <= hour < 17:
+        return "afternoon"
+    if 17 <= hour < 22:
+        return "evening"
+    return "late night"
+
+
 def agenda_context(settings: Settings | None = None) -> str:
     """The current-time + upcoming-events block injected ahead of the user's turn."""
     settings = settings or get_settings()
@@ -154,7 +167,7 @@ def agenda_context(settings: Settings | None = None) -> str:
     stamp = current.strftime("%A, %d %B %Y, %H:%M %Z").strip()
     parts = [
         "## Current date and time",
-        f"It is currently {stamp}.",
+        f"It is currently {stamp} ({_part_of_day(current.hour)}).",
         "",
         "## Upcoming events",
         render_events(settings, upcoming_events(settings)),

@@ -25,6 +25,36 @@ def test_identity_and_memory_always_present() -> None:
     assert "Initiative:" in prompt
 
 
+def test_voice_block_present_and_style_selectable() -> None:
+    warm = persona.system_prompt(_settings())
+    assert "Your voice:" in warm
+    assert "warm, natural, and direct" in warm
+
+    minimal = persona.system_prompt(_settings(persona_style="minimal"))
+    assert "Your voice:" in minimal
+    assert "Terse." in minimal
+    assert "warm, natural, and direct" not in minimal
+    assert warm != minimal
+
+    neutral = persona.system_prompt(_settings(persona_style="neutral"))
+    assert "Professional, plain, and direct" in neutral
+
+    # Byte-stable per style, and lookup is case/whitespace-insensitive.
+    assert minimal == persona.system_prompt(_settings(persona_style=" MINIMAL "))
+
+
+def test_unknown_style_falls_back_to_warm() -> None:
+    assert persona.system_prompt(_settings(persona_style="sarcastic")) == (
+        persona.system_prompt(_settings(persona_style="warm"))
+    )
+
+
+def test_initiative_allows_warmth_but_not_filler() -> None:
+    prompt = persona.system_prompt(_settings())
+    assert "anchor the message in" in prompt
+    assert "don't manufacture small talk" in prompt
+
+
 def test_capability_sections_follow_their_flags() -> None:
     on = persona.system_prompt(_settings())
     assert "Calendar:" in on and "Tasks:" in on and "Documents:" in on

@@ -41,19 +41,14 @@ def _ledger_rows(settings: Settings) -> list[dict]:
 # --- due computation ------------------------------------------------------ #
 
 
-def test_humanize() -> None:
-    assert reminders._humanize(timedelta(minutes=30)) == "in 30 min"
-    assert reminders._humanize(timedelta(minutes=60)) == "in 1 hour"
-    assert reminders._humanize(timedelta(hours=2)) == "in 2 hours"
-    assert reminders._humanize(timedelta(days=1)) == "in 1 day"
-
-
 def test_fires_within_lead(settings) -> None:
     _event_in(settings, "Dentist", minutes=30)
     fired = reminders.run_reminders(settings)
     assert len(fired) == 1
     assert fired[0]["title"] == "Dentist"
-    assert fired[0]["message"] == "Dentist in 30 min"
+    # Phrasing varies (see assistant.phrasing); the essentials must be there.
+    assert "Dentist" in fired[0]["message"]
+    assert "30 min" in fired[0]["message"]
     assert fired[0]["lead_minutes"] == 60
 
 
@@ -173,7 +168,8 @@ def test_webhook_delivery(tmp_path, monkeypatch) -> None:
     assert len(fired) == 1
     assert len(calls) == 1
     assert calls[0]["url"] == "https://ntfy.example/topic"
-    assert calls[0]["body"] == "Dentist in 30 min"
+    assert calls[0]["body"] == fired[0]["message"]
+    assert "Dentist" in calls[0]["body"] and "30 min" in calls[0]["body"]
     assert calls[0]["title"] == "Dentist"
 
 
@@ -269,13 +265,6 @@ def test_event_inside_several_lead_windows_fires_once(tmp_path) -> None:
 # --- repeat mode ---------------------------------------------------------- #
 
 
-def test_humanize_ago() -> None:
-    assert reminders._humanize_ago(timedelta(seconds=10)) == "just now"
-    assert reminders._humanize_ago(timedelta(minutes=15)) == "15 min ago"
-    assert reminders._humanize_ago(timedelta(minutes=60)) == "1 hour ago"
-    assert reminders._humanize_ago(timedelta(hours=2)) == "2 hours ago"
-
-
 def test_repeat_fires_each_band_until_start(tmp_path, monkeypatch) -> None:
     settings = Settings(
         memory_dir=str(tmp_path / "memory"),
@@ -294,13 +283,10 @@ def test_repeat_fires_each_band_until_start(tmp_path, monkeypatch) -> None:
         messages += [r["message"] for r in reminders.run_reminders(settings)]
 
     # One nudge per 15-min band: 60, 45, 30, 15, 0 min out.
-    assert messages == [
-        "Dentist in 1 hour",
-        "Dentist in 45 min",
-        "Dentist in 30 min",
-        "Dentist in 15 min",
-        "Dentist now",
-    ]
+    assert len(messages) == 5
+    assert all("Dentist" in m for m in messages)
+    for m, countdown in zip(messages, ["1 hour", "45 min", "30 min", "15 min", "now"], strict=True):
+        assert countdown in m
     assert {r["lead_minutes"] for r in _ledger_rows(settings)} == {60, 45, 30, 15, 0}
 
 
@@ -355,7 +341,8 @@ def test_repeat_skip_occurrence_stops_remaining_nudges(tmp_path, monkeypatch) ->
 
     monkeypatch.setattr(reminders, "now", lambda s: base)
     fired = reminders.run_reminders(settings)
-    assert [r["message"] for r in fired] == ["Exercise in 30 min"]
+    assert len(fired) == 1
+    assert "Exercise" in fired[0]["message"] and "30 min" in fired[0]["message"]
 
     assert ops.apply_op(
         settings, {"op": "skip", "id": event.id, "occurrence": occ.isoformat()}
@@ -367,7 +354,9 @@ def test_repeat_skip_occurrence_stops_remaining_nudges(tmp_path, monkeypatch) ->
     # Tomorrow's occurrence is untouched and nudges normally.
     tomorrow = base + timedelta(days=1)
     monkeypatch.setattr(reminders, "now", lambda s: tomorrow)
-    assert [r["message"] for r in reminders.run_reminders(settings)] == ["Exercise in 30 min"]
+    refired = reminders.run_reminders(settings)
+    assert len(refired) == 1
+    assert "Exercise" in refired[0]["message"] and "30 min" in refired[0]["message"]
 
 
 def test_ledger_prune_compares_instants_not_strings(settings) -> None:
@@ -406,7 +395,8 @@ def test_delivered_reminder_is_recorded_on_threads(settings, monkeypatch) -> Non
     agent = _RecordingAgent()
     fired = reminders.run_reminders(settings, agent)
     assert len(fired) == 1
-    assert agent.recorded == [("telegram:7", "⏰ Dentist in 30 min")]
+    # Recorded verbatim as delivered, ⏰ prefix included.
+    assert agent.recorded == [("telegram:7", f"⏰ {fired[0]['message']}")]
 
 
 def test_no_agent_records_nothing(settings) -> None:
@@ -427,6 +417,7 @@ def test_delivered_reminder_also_records_on_slack_threads(settings, monkeypatch)
     monkeypatch.setattr(reminders, "deliver_reminder", lambda s, r: True)
     _event_in(settings, "Dentist", minutes=30)
     agent = _RecordingAgent()
-    reminders.run_reminders(settings, agent)
-    assert ("telegram:7", "⏰ Dentist in 30 min") in agent.recorded
-    assert ("slack:C9:U1", "⏰ Dentist in 30 min") in agent.recorded
+    fired = reminders.run_reminders(settings, agent)
+    pushed = f"⏰ {fired[0]['message']}"
+    assert ("telegram:7", pushed) in agent.recorded
+    assert ("slack:C9:U1", pushed) in agent.recorded

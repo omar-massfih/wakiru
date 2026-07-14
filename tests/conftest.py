@@ -40,6 +40,10 @@ def _clean_environment(monkeypatch) -> None:
     """Clear credential-ish env vars so an exported one can't leak into a test."""
     for name in _SENSITIVE_ENV:
         monkeypatch.delenv(name, raising=False)
+    # The default quiet window would make reminder/briefing/heartbeat tests
+    # pass or fail depending on the wall clock they run at. Disable it for the
+    # suite; tests exercising the default set quiet_hours_default explicitly.
+    monkeypatch.setenv("QUIET_HOURS_DEFAULT", "")
     # get_settings() is lru_cached; a cached instance built from the real
     # environment would survive the patches above.
     get_settings.cache_clear()

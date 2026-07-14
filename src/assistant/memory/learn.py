@@ -316,7 +316,10 @@ Choose a kind for each saved/updated memory:
 Additionally, when a memory describes how the user LIVES or WORKS — working
 hours, home/work locations, quiet hours ("don't ping me after 22:00"), commute,
 or preferred tone/format of replies — add "tags": ["profile"] to the operation.
-These profile memories personalize scheduling, reminders, and tone every turn.
+Treat communication preferences as first-class profile facts: preferred
+language, formality, humor tolerance, brevity ("keep answers short"), how they
+like to be greeted, and when not to be disturbed. These profile memories
+personalize scheduling, reminders, and tone every turn.
 
 Return a JSON array of operations, each one of:
   {{"op": "save", "kind": "semantic|procedural", "description": "<short summary>", "body": "<one clear sentence>", "salience": <0..1>, "tags": ["profile"]?}}

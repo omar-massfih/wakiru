@@ -16,7 +16,7 @@ from datetime import datetime, timedelta
 
 from .. import fired_ledger
 from ..calendar.context import now
-from ..calendar.reminders import _humanize, _humanize_ago, _repeat_slot
+from ..calendar.reminders import _repeat_slot
 from ..calendar.store import parse_dt
 from ..config import Settings, get_settings
 from ..notify import deliver_reminder
@@ -50,6 +50,9 @@ def due_task_reminders(settings: Settings, current: datetime | None = None) -> l
     leads = settings.reminder_lead_minutes
     if not leads:
         return []
+    # Deferred for the same reason as in calendar.reminders: phrasing imports
+    # calendar.context, and a top-level import would cycle through that package.
+    from ..phrasing import task_reminder_message
 
     current = current or now(settings)
     repeat = settings.reminder_repeat_minutes
@@ -68,10 +71,9 @@ def due_task_reminders(settings: Settings, current: datetime | None = None) -> l
             if not (overdue_floor <= remaining <= timedelta(minutes=max_lead)):
                 continue
             slot = _repeat_slot(remaining, repeat)
-            if remaining < timedelta(0):
-                message = f"Task overdue: {task.title} ({_humanize_ago(-remaining)})"
-            else:
-                message = f"Task due: {task.title} {_humanize(remaining)}"
+            message = task_reminder_message(
+                settings, task.id, task.title, task.due, remaining, slot
+            )
             reminders.append(
                 {
                     "task_id": task.id,
@@ -95,7 +97,9 @@ def due_task_reminders(settings: Settings, current: datetime | None = None) -> l
                     "due": task.due,
                     "lead_minutes": due_leads[0],
                     "covered_leads": due_leads,
-                    "message": f"Task due: {task.title} {_humanize(remaining)}",
+                    "message": task_reminder_message(
+                        settings, task.id, task.title, task.due, remaining, due_leads[0]
+                    ),
                 }
             )
     return reminders

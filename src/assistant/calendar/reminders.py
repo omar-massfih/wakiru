@@ -33,34 +33,6 @@ _LEDGER = fired_ledger.FiredLedgerSpec(
 )
 
 
-def _humanize(delta: timedelta) -> str:
-    """Render a positive time-until as a short phrase: 'in 30 min' / 'in 1 hour'."""
-    minutes = round(delta.total_seconds() / 60)
-    if minutes < 1:
-        return "now"
-    if minutes < 60:
-        return f"in {minutes} min"
-    if minutes < 1440:
-        hours = round(minutes / 60)
-        return f"in {hours} hour{'s' if hours != 1 else ''}"
-    days = round(minutes / 1440)
-    return f"in {days} day{'s' if days != 1 else ''}"
-
-
-def _humanize_ago(delta: timedelta) -> str:
-    """Render a positive time-since as a short phrase: '30 min ago' / '1 hour ago'."""
-    minutes = round(delta.total_seconds() / 60)
-    if minutes < 1:
-        return "just now"
-    if minutes < 60:
-        return f"{minutes} min ago"
-    if minutes < 1440:
-        hours = round(minutes / 60)
-        return f"{hours} hour{'s' if hours != 1 else ''} ago"
-    days = round(minutes / 1440)
-    return f"{days} day{'s' if days != 1 else ''} ago"
-
-
 def _repeat_slot(remaining: timedelta, repeat_minutes: int) -> int:
     """Bucket a countdown into a stable per-interval slot (floored whole minutes).
 
@@ -93,6 +65,9 @@ def due_reminders(settings: Settings, current: datetime | None = None) -> list[d
     leads = settings.reminder_lead_minutes
     if not leads:
         return []
+    # Deferred: phrasing imports calendar.context, so a module-level import here
+    # would cycle through the calendar package's __init__.
+    from ..phrasing import event_reminder_message
 
     current = current or now(settings)
     horizon = current + timedelta(minutes=max(leads))
@@ -123,7 +98,9 @@ def due_reminders(settings: Settings, current: datetime | None = None) -> list[d
                     "start": event.start,
                     "lead_minutes": slot,
                     "covered_leads": [slot],
-                    "message": f"{event.title} {_humanize(remaining)}",
+                    "message": event_reminder_message(
+                        settings, event.id, event.title, event.start, remaining, slot
+                    ),
                 }
             )
             continue
@@ -139,7 +116,9 @@ def due_reminders(settings: Settings, current: datetime | None = None) -> list[d
                     "start": event.start,
                     "lead_minutes": due_leads[0],
                     "covered_leads": due_leads,
-                    "message": f"{event.title} {_humanize(remaining)}",
+                    "message": event_reminder_message(
+                        settings, event.id, event.title, event.start, remaining, due_leads[0]
+                    ),
                 }
             )
     return reminders

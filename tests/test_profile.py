@@ -62,6 +62,7 @@ def test_quiet_hours_from_after_phrase(settings) -> None:
 
 
 def test_non_quiet_profile_note_yields_no_window(settings) -> None:
+    settings.quiet_hours_default = ""
     _note(settings, "The user works 9-17 on weekdays", tags=["profile"])
     assert profile.quiet_hours(settings) is None
 
@@ -79,8 +80,30 @@ def test_in_quiet_hours_crossing_midnight(settings) -> None:
     assert not profile.in_quiet_hours(settings, _at(7, 0))
 
 
-def test_in_quiet_hours_without_profile_is_false(settings) -> None:
+def test_in_quiet_hours_without_notes_or_default_is_false(settings) -> None:
+    settings.quiet_hours_default = ""
     assert not profile.in_quiet_hours(settings, _at(3))
+
+
+def test_default_quiet_window_applies_without_notes(settings) -> None:
+    settings.quiet_hours_default = "22:00-07:30"  # conftest blanks it suite-wide
+    start, end = profile.quiet_hours(settings)
+    assert (start.hour, start.minute) == (22, 0)
+    assert (end.hour, end.minute) == (7, 30)
+    assert profile.in_quiet_hours(settings, _at(23))
+    assert not profile.in_quiet_hours(settings, _at(8))
+
+
+def test_stated_note_overrides_the_default_window(settings) -> None:
+    settings.quiet_hours_default = "22:00-07:30"
+    _note(settings, "Quiet hours 23:00 to 06:00 please", tags=["profile"])
+    start, end = profile.quiet_hours(settings)
+    assert (start.hour, end.hour) == (23, 6)
+
+
+def test_unparseable_default_fails_open(settings) -> None:
+    settings.quiet_hours_default = "night-time"
+    assert profile.quiet_hours(settings) is None
 
 
 def test_reminders_held_during_quiet_hours(settings, monkeypatch) -> None:
