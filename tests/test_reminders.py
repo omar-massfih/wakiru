@@ -44,7 +44,7 @@ def _event_in(settings: Settings, title: str, **delta) -> store.Event:
 
 
 def _ledger_rows(settings: Settings) -> list[dict]:
-    with fired_ledger._connect(reminders._LEDGER, settings) as conn:
+    with fired_ledger.connect(reminders._LEDGER, settings) as conn:
         return [dict(r) for r in conn.execute("SELECT * FROM reminders_fired").fetchall()]
 
 
@@ -124,7 +124,7 @@ def test_multiple_leads_fire_only_open_window(tmp_path) -> None:
 
 def test_ledger_prunes_old_rows(settings) -> None:
     old = (context.now(settings) - timedelta(days=40)).isoformat(timespec="seconds")
-    with fired_ledger._connect(reminders._LEDGER, settings) as conn:
+    with fired_ledger.connect(reminders._LEDGER, settings) as conn:
         conn.execute(
             "INSERT INTO reminders_fired (event_id, event_start, lead_minutes, fired_at)"
             " VALUES ('stale', 'x', 60, ?)",
@@ -391,7 +391,7 @@ def test_ledger_prune_compares_instants_not_strings(settings) -> None:
     # cutoff string; pruning must compare instants and keep it.
 
     fresh_other_offset = (context.now(settings) - timedelta(days=1)).astimezone(UTC)
-    with fired_ledger._connect(reminders._LEDGER, settings) as conn:
+    with fired_ledger.connect(reminders._LEDGER, settings) as conn:
         conn.execute(
             "INSERT INTO reminders_fired (event_id, event_start, lead_minutes, fired_at)"
             " VALUES ('fresh', 'x', 60, ?)",

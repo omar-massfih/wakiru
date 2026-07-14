@@ -89,7 +89,7 @@ def _open(spec: LedgerSpec, settings: Settings) -> sqlite3.Connection:
 
 
 @contextmanager
-def _connect(spec: LedgerSpec, settings: Settings) -> Iterator[sqlite3.Connection]:
+def connect(spec: LedgerSpec, settings: Settings) -> Iterator[sqlite3.Connection]:
     """One transaction on a fresh connection, closed on exit (see store._connect)."""
     conn = _open(spec, settings)
     try:
@@ -121,7 +121,7 @@ def record_write(
                 before_json, applied_at,
             )
             return
-        with _connect(spec, settings) as conn:
+        with connect(spec, settings) as conn:
             conn.execute(
                 "INSERT INTO write_log"
                 f" (thread_id, batch_id, {spec.target_column}, op, summary,"
@@ -151,7 +151,7 @@ def latest_applied_at(
         if applied_at is None or applied_at < cutoff:
             return None
         return applied_at
-    with _connect(spec, settings) as conn:
+    with connect(spec, settings) as conn:
         latest = conn.execute(
             "SELECT applied_at FROM write_log WHERE thread_id = ? AND undone_at IS NULL"
             " ORDER BY id DESC LIMIT 1",
@@ -189,7 +189,7 @@ def undo_latest(
             return "Nothing recent enough to undo."
         rows = [r for r in all_rows if r["batch_id"] == latest["batch_id"]]
     else:
-        with _connect(spec, settings) as conn:
+        with connect(spec, settings) as conn:
             latest = conn.execute(
                 "SELECT * FROM write_log WHERE thread_id = ? AND undone_at IS NULL"
                 " ORDER BY id DESC LIMIT 1",
@@ -228,7 +228,7 @@ def undo_latest(
             settings, reverted_ids, undone_at
         )
     else:
-        with _connect(spec, settings) as conn:
+        with connect(spec, settings) as conn:
             conn.executemany(
                 "UPDATE write_log SET undone_at = ? WHERE id = ?",
                 [(undone_at, rid) for rid in reverted_ids],

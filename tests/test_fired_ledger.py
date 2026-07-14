@@ -29,7 +29,7 @@ def settings(tmp_path) -> Settings:
 
 
 def _rows(settings: Settings) -> list[dict]:
-    with fired_ledger._connect(_SPEC, settings) as conn:
+    with fired_ledger.connect(_SPEC, settings) as conn:
         return [dict(r) for r in conn.execute("SELECT * FROM things_fired").fetchall()]
 
 
@@ -58,7 +58,7 @@ def test_prune_drops_old_and_unparseable_rows(settings) -> None:
     current = now(settings)
     old = (current - timedelta(days=40)).isoformat(timespec="seconds")
     fresh = (current - timedelta(days=1)).isoformat(timespec="seconds")
-    with fired_ledger._connect(_SPEC, settings) as conn:
+    with fired_ledger.connect(_SPEC, settings) as conn:
         conn.executemany(
             "INSERT INTO things_fired (thing_id, slot, fired_at) VALUES (?, ?, ?)",
             [("stale", 1, old), ("garbled", 1, "not-a-date"), ("fresh", 1, fresh)],
@@ -73,7 +73,7 @@ def test_prune_compares_instants_not_strings(settings) -> None:
     # cutoff string; pruning must compare instants and keep it.
     current = now(settings)
     other_offset = (current - timedelta(days=1)).astimezone(UTC)
-    with fired_ledger._connect(_SPEC, settings) as conn:
+    with fired_ledger.connect(_SPEC, settings) as conn:
         conn.execute(
             "INSERT INTO things_fired (thing_id, slot, fired_at) VALUES (?, ?, ?)",
             ("fresh", 1, other_offset.isoformat(timespec="seconds")),
@@ -92,7 +92,7 @@ def test_prune_takes_naive_stamps_as_utc(settings) -> None:
         .replace(tzinfo=None)
         .strftime("%Y-%m-%d %H:%M:%S")
     )
-    with fired_ledger._connect(_SPEC, settings) as conn:
+    with fired_ledger.connect(_SPEC, settings) as conn:
         conn.execute(
             "INSERT INTO things_fired (thing_id, slot, fired_at) VALUES (?, ?, ?)",
             ("legacy", 1, naive_utc),

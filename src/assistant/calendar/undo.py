@@ -32,8 +32,8 @@ _SPEC = write_ledger.LedgerSpec(
 
 
 def _connect(settings: Settings):
-    """One transaction on this ledger's local DB (see write_ledger._connect)."""
-    return write_ledger._connect(_SPEC, settings)
+    """One transaction on this ledger's local DB (see write_ledger.connect)."""
+    return write_ledger.connect(_SPEC, settings)
 
 
 def record_write(

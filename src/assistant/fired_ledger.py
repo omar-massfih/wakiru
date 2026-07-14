@@ -60,7 +60,7 @@ def _open(spec: FiredLedgerSpec, settings: Settings) -> sqlite3.Connection:
 
 
 @contextmanager
-def _connect(spec: FiredLedgerSpec, settings: Settings) -> Iterator[sqlite3.Connection]:
+def connect(spec: FiredLedgerSpec, settings: Settings) -> Iterator[sqlite3.Connection]:
     """One transaction on a fresh connection, closed on exit."""
     conn = _open(spec, settings)
     try:
@@ -120,7 +120,7 @@ def claim(
     names = ", ".join(name for name, _ in spec.columns)
     slots = ", ".join("?" for _ in spec.columns)
     newly: list[int] = []
-    with _connect(spec, settings) as conn:
+    with connect(spec, settings) as conn:
         _prune(spec, conn, current)
         for index, key in enumerate(keys):
             cursor = conn.execute(
