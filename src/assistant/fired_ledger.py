@@ -16,14 +16,18 @@ ledger stays bounded without a maintenance job.
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 from .config import Settings
+
+logger = logging.getLogger(__name__)
 
 # Fired rows older than this are pruned on each claim so the ledger, which only
 # ever grows, stays bounded.
@@ -131,3 +135,98 @@ def claim(
             if cursor.rowcount:
                 newly.append(index)
     return newly
+
+
+def fire_due(
+    spec: FiredLedgerSpec,
+    settings: Settings,
+    agent: Any,
+    due: list[dict],
+    *,
+    current: datetime,
+    kind: str,
+    key_fields: tuple[str, str],
+    pg_claim: str,
+    instruction: str,
+    fact_line: Callable[[dict], str],
+    deliver: Callable[[Settings, dict], bool],
+    log_label: str,
+) -> list[dict]:
+    """Claim every ``due`` reminder exactly once and push the claimed batch.
+
+    The pipeline calendar and task reminders share: quiet-hours hold → mute
+    filter → exactly-once claim → one composed push → working-memory record.
+    Each due dict carries ``title``, ``message``, ``covered_leads``, and the two
+    ``key_fields`` (its id and its instant) that key the dedupe ledger together
+    with each covered lead. ``pg_claim`` names the :mod:`assistant.storage_postgres`
+    adapter, resolved at call time so test monkeypatches on that module keep
+    working; ``deliver`` is passed in so callers keep their patchable module
+    attribute. Best-effort and idempotent, so an in-process ticker and a manual
+    trigger can both drive it safely. Quiet hours are the callers' job — they
+    must hold *before* the due list is computed.
+    """
+    # Honor active mutes (the agent's "stop nudging me about this" switch):
+    # filtered before the claim, so nudges resume on the first tick after a
+    # mute expires. Deferred import: this low-level ledger must not pull the
+    # compose/delivery stack (and its package cycles) in at import time.
+    from .mutes import filter_muted
+
+    due = filter_muted(settings, due, current, kind)
+    fired_at = current.isoformat(timespec="seconds")
+
+    # Claim first, commit, deliver after: delivery is network I/O (webhook POST,
+    # a Telegram send per chat) and must not run inside the ledger's write
+    # transaction, where it would hold SQLite's single writer slot past other
+    # writers' busy timeouts. The cost is at-most-once delivery: a claimed
+    # reminder whose push fails is not retried.
+    if settings.storage_backend == "postgres":
+        from . import storage_postgres
+
+        sent = getattr(storage_postgres, pg_claim)(settings, due, fired_at, current)
+    else:
+        # Claim every lead window each reminder is currently inside, so the
+        # larger leads can't fire a duplicate nudge on a later tick; a reminder
+        # is sent when any of its windows was newly claimed.
+        keys = [
+            (*(reminder[field] for field in key_fields), lead)
+            for reminder in due
+            for lead in reminder["covered_leads"]
+        ]
+        owner = [
+            index
+            for index, reminder in enumerate(due)
+            for _ in reminder["covered_leads"]
+        ]
+        claimed = claim(spec, settings, keys, fired_at, current)
+        sent = [due[index] for index in sorted({owner[key_index] for key_index in claimed})]
+
+    if not sent:
+        return sent
+
+    # One push per batch, composed by the model in the assistant's own voice
+    # (memory and agenda ride in); the deterministic template text every
+    # reminder already carries is the fallback, so a model failure degrades to
+    # exactly the old behavior and never loses the nudge.
+    from .compose import compose_push
+    from .proactive import record_push
+
+    text = compose_push(
+        settings,
+        instruction=instruction,
+        facts="\n".join(fact_line(reminder) for reminder in sent),
+        query=" ".join(reminder["title"] for reminder in sent),
+        fallback="\n".join(reminder["message"] for reminder in sent),
+    )
+    try:
+        delivered = deliver(settings, {"title": "Reminder", "message": text})
+    except Exception:
+        # The claim is already committed; delivery is best-effort by design.
+        logger.exception("%s delivery failed: %s", log_label, text)
+        return sent
+    if delivered:
+        # Recorded with the same ⏰ prefix the chat channels show, so the
+        # thread's history matches what the user actually saw.
+        record_push(agent, settings, f"⏰ {text}")
+
+    logger.info("fired %d %s(s): %s", len(sent), log_label, text)
+    return sent

@@ -13,7 +13,6 @@ in-process ticker and a manual ``POST /reminders/run`` can both drive it safely.
 
 from __future__ import annotations
 
-import logging
 import math
 from datetime import datetime, timedelta
 
@@ -22,8 +21,6 @@ from ..config import Settings, get_settings
 from ..notify import deliver_reminder
 from . import recurrence, store
 from .context import now
-
-logger = logging.getLogger(__name__)
 
 # The dedupe ledger lives in the same ``calendar.db`` file the store uses.
 _LEDGER = fired_ledger.FiredLedgerSpec(
@@ -133,89 +130,41 @@ def run_reminders(settings: Settings | None = None, agent=None) -> list[dict]:
     fires afresh because the ledger key includes the event's start. No-op returning
     ``[]`` when ``enable_reminders`` is false. With ``agent`` given, each delivered
     reminder is also recorded into the authorized chats' working memory (see
-    :mod:`assistant.proactive`), so conversations know what was pushed.
+    :mod:`assistant.proactive`), so conversations know what was pushed. The
+    claim→compose→deliver pipeline itself is :func:`assistant.fired_ledger.fire_due`.
     """
     settings = settings or get_settings()
     if not settings.enable_reminders:
         return []
 
     current = now(settings)
-    # Honor stated quiet hours (profile): nothing is claimed, so a reminder whose
-    # window survives the night fires on the first tick after quiet ends.
+    # Honor stated quiet hours (profile): nothing is computed or claimed, so a
+    # reminder whose window survives the night fires on the first tick after
+    # quiet ends.
     from ..memory.profile import in_quiet_hours
 
     if in_quiet_hours(settings, current):
         return []
-    fired_at = current.isoformat(timespec="seconds")
     # Compute the due list first, with its own (store) connections, so the ledger
-    # write transaction below never overlaps a nested connection to the same DB.
+    # write transaction inside fire_due never overlaps a nested connection to the
+    # same DB.
     due = due_reminders(settings, current)
-    # Honor active mutes (the agent's "stop nudging me about this" switch) the
-    # same way quiet hours are honored: filtered before the claim, so nudges
-    # resume on the first tick after a mute expires.
-    from ..mutes import filter_muted
-
-    due = filter_muted(settings, due, current, "event")
-
-    # Claim first, commit, deliver after: delivery is network I/O (webhook POST,
-    # a Telegram send per chat) and must not run inside the ledger's write
-    # transaction, where it would hold SQLite's single writer slot past other
-    # writers' busy timeouts. The cost is at-most-once delivery: a claimed
-    # reminder whose push fails is not retried.
-    if settings.storage_backend == "postgres":
-        from .. import storage_postgres
-
-        sent = storage_postgres.claim_calendar_reminders(settings, due, fired_at, current)
-    else:
-        # Claim every lead window each event is currently inside, so the larger
-        # leads can't fire a duplicate nudge on a later tick; a reminder is sent
-        # when any of its windows was newly claimed.
-        keys = [
-            (reminder["event_id"], reminder["start"], lead)
-            for reminder in due
-            for lead in reminder["covered_leads"]
-        ]
-        owner = [
-            index
-            for index, reminder in enumerate(due)
-            for _ in reminder["covered_leads"]
-        ]
-        claimed = fired_ledger.claim(_LEDGER, settings, keys, fired_at, current)
-        sent_indexes = sorted({owner[key_index] for key_index in claimed})
-        sent = [due[index] for index in sent_indexes]
-
-    if not sent:
-        return sent
-
-    # One push per batch, composed by the model in the assistant's own voice
-    # (memory and agenda ride in); the deterministic template text every
-    # reminder already carries is the fallback, so a model failure degrades to
-    # exactly the old behavior and never loses the nudge. Deferred import for
-    # the same package-cycle reason as phrasing above.
-    from ..compose import compose_push
-    from ..proactive import record_push
-
-    text = compose_push(
+    return fired_ledger.fire_due(
+        _LEDGER,
         settings,
+        agent,
+        due,
+        current=current,
+        kind="event",
+        key_fields=("event_id", "start"),
+        pg_claim="claim_calendar_reminders",
         instruction=(
             "Compose ONE short reminder nudge covering every due item below, "
             "in your own voice, in the user's language. Include each item's "
             "clock time. Reply with the message only — no preamble, no quotes."
         ),
-        facts="\n".join(f"- {r['message']} (starts: {r['start']})" for r in sent),
-        query=" ".join(r["title"] for r in sent),
-        fallback="\n".join(r["message"] for r in sent),
+        fact_line=lambda r: f"- {r['message']} (starts: {r['start']})",
+        # Late-bound so a monkeypatched module-level deliver_reminder is honored.
+        deliver=lambda s, r: deliver_reminder(s, r),
+        log_label="reminder",
     )
-    try:
-        delivered = deliver_reminder(settings, {"title": "Reminder", "message": text})
-    except Exception:
-        # The claim is already committed; delivery is best-effort by design.
-        logger.exception("reminder delivery failed: %s", text)
-        return sent
-    if delivered:
-        # Recorded with the same ⏰ prefix the chat channels show, so the
-        # thread's history matches what the user actually saw.
-        record_push(agent, settings, f"⏰ {text}")
-
-    logger.info("fired %d reminder(s): %s", len(sent), text)
-    return sent

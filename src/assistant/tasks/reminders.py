@@ -11,7 +11,6 @@ the in-process ticker and a manual ``POST /reminders/run`` can both drive it.
 
 from __future__ import annotations
 
-import logging
 from datetime import datetime, timedelta
 
 from .. import fired_ledger
@@ -21,8 +20,6 @@ from ..calendar.store import parse_dt
 from ..config import Settings, get_settings
 from ..notify import deliver_reminder
 from . import store
-
-logger = logging.getLogger(__name__)
 
 # The dedupe ledger lives in the same ``tasks.db`` file the store uses.
 _LEDGER = fired_ledger.FiredLedgerSpec(
@@ -109,7 +106,8 @@ def run_task_reminders(settings: Settings | None = None, agent=None) -> list[dic
     """Fire every due-task reminder now due, exactly once, and return what was sent.
 
     Same claim-first / deliver-after discipline (and the same loop-in recording
-    via ``agent``) as :func:`assistant.calendar.reminders.run_reminders`. No-op
+    via ``agent``) as :func:`assistant.calendar.reminders.run_reminders` — both
+    are thin wrappers over :func:`assistant.fired_ledger.fire_due`. No-op
     returning ``[]`` when reminders or tasks are disabled.
     """
     settings = settings or get_settings()
@@ -117,65 +115,31 @@ def run_task_reminders(settings: Settings | None = None, agent=None) -> list[dic
         return []
 
     current = now(settings)
-    # Same quiet-hours hold as calendar reminders: nothing is claimed, so the
-    # nag resumes on the first tick after quiet ends (within the overdue bound).
+    # Same quiet-hours hold as calendar reminders: nothing is computed or
+    # claimed, so the nag resumes on the first tick after quiet ends (within
+    # the overdue bound).
     from ..memory.profile import in_quiet_hours
 
     if in_quiet_hours(settings, current):
         return []
-    fired_at = current.isoformat(timespec="seconds")
     due = due_task_reminders(settings, current)
-    # Same mute hold as calendar reminders: filtered before the claim.
-    from ..mutes import filter_muted
-
-    due = filter_muted(settings, due, current, "task")
-
-    if settings.storage_backend == "postgres":
-        from .. import storage_postgres
-
-        sent = storage_postgres.claim_task_reminders(settings, due, fired_at, current)
-    else:
-        keys = [
-            (reminder["task_id"], reminder["due"], lead)
-            for reminder in due
-            for lead in reminder["covered_leads"]
-        ]
-        owner = [
-            index
-            for index, reminder in enumerate(due)
-            for _ in reminder["covered_leads"]
-        ]
-        claimed = fired_ledger.claim(_LEDGER, settings, keys, fired_at, current)
-        sent_indexes = sorted({owner[key_index] for key_index in claimed})
-        sent = [due[index] for index in sent_indexes]
-
-    if not sent:
-        return sent
-
-    # One composed push per batch with the template text as fallback — the
-    # same shape as assistant.calendar.reminders.run_reminders.
-    from ..compose import compose_push
-    from ..proactive import record_push
-
-    text = compose_push(
+    return fired_ledger.fire_due(
+        _LEDGER,
         settings,
+        agent,
+        due,
+        current=current,
+        kind="task",
+        key_fields=("task_id", "due"),
+        pg_claim="claim_task_reminders",
         instruction=(
             "Compose ONE short reminder nudge covering every due or overdue "
             "task below, in your own voice, in the user's language. Include "
             "each task's due time. Reply with the message only — no preamble, "
             "no quotes."
         ),
-        facts="\n".join(f"- {r['message']} (due: {r['due']})" for r in sent),
-        query=" ".join(r["title"] for r in sent),
-        fallback="\n".join(r["message"] for r in sent),
+        fact_line=lambda r: f"- {r['message']} (due: {r['due']})",
+        # Late-bound so a monkeypatched module-level deliver_reminder is honored.
+        deliver=lambda s, r: deliver_reminder(s, r),
+        log_label="task reminder",
     )
-    try:
-        delivered = deliver_reminder(settings, {"title": "Reminder", "message": text})
-    except Exception:
-        logger.exception("task reminder delivery failed: %s", text)
-        return sent
-    if delivered:
-        record_push(agent, settings, f"⏰ {text}")
-
-    logger.info("fired %d task reminder(s): %s", len(sent), text)
-    return sent
