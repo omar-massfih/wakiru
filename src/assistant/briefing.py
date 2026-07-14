@@ -1,9 +1,11 @@
 """Daily briefing — one proactive digest per day, pushed like a reminder.
 
 Assembles the existing read paths (agenda, open tasks, unread mail when email
-is on) into a single morning digest. With the heartbeat enabled the digest is
-composed by the model in Wakiru's own voice (the briefing is a heartbeat wake
-trigger); without it, the assembled sections are delivered verbatim through
+is on) into a single morning digest, composed by the model in Wakiru's own
+voice either way: with the heartbeat enabled the briefing is a heartbeat wake
+trigger; without it, :func:`assistant.compose.compose_push` writes it from
+the assembled sections (which double as the verbatim fallback when the model
+fails) and it goes out through
 :func:`assistant.notify.deliver_reminder`. Nothing here has its own data
 model: the only state is a fired ledger (the shared
 :mod:`assistant.fired_ledger` driver) so the ticker, the heartbeat, and a
@@ -73,7 +75,8 @@ def run_briefing(
     model composes it in Wakiru's own voice, and this function is a thin
     dispatcher into :func:`assistant.heartbeat.run_heartbeat` (same
     once-per-day ledger, so flipping the flag never double-briefs). With the
-    heartbeat off, the assembled digest is delivered verbatim — no LLM cost.
+    heartbeat off, the model composes it here from the assembled digest,
+    which is delivered verbatim when the model fails.
 
     ``force=True`` (the manual endpoint) skips the time-of-day gate but still
     claims the ledger, so a forced briefing replaces — not duplicates — the
@@ -113,7 +116,24 @@ def run_briefing(
     if not claimed:
         return {"sent": False, "reason": "already sent today"}
 
-    message = build_briefing(settings)
+    # Composed by the model in the assistant's own voice; the assembled digest
+    # is both the source material and the fallback, so a model failure still
+    # briefs — verbatim, like before.
+    from .compose import compose_push
+
+    digest = build_briefing(settings)
+    message = compose_push(
+        settings,
+        instruction=(
+            "Compose the user's morning briefing from the sections below — a "
+            "few sentences in your own voice, plain text, in the user's "
+            "language. Lead with what matters most today; if the day looks "
+            "quiet, say so briefly. Reply with the briefing only."
+        ),
+        facts=digest,
+        query="daily briefing today's agenda open tasks unread mail",
+        fallback=digest,
+    )
     delivered = deliver_reminder(
         settings, {"title": "Daily briefing", "message": message}
     )

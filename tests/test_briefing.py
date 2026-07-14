@@ -1,8 +1,9 @@
 """Daily briefing tests — the due-time gate, the once-per-day ledger, delivery.
 
-No network and no LLM: delivery is monkeypatched, and the heartbeat is off in
-the fixture so the template path runs. The ledger runs for real against a tmp
-SQLite file.
+No network and no LLM: delivery is monkeypatched, composition is stubbed to
+its fallback (compose_push's own behavior lives in test_compose.py), and the
+heartbeat is off in the fixture so the local path runs. The ledger runs for
+real against a tmp SQLite file.
 """
 
 from __future__ import annotations
@@ -21,6 +22,14 @@ def settings(tmp_path) -> Settings:
         memory_dir=str(tmp_path / "memory"),
         enable_briefing=True,
         enable_email=False,
+    )
+
+
+@pytest.fixture(autouse=True)
+def _compose_fallback(monkeypatch) -> None:
+    """Stand-in composer: behaves like a failed model (returns the fallback)."""
+    monkeypatch.setattr(
+        "assistant.compose.compose_push", lambda s, **kw: kw["fallback"]
     )
 
 
@@ -77,11 +86,25 @@ def test_force_skips_time_gate_but_claims_the_day(settings, delivered, monkeypat
     assert len(delivered) == 1
 
 
-def test_template_path_sends_digest_verbatim_without_llm(settings, delivered, monkeypatch) -> None:
-    monkeypatch.setattr(
-        "assistant.llm.build_model",
-        lambda s=None: pytest.fail("the template briefing must not call the model"),
-    )
+def test_briefing_is_composed_by_the_model(settings, delivered, monkeypatch) -> None:
+    composed: dict = {}
+
+    def fake_compose(s, **kwargs):
+        composed.update(kwargs)
+        return "God morgen! Rolig dag i dag."
+
+    monkeypatch.setattr("assistant.compose.compose_push", fake_compose)
+    _freeze_clock(monkeypatch, settings, "08:00")
+    assert briefing.run_briefing(settings)["sent"]
+    assert delivered[0]["message"] == "God morgen! Rolig dag i dag."
+    # The assembled digest is both the source material and the fallback.
+    assert "Upcoming events" in composed["facts"]
+    assert composed["fallback"] == composed["facts"]
+
+
+def test_compose_failure_falls_back_to_the_verbatim_digest(settings, delivered, monkeypatch) -> None:
+    # The autouse fixture already models a failed composition (fallback text);
+    # the digest must go out verbatim.
     _freeze_clock(monkeypatch, settings, "08:00")
     assert briefing.run_briefing(settings)["sent"]
     assert "Upcoming events" in delivered[0]["message"]
