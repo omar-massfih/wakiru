@@ -12,7 +12,7 @@ import json
 
 import pytest
 
-from assistant.calendar import caldav, ops, outbox, store, sync, undo
+from assistant.calendar import caldav, caldav_oauth, ops, outbox, store, sync, undo
 from assistant.config import Settings
 
 CALDAV_URL = "https://dav.example.com/cal/"
@@ -302,6 +302,59 @@ def test_recurring_round_trip(settings) -> None:
     assert "2026-12-14" in store.load_exdates(master)[0]
     overrides = store.load_overrides(master)
     assert any(v.get("title") == "Weekly sync (moved)" for v in overrides.values())
+
+
+# --- google oauth --------------------------------------------------------------
+
+
+def test_oauth_auth_header_uses_bearer(settings, monkeypatch) -> None:
+    settings.caldav_auth = "oauth"
+    monkeypatch.setattr(caldav_oauth, "access_token", lambda s: "tok-123")
+    assert caldav._auth_header(settings) == {"Authorization": "Bearer tok-123"}
+
+
+def test_oauth_refresh_exchanges_and_caches_0600(tmp_path, monkeypatch) -> None:
+    import os
+    import stat
+
+    settings = Settings(
+        memory_dir=str(tmp_path / "memory"),
+        caldav_auth="oauth",
+        caldav_oauth_client_id="cid",
+        caldav_oauth_client_secret="secret",
+        caldav_oauth_refresh_token="refresh",
+    )
+
+    calls: list = []
+
+    class FakeResp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return json.dumps({"access_token": "AT", "expires_in": 3600}).encode()
+
+    def fake_urlopen(request, timeout=None):
+        calls.append(request)
+        return FakeResp()
+
+    monkeypatch.setattr(caldav_oauth.urllib.request, "urlopen", fake_urlopen)
+
+    assert caldav_oauth.access_token(settings) == "AT"
+    # A second call is served from the 0600 cache — no extra network round-trip.
+    assert caldav_oauth.access_token(settings) == "AT"
+    assert len(calls) == 1
+    mode = stat.S_IMODE(os.stat(settings.caldav_token_path).st_mode)
+    assert mode == 0o600
+
+
+def test_oauth_missing_credentials_raises_auth_error(tmp_path) -> None:
+    settings = Settings(memory_dir=str(tmp_path / "memory"), caldav_auth="oauth")
+    with pytest.raises(caldav.CalDavAuthError):
+        caldav_oauth.access_token(settings)
 
 
 def test_own_write_pulls_back_without_duplicating(settings, server) -> None:

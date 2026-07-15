@@ -231,12 +231,21 @@ class Settings(BaseSettings):
     # Basic-auth credentials (an app-specific password on Fastmail/iCloud/Nextcloud).
     caldav_username: str | None = None
     caldav_password: str | None = None
-    # How to authenticate: "password" (Basic) is the only path today; "oauth"
-    # (Bearer, for Google) is a future slot mirroring mail/oauth.py.
+    # How to authenticate: "password" (Basic, for Fastmail/iCloud/Nextcloud) or
+    # "oauth" (Bearer, for Google — which does not allow password CalDAV).
     caldav_auth: str = "password"
     # Minutes between CalDAV pulls + outbox reconcile. 0 disables the loop
     # (POST /calendar/sync still runs it).
     caldav_sync_minutes: int = 15
+    # OAuth2 (Google CalDAV): a long-lived refresh token is exchanged for short-lived
+    # access tokens, cached under the memory dir — the same flow as mail/oauth.py. Used
+    # only when caldav_auth == "oauth". Obtain the refresh token once, out of band, with
+    # scripts/caldav_oauth_setup.py. For Google, caldav_url is the primary calendar's
+    # events collection: https://apps.google.com/calendar/dav/<you@gmail.com>/events/
+    caldav_oauth_client_id: str | None = None
+    caldav_oauth_client_secret: str | None = None
+    caldav_oauth_refresh_token: str | None = None
+    caldav_oauth_token_url: str = "https://oauth2.googleapis.com/token"
 
     # --- Email (opt-in; the only subsystem that talks to an external service) ---
     # Master switch. OFF by default: email is the one capability that needs real
@@ -484,6 +493,11 @@ class Settings(BaseSettings):
     def mail_token_path(self) -> Path:
         """Cache file for the short-lived OAuth2 access token (never the refresh token)."""
         return self.memory_path / "mail_token.json"
+
+    @property
+    def caldav_token_path(self) -> Path:
+        """Cache file for the short-lived CalDAV OAuth2 access token (0600, like mail)."""
+        return self.memory_path / "caldav_token.json"
 
     @property
     def checkpoints_db_path(self) -> Path:

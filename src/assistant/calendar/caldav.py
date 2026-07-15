@@ -98,7 +98,11 @@ def _require_url(settings: Settings) -> str:
 
 def _auth_header(settings: Settings) -> dict[str, str]:
     if settings.caldav_auth == "oauth":
-        raise CalDavError("caldav_auth='oauth' is not supported yet (use 'password')")
+        # Google CalDAV: a Bearer access token, refreshed from the stored refresh token
+        # (raises CalDavAuthError if the credentials are missing or the exchange fails).
+        from .caldav_oauth import access_token
+
+        return {"Authorization": f"Bearer {access_token(settings)}"}
     raw = f"{settings.caldav_username or ''}:{settings.caldav_password or ''}".encode()
     return {"Authorization": "Basic " + base64.b64encode(raw).decode()}
 
