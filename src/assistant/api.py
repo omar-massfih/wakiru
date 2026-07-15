@@ -42,6 +42,7 @@ from .mail import client as mail_client
 from .mail import snapshot as mail_snapshot
 from .mail.client import MailDisabledError
 from .memory import consolidate_memory, store
+from .sleep import run_sleep
 from .tasks import store as tasks_store
 from .tasks.reminders import run_task_reminders
 
@@ -85,6 +86,23 @@ async def _heartbeat_loop() -> None:
         except Exception:
             logger.exception("heartbeat tick failed")
         await asyncio.sleep(get_settings().heartbeat_minutes * 60)
+
+
+async def _sleep_loop() -> None:
+    """Run the nightly memory-maintenance pass on its own slow cadence.
+
+    Its own loop, not the reminder tick: it must run even when reminders are
+    off, and its consolidation LLM step can take minutes — riding the reminder
+    tick would delay minute-precise reminders. The once-per-day ledger makes
+    every tick outside the due window a cheap no-op, so a 5-minute cadence just
+    bounds how late after ``sleep_time`` the pass lands.
+    """
+    while True:
+        try:
+            await asyncio.to_thread(run_sleep, get_settings(), _agent())
+        except Exception:
+            logger.exception("sleep tick failed")
+        await asyncio.sleep(300)
 
 
 async def _calendar_sync_loop() -> None:
@@ -169,6 +187,9 @@ async def lifespan(app: FastAPI):
     if settings.enable_heartbeat and settings.heartbeat_minutes > 0:
         tasks.append(asyncio.create_task(_heartbeat_loop(), name="heartbeat"))
         logger.info("heartbeat started (every %d min)", settings.heartbeat_minutes)
+    if settings.enable_sleep:
+        tasks.append(asyncio.create_task(_sleep_loop(), name="sleep"))
+        logger.info("nightly sleep started (due at %s)", settings.sleep_time)
     if settings.calendar_ics_urls and settings.calendar_sync_minutes > 0:
         tasks.append(asyncio.create_task(_calendar_sync_loop(), name="calendar-sync"))
         logger.info(
@@ -406,6 +427,17 @@ def memory_stats() -> dict:
 def memory_consolidate() -> dict:
     """Trigger a consolidation pass on demand and return what changed."""
     return consolidate_memory(get_settings())
+
+
+@app.post("/sleep/run", dependencies=[Depends(require_token)])
+def sleep_run() -> dict:
+    """Run the nightly memory-maintenance pass now (bypasses the time-of-day gate).
+
+    Idempotent per local date via the fired ledger: a second call the same day
+    reports it already ran rather than re-consolidating. The LLM step is still
+    skipped when no episode is newer than the last pass.
+    """
+    return run_sleep(get_settings(), agent=_agent(), force=True)
 
 
 @app.post("/reminders/run", dependencies=[Depends(require_token)])

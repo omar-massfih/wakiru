@@ -157,6 +157,15 @@ class Settings(BaseSettings):
     # --- Consolidation ("sleep") ---
     # Run a consolidation pass every N chat turns (0 disables the auto-trigger).
     consolidate_every_n_turns: int = 20
+    # Clock-driven sleep: a nightly maintenance pass (working-memory folding +
+    # consolidation) that runs without a user turn, so a quiet week still gets
+    # memory upkeep instead of none. Rides its own slow loop, exactly-once per
+    # local date via a fired ledger, and — unlike reminders/briefing — runs
+    # *during* quiet hours by design (it never pushes anything).
+    enable_sleep: bool = True
+    # Local wall-clock time (HH:MM, in TIMEZONE) the nightly pass becomes due.
+    # Defaults inside the default quiet window on purpose.
+    sleep_time: str = "03:30"
     # Max episodic traces fed to the consolidation LLM in one pass.
     consolidate_max_episodes: int = 40
     # Episodic salience at creation, and the pruning floor / age horizon.
@@ -421,7 +430,7 @@ class Settings(BaseSettings):
 
     @property
     def briefing_db_path(self) -> Path:
-        """SQLite file holding the daily-briefing fired ledger."""
+        """SQLite file holding the daily fired ledgers (briefing, nightly sleep)."""
         return self.memory_path / "briefing.db"
 
     @property

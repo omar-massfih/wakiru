@@ -227,7 +227,9 @@ def _llm_consolidate(settings: Settings) -> list[str]:
     return applied
 
 
-def consolidate_memory(settings: Settings | None = None) -> dict:
+def consolidate_memory(
+    settings: Settings | None = None, *, include_llm: bool = True
+) -> dict:
     """Run one consolidation pass. Returns a summary of what changed.
 
     Passes are mutually exclusive: a turn-triggered pass overlapping a manual
@@ -235,6 +237,11 @@ def consolidate_memory(settings: Settings | None = None) -> dict:
     same episodes, so the later one is skipped rather than queued (the work is
     periodic; the next trigger covers it). Each mutating step takes the memory
     lock itself — the pass never holds it across the Codex call.
+
+    ``include_llm=False`` runs only the free, deterministic steps (decay, prune,
+    counter flush, caps, trash) and skips the LLM promote/merge/forget step —
+    what the nightly :mod:`assistant.sleep` pass wants on an idle night with no
+    new episodes to review.
     """
     settings = settings or get_settings()
     if not CONSOLIDATE_LOCK.acquire(blocking=False):
@@ -242,7 +249,8 @@ def consolidate_memory(settings: Settings | None = None) -> dict:
         return {"skipped": "a consolidation pass is already running"}
     try:
         pruned = _decay_and_prune(settings)
-        changes = _llm_consolidate(settings) if settings.enable_auto_memory else []
+        run_llm = include_llm and settings.enable_auto_memory
+        changes = _llm_consolidate(settings) if run_llm else []
         flushed = _flush_counters(settings)
         durable_decayed = _decay_durable(settings)  # before caps: eviction sees decay
         evicted = _enforce_kind_caps(settings)
