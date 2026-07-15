@@ -119,7 +119,7 @@ class Situation:
 # Wake state (last wake / last push / last seen mail) — a tiny KV in followups.db
 # --------------------------------------------------------------------------- #
 
-def _state_get(settings: Settings, key: str) -> str:
+def state_get(settings: Settings, key: str) -> str:
     with followups._connect(settings) as conn:
         _ensure_state(conn)
         row = conn.execute(
@@ -128,13 +128,26 @@ def _state_get(settings: Settings, key: str) -> str:
     return row["value"] if row else ""
 
 
-def _state_set(settings: Settings, key: str, value: str) -> None:
+def state_set(settings: Settings, key: str, value: str) -> None:
     with followups._connect(settings) as conn:
         _ensure_state(conn)
         conn.execute(
             "INSERT OR REPLACE INTO heartbeat_state (key, value) VALUES (?, ?)",
             (key, value),
         )
+
+
+def state_clear(settings: Settings, *keys: str) -> None:
+    with followups._connect(settings) as conn:
+        _ensure_state(conn)
+        conn.executemany(
+            "DELETE FROM heartbeat_state WHERE key = ?", [(key,) for key in keys]
+        )
+
+
+# Back-compat aliases: the state KV was private before the self-pacing round.
+_state_get = state_get
+_state_set = state_set
 
 
 def _ensure_state(conn: sqlite3.Connection) -> None:
@@ -149,6 +162,53 @@ def _minutes_since(settings: Settings, key: str, current: datetime) -> float | N
     if stamp is None:
         return None
     return (current - stamp).total_seconds() / 60
+
+
+# --------------------------------------------------------------------------- #
+# Self-pacing — when the scheduler should wake the model next
+# --------------------------------------------------------------------------- #
+
+def next_wake_at(settings: Settings, current: datetime) -> datetime:
+    """When the loop should next wake the model — a pure read over the state KV.
+
+    The fixed ``heartbeat_minutes`` cadence is the default and (by default) the
+    ceiling. The model may pull the next wake earlier or, when
+    ``heartbeat_wake_max_minutes`` is raised, push it later via ``set_next_wake``
+    (stored in the ``next_wake_at`` KV); the request is clamped into
+    ``[anchor + wake_min, anchor + (wake_max or heartbeat_minutes)]``. The
+    scheduler also never sleeps past the soonest open follow-up (but never wakes
+    before the floor). During quiet hours or an all-scope mute nothing can be
+    delivered, so it simply ticks at the base cadence.
+    """
+    base = timedelta(minutes=max(settings.heartbeat_minutes, 1))
+    if not settings.enable_heartbeat:
+        return current + base
+
+    from .memory.profile import in_quiet_hours
+    from .mutes import all_muted
+
+    if in_quiet_hours(settings, current) or all_muted(settings, current):
+        return current + base
+
+    anchor_raw = _state_get(settings, "last_wake_at")
+    anchor = parse_dt(anchor_raw) if anchor_raw else None
+    anchor = anchor or current
+    floor = anchor + timedelta(minutes=max(settings.heartbeat_wake_min_minutes, 0))
+    ceiling = anchor + timedelta(
+        minutes=settings.heartbeat_wake_max_minutes or max(settings.heartbeat_minutes, 1)
+    )
+
+    requested_raw = _state_get(settings, "next_wake_at")
+    requested = parse_dt(requested_raw) if requested_raw else None
+    target = requested or (anchor + base)
+    target = min(max(target, floor), ceiling)
+
+    # A soon-due open follow-up pulls the wake earlier — but never before the
+    # floor, so a follow-up due "now" still can't busy-loop the model.
+    due = [d for f in followups.list_open(settings) if (d := parse_dt(f.due)) is not None]
+    if due:
+        target = min(target, max(min(due), floor))
+    return target
 
 
 # --------------------------------------------------------------------------- #
@@ -371,6 +431,14 @@ def run_heartbeat(
     situation = gather_situation(settings, current, force_briefing=force_briefing)
     if situation is None:
         return {"sent": False, "reason": "held"}
+
+    # Consume any wake the model scheduled for itself: clear it so the next tick
+    # falls back to the base cadence unless the model re-schedules, and surface
+    # the reason it left so it knows why it is awake now.
+    reason = _state_get(settings, "next_wake_reason")
+    state_clear(settings, "next_wake_at", "next_wake_reason")
+    if reason:
+        situation.info.append(f"You scheduled this wake yourself: {reason}")
 
     _state_set(settings, "last_wake_at", current.isoformat(timespec="seconds"))
     triggers = situation.triggers + [

@@ -329,6 +329,140 @@ def test_composition_failure_is_contained(settings, monkeypatch) -> None:
     assert result["sent"] is False and result["reason"] == "composition failed"
 
 
+# --- self-pacing: next_wake_at and set_next_wake ------------------------------ #
+
+
+@pytest.fixture
+def paced(settings) -> Settings:
+    # Quiet hours are time-of-day dependent; disable them so the pure pacing
+    # tests don't hinge on the wall clock.
+    return settings.model_copy(update={"quiet_hours_default": ""})
+
+
+def _anchor(paced: Settings):
+    """Pin last_wake_at to a fixed instant and return it (second precision, as
+    stored — next_wake_at parses the stamp back, which drops microseconds)."""
+    t0 = now(paced).replace(microsecond=0)
+    heartbeat.state_set(paced, "last_wake_at", t0.isoformat(timespec="seconds"))
+    return t0
+
+
+def test_next_wake_defaults_to_the_fixed_cadence(paced) -> None:
+    t0 = _anchor(paced)
+    wake = heartbeat.next_wake_at(paced, t0)
+    assert wake == t0 + timedelta(minutes=paced.heartbeat_minutes)
+
+
+def test_next_wake_honors_an_earlier_model_set_time(paced) -> None:
+    t0 = _anchor(paced)
+    heartbeat.state_set(
+        paced, "next_wake_at", (t0 + timedelta(minutes=10)).isoformat(timespec="seconds")
+    )
+    assert heartbeat.next_wake_at(paced, t0) == t0 + timedelta(minutes=10)
+
+
+def test_next_wake_clamps_to_the_floor(paced) -> None:
+    t0 = _anchor(paced)
+    heartbeat.state_set(
+        paced, "next_wake_at", (t0 + timedelta(minutes=1)).isoformat(timespec="seconds")
+    )
+    assert heartbeat.next_wake_at(paced, t0) == t0 + timedelta(
+        minutes=paced.heartbeat_wake_min_minutes
+    )
+
+
+def test_next_wake_ceiling_is_the_cadence_when_max_is_zero(paced) -> None:
+    t0 = _anchor(paced)
+    heartbeat.state_set(
+        paced, "next_wake_at", (t0 + timedelta(minutes=90)).isoformat(timespec="seconds")
+    )
+    # max=0 → the model can never wake later than the fixed cadence.
+    assert heartbeat.next_wake_at(paced, t0) == t0 + timedelta(
+        minutes=paced.heartbeat_minutes
+    )
+
+
+def test_next_wake_ceiling_extends_when_max_is_set(paced) -> None:
+    backoff = paced.model_copy(update={"heartbeat_wake_max_minutes": 180})
+    t0 = _anchor(backoff)
+    heartbeat.state_set(
+        backoff, "next_wake_at", (t0 + timedelta(minutes=120)).isoformat(timespec="seconds")
+    )
+    assert heartbeat.next_wake_at(backoff, t0) == t0 + timedelta(minutes=120)
+
+
+def test_open_followup_pulls_the_wake_earlier(paced) -> None:
+    t0 = _anchor(paced)
+    followups.add(paced, t0 + timedelta(minutes=8), "meeting nudge")
+    assert heartbeat.next_wake_at(paced, t0) == t0 + timedelta(minutes=8)
+
+
+def test_a_followup_due_now_still_cannot_wake_before_the_floor(paced) -> None:
+    t0 = _anchor(paced)
+    followups.add(paced, t0 + timedelta(minutes=1), "urgent")
+    assert heartbeat.next_wake_at(paced, t0) == t0 + timedelta(
+        minutes=paced.heartbeat_wake_min_minutes
+    )
+
+
+def test_quiet_hours_tick_at_base_cadence_ignoring_self_wake(settings, monkeypatch) -> None:
+    t0 = _anchor(settings)
+    followups.add(settings, t0 + timedelta(minutes=2), "would pull earlier")
+    heartbeat.state_set(
+        settings, "next_wake_at", (t0 + timedelta(minutes=2)).isoformat(timespec="seconds")
+    )
+    monkeypatch.setattr("assistant.memory.profile.in_quiet_hours", lambda s, c: True)
+    # No delivery is possible during quiet hours, so neither the follow-up nor a
+    # self-set wake pulls it earlier — it just ticks at the base cadence.
+    assert heartbeat.next_wake_at(settings, t0) == t0 + timedelta(
+        minutes=settings.heartbeat_minutes
+    )
+
+
+def test_a_real_wake_consumes_the_self_set_wake_kvs(settings, monkeypatch) -> None:
+    _due_followup(settings)
+    heartbeat.state_set(settings, "next_wake_at", "2026-07-11T09:00:00+02:00")
+    heartbeat.state_set(settings, "next_wake_reason", "before the interview")
+    model = _wire_model(monkeypatch, [AIMessage(content="SILENT")])
+    heartbeat.run_heartbeat(settings)
+    # Consumed: the next tick falls back to the base cadence unless re-scheduled.
+    assert heartbeat.state_get(settings, "next_wake_at") == ""
+    assert heartbeat.state_get(settings, "next_wake_reason") == ""
+    # And the reason was surfaced to the model on this wake.
+    joined = "\n".join(str(m.content) for m in model.prompts[0])
+    assert "You scheduled this wake yourself: before the interview" in joined
+
+
+def test_set_next_wake_is_heartbeat_only(settings) -> None:
+    from assistant.tools import available_tools
+
+    chat = {t.name for t in available_tools(settings)}
+    beat = {t.name for t in available_tools(settings, mode="heartbeat")}
+    assert "set_next_wake" not in chat
+    assert "set_next_wake" in beat
+
+
+def test_set_next_wake_tool_clamps_and_refuses_past(settings) -> None:
+    from assistant.tools import ToolContext, available_tools, execute_tool
+
+    t0 = _anchor(settings)
+    spec = {t.name: t for t in available_tools(settings, mode="heartbeat")}["set_next_wake"]
+    ctx = ToolContext(settings=settings, thread_id="")
+
+    past = (t0 - timedelta(hours=1)).isoformat(timespec="seconds")
+    assert "already in the past" in execute_tool(spec, ctx, {"when": past})
+
+    # Requesting far past the cadence (max=0) clamps down to the cadence.
+    far = (t0 + timedelta(minutes=90)).isoformat(timespec="seconds")
+    result = execute_tool(spec, ctx, {"when": far, "reason": "back off"})
+    assert "clamped" in result
+    stored = heartbeat.state_get(settings, "next_wake_at")
+    from assistant.calendar.store import parse_dt
+
+    assert parse_dt(stored) == t0 + timedelta(minutes=settings.heartbeat_minutes)
+    assert heartbeat.state_get(settings, "next_wake_reason") == "back off"
+
+
 # --- the briefing as a heartbeat trigger -------------------------------------- #
 
 

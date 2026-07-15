@@ -30,13 +30,14 @@ from .agent import build_agent
 from .briefing import run_briefing
 from .calendar import run_reminders
 from .calendar import sync as calendar_sync
-from .calendar.context import resolve_tz, upcoming_events
+from .calendar.context import now, resolve_tz, upcoming_events
 from .chat import run_chat, run_chat_stream, run_upkeep
 from .codex_runner import CodexError
 from .config import get_settings
 from .docs import extract as docs_extract
 from .docs import store as docs_store
 from .docs.summarize import summarize_document
+from .heartbeat import next_wake_at as heartbeat_next_wake
 from .heartbeat import run_heartbeat
 from .mail import client as mail_client
 from .mail import snapshot as mail_snapshot
@@ -74,18 +75,30 @@ async def _reminder_tick_loop() -> None:
 
 
 async def _heartbeat_loop() -> None:
-    """Wake the deliberative layer on its own (slow) cadence.
+    """Wake the deliberative layer when it is due — a self-paced scheduler.
 
-    Every tick outside quiet hours wakes the model to look around and judge
-    for itself — ``heartbeat_minutes`` is the token-cost dial. Same
-    best-effort discipline as the other tickers.
+    Not a fixed-cadence sleep: each tick asks ``heartbeat.next_wake_at`` when the
+    next wake should be (the fixed ``heartbeat_minutes`` by default, pulled
+    earlier by a soon-due follow-up or a model-set ``set_next_wake``), and only
+    then wakes the model. Sleeps in slices of at most 60s so a follow-up or
+    self-wake scheduled mid-sleep (from a chat turn) takes effect within the
+    minute. The slice is a cheap SQLite read, not a model call; every wake is
+    the token-cost dial. Same best-effort discipline as the other tickers.
     """
     while True:
         try:
-            await asyncio.to_thread(run_heartbeat, get_settings(), _agent())
+            settings = get_settings()
+            current = now(settings)
+            target = await asyncio.to_thread(heartbeat_next_wake, settings, current)
+            if current >= target:
+                await asyncio.to_thread(run_heartbeat, settings, _agent())
+                delay = 60.0
+            else:
+                delay = min((target - current).total_seconds(), 60.0)
         except Exception:
             logger.exception("heartbeat tick failed")
-        await asyncio.sleep(get_settings().heartbeat_minutes * 60)
+            delay = 60.0
+        await asyncio.sleep(max(delay, 1.0))
 
 
 async def _sleep_loop() -> None:

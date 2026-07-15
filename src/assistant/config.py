@@ -345,6 +345,15 @@ class Settings(BaseSettings):
     # Hours of user silence (across all channels) before "we haven't talked in
     # a while" becomes a heartbeat trigger. 0 disables the staleness trigger.
     heartbeat_contact_gap_hours: int = 0
+    # Self-pacing: the model can set its own next wake (the set_next_wake tool),
+    # and the scheduler never sleeps past the soonest open follow-up. These clamp
+    # how far a self-set wake may move from HEARTBEAT_MINUTES. The floor keeps a
+    # self-set wake from busy-looping the model; the ceiling caps how long it may
+    # back off — 0 means "no later than the fixed cadence" (the model may only
+    # pull the next wake *earlier*), so raising it (e.g. 360) is what lets the
+    # model save tokens by backing off on quiet days.
+    heartbeat_wake_min_minutes: int = 5
+    heartbeat_wake_max_minutes: int = 0
 
     # --- Telegram channel ---
     # Bot token from @BotFather. Set => the server long-polls Telegram and each
