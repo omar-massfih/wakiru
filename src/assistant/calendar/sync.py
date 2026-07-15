@@ -277,7 +277,7 @@ def pull_caldav(settings: Settings) -> dict:
             added, updated, removed, len(incoming),
         )
     return {
-        "caldav": settings.caldav_url,
+        "provider": settings.caldav_provider,
         "events": len(incoming),
         "added": added,
         "updated": updated,
