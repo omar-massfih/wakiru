@@ -31,27 +31,52 @@ logger = logging.getLogger(__name__)
 _MAX_AGE_HOURS = 24
 
 
+# The snapshot lives in the shared KV table (namespace/key) under Postgres, or a
+# small JSON file under the memory dir on the local backend.
+_KV_NAMESPACE = "mail"
+_KV_KEY = "snapshot"
+
+
 def _path(settings: Settings) -> Path:
     return settings.memory_path / "mail_snapshot.json"
 
 
-def _load(settings: Settings) -> tuple[str, datetime] | None:
+def _decode(payload: str) -> tuple[str, datetime] | None:
     try:
-        raw = json.loads(_path(settings).read_text(encoding="utf-8"))
+        raw = json.loads(payload)
         fetched_at = datetime.fromisoformat(raw["fetched_at"])
-    except FileNotFoundError:
-        return None
-    except (KeyError, TypeError, ValueError, OSError):
+    except (KeyError, TypeError, ValueError):
         logger.warning("unreadable mail snapshot; refetching on the next tick")
         return None
     return str(raw.get("text", "")), fetched_at
 
 
+def _load(settings: Settings) -> tuple[str, datetime] | None:
+    if settings.storage_backend == "postgres":
+        from .. import storage_postgres
+
+        payload = storage_postgres.kv_get(settings, _KV_NAMESPACE, _KV_KEY)
+        return _decode(payload) if payload else None
+    try:
+        payload = _path(settings).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except OSError:
+        logger.warning("unreadable mail snapshot; refetching on the next tick")
+        return None
+    return _decode(payload)
+
+
 def _save(settings: Settings, text: str, fetched_at: datetime) -> None:
-    settings.memory_path.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(
         {"text": text, "fetched_at": fetched_at.isoformat(timespec="seconds")}
     )
+    if settings.storage_backend == "postgres":
+        from .. import storage_postgres
+
+        storage_postgres.kv_set(settings, _KV_NAMESPACE, _KV_KEY, payload)
+        return
+    settings.memory_path.mkdir(parents=True, exist_ok=True)
     target = _path(settings)
     tmp = target.with_suffix(".json.tmp")
     tmp.write_text(payload, encoding="utf-8")

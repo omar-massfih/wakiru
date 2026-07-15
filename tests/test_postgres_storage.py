@@ -352,3 +352,112 @@ def test_postgres_telegram_pairing_delegates(monkeypatch: pytest.MonkeyPatch) ->
     assert telegram._paired_chats(settings) == []
     telegram._pair(settings, 123)
     assert telegram._paired_chats(settings) == [123]
+
+
+def _pg_settings() -> Settings:
+    return Settings(storage_backend="postgres", database_url="postgres://example")
+
+
+def test_postgres_followups_delegate(monkeypatch: pytest.MonkeyPatch) -> None:
+    from datetime import timedelta
+
+    from assistant import followups, storage_postgres
+    from assistant.calendar.context import now
+
+    settings = _pg_settings()
+    current = now(settings)
+    row = followups.Followup(
+        id="f1", due=(current + timedelta(hours=1)).isoformat(timespec="seconds"),
+        topic="ask about the viewing", context="on Storgata",
+    )
+    calls: list[str] = []
+    monkeypatch.setattr(storage_postgres, "add_followup", lambda _s, f: calls.append("add"))
+    monkeypatch.setattr(storage_postgres, "list_open_followups", lambda _s: [row])
+    monkeypatch.setattr(storage_postgres, "cancel_followup", lambda _s, i: calls.append(f"cancel:{i}") or True)
+    monkeypatch.setattr(storage_postgres, "update_followup", lambda _s, i, d, t, c: calls.append(f"update:{i}") or True)
+    monkeypatch.setattr(storage_postgres, "claim_due_followups", lambda _s, fired_at, c: [row])
+
+    followups.add(settings, current + timedelta(hours=1), "ask about the viewing", "on Storgata")
+    assert followups.list_open(settings) == [row]
+    # cancel/update resolve the target via the (delegated) list_open, then flip it.
+    assert followups.cancel(settings, "viewing").id == "f1"
+    assert followups.update(settings, "f1", context="booked").id == "f1"
+    assert [f.id for f in followups.claim_due(settings, current)] == ["f1"]
+    assert calls == ["add", "cancel:f1", "update:f1"]
+
+
+def test_postgres_threads_delegate(monkeypatch: pytest.MonkeyPatch) -> None:
+    from assistant import storage_postgres, threads
+
+    settings = _pg_settings()
+    info = threads.ThreadInfo(
+        thread_id="telegram:7", channel="telegram",
+        last_user_at="2026-07-15T10:00:00+02:00", last_assistant_at="",
+    )
+    touched: list[tuple] = []
+    monkeypatch.setattr(
+        storage_postgres, "touch_thread",
+        lambda _s, tid, ch, stamp, user, asst: touched.append((tid, ch, user, asst)),
+    )
+    monkeypatch.setattr(storage_postgres, "known_threads", lambda _s, channel=None: [info])
+
+    threads.touch(settings, "telegram:7")
+    assert threads.known_threads(settings) == [info]
+    assert threads.last_contact(settings) is not None  # derived from known_threads
+    assert touched == [("telegram:7", "telegram", True, True)]
+
+
+def test_postgres_heartbeat_and_sleep_state_delegate(monkeypatch: pytest.MonkeyPatch) -> None:
+    from assistant import heartbeat, sleep, storage_postgres
+
+    settings = _pg_settings()
+    store: dict[tuple[str, str], str] = {}
+    monkeypatch.setattr(storage_postgres, "kv_get", lambda _s, ns, k: store.get((ns, k), ""))
+    monkeypatch.setattr(storage_postgres, "kv_set", lambda _s, ns, k, v: store.__setitem__((ns, k), v))
+    monkeypatch.setattr(storage_postgres, "kv_clear", lambda _s, ns, keys: [store.pop((ns, k), None) for k in keys])
+
+    heartbeat.state_set(settings, "last_wake_at", "2026-07-15T09:00:00+02:00")
+    assert heartbeat.state_get(settings, "last_wake_at") == "2026-07-15T09:00:00+02:00"
+    heartbeat.state_clear(settings, "last_wake_at")
+    assert heartbeat.state_get(settings, "last_wake_at") == ""
+    assert ("heartbeat", "last_wake_at") not in store
+
+    sleep._state_set(settings, "last_llm_pass_at", "2026-07-15")
+    assert sleep._state_get(settings, "last_llm_pass_at") == "2026-07-15"
+    assert store[("sleep", "last_llm_pass_at")] == "2026-07-15"  # separate namespace
+
+
+def test_postgres_fired_ledger_claim_delegates(monkeypatch: pytest.MonkeyPatch) -> None:
+    from assistant import briefing, fired_ledger, storage_postgres
+    from assistant.calendar.context import now
+
+    settings = _pg_settings()
+    seen: list[tuple] = []
+
+    def fake_claim(_s, ledger, keys, fired_at, current):
+        seen.append((ledger, keys))
+        return [0]  # first key newly claimed
+
+    monkeypatch.setattr(storage_postgres, "claim_fired", fake_claim)
+    current = now(settings)
+    claimed = fired_ledger.claim(
+        briefing._LEDGER, settings, [("2026-07-15",)], current.isoformat(), current
+    )
+    assert claimed == [0]
+    assert seen == [("briefings_fired", [("2026-07-15",)])]
+
+
+def test_postgres_mail_snapshot_delegates(monkeypatch: pytest.MonkeyPatch) -> None:
+    from assistant import storage_postgres
+    from assistant.calendar.context import now
+    from assistant.mail import snapshot
+
+    settings = _pg_settings().model_copy(update={"enable_email": True})
+    store: dict[tuple[str, str], str] = {}
+    monkeypatch.setattr(storage_postgres, "kv_get", lambda _s, ns, k: store.get((ns, k), ""))
+    monkeypatch.setattr(storage_postgres, "kv_set", lambda _s, ns, k, v: store.__setitem__((ns, k), v))
+
+    snapshot._save(settings, "1 unread message(s):\n- Hei", now(settings))
+    assert ("mail", "snapshot") in store  # persisted to KV, not a file
+    loaded = snapshot._load(settings)
+    assert loaded is not None and loaded[0].startswith("1 unread message(s)")

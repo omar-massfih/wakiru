@@ -7,9 +7,75 @@ from .calendar import ensure_calendar_schema
 from .core import (
     _executemany,
     _rows,
+    _schema_done,
+    _schema_mark,
     connect,
 )
 from .tasks import ensure_tasks_schema
+
+# Separator joining a fired-ledger key tuple into the single TEXT key column.
+# A unit-separator control char can't appear in the date/id key values used.
+_KEY_SEP = "\x1f"
+
+
+def ensure_fired_schema(settings: Settings) -> None:
+    if _schema_done(settings, "fired"):
+        return
+    with connect(settings) as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS assistant_fired_ledger (
+              ledger TEXT NOT NULL,
+              dkey TEXT NOT NULL,
+              fired_at TEXT NOT NULL,
+              PRIMARY KEY (ledger, dkey)
+            )
+            """
+        )
+    _schema_mark(settings, "fired")
+
+
+def claim_fired(
+    settings: Settings, ledger: str, keys, fired_at: str, current
+) -> list[int]:
+    """Postgres twin of :func:`assistant.fired_ledger.claim` for the generic
+    daily ledgers (briefing, nightly sleep). Returns the indexes newly claimed;
+    a key already present is skipped. Prunes this ledger's stale rows first."""
+    from datetime import timedelta
+
+    from ..calendar.store import parse_dt
+    from ..fired_ledger import LEDGER_RETENTION_DAYS
+
+    ensure_fired_schema(settings)
+    cutoff = current - timedelta(days=LEDGER_RETENTION_DAYS)
+    newly: list[int] = []
+    with connect(settings) as conn:
+        rows = _rows(
+            conn.execute(
+                "SELECT dkey, fired_at FROM assistant_fired_ledger WHERE ledger = %s",
+                (ledger,),
+            )
+        )
+        stale = [
+            (ledger, r["dkey"])
+            for r in rows
+            if (fired := parse_dt(str(r["fired_at"]))) is None or fired < cutoff
+        ]
+        _executemany(
+            conn,
+            "DELETE FROM assistant_fired_ledger WHERE ledger = %s AND dkey = %s",
+            stale,
+        )
+        for index, key in enumerate(keys):
+            dkey = _KEY_SEP.join(str(part) for part in key)
+            cur = conn.execute(
+                "INSERT INTO assistant_fired_ledger (ledger, dkey, fired_at)"
+                " VALUES (%s, %s, %s) ON CONFLICT DO NOTHING RETURNING dkey",
+                (ledger, dkey, fired_at),
+            )
+            if cur.fetchone() is not None:
+                newly.append(index)
+    return newly
 
 
 def record_calendar_write(settings: Settings, thread_id: str, batch_id: str, event_id: str, op: str, summary: str, before_json: str | None, applied_at: str) -> None:

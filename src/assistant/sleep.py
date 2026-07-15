@@ -55,9 +55,17 @@ def _due_time(settings: Settings) -> dtime:
         return dtime(3, 30)
 
 
+_KV_NAMESPACE = "sleep"
+
+
 # The sleep KV rides the briefing db alongside the fired ledger (same file the
 # briefing/sleep ledgers live in), created lazily like heartbeat's state table.
+# Under Postgres it lands in the shared assistant_kv table instead.
 def _state_get(settings: Settings, key: str) -> str:
+    if settings.storage_backend == "postgres":
+        from . import storage_postgres
+
+        return storage_postgres.kv_get(settings, _KV_NAMESPACE, key)
     with fired_ledger.connect(_LEDGER, settings) as conn:
         _ensure_state(conn)
         row = conn.execute(
@@ -67,6 +75,11 @@ def _state_get(settings: Settings, key: str) -> str:
 
 
 def _state_set(settings: Settings, key: str, value: str) -> None:
+    if settings.storage_backend == "postgres":
+        from . import storage_postgres
+
+        storage_postgres.kv_set(settings, _KV_NAMESPACE, key, value)
+        return
     with fired_ledger.connect(_LEDGER, settings) as conn:
         _ensure_state(conn)
         conn.execute(

@@ -88,6 +88,11 @@ def add(
         thread_id=thread_id,
         created_at=now(settings).isoformat(timespec="seconds"),
     )
+    if settings.storage_backend == "postgres":
+        from . import storage_postgres
+
+        storage_postgres.add_followup(settings, followup)
+        return followup
     with _connect(settings) as conn:
         conn.execute(
             "INSERT INTO followups"
@@ -107,6 +112,10 @@ def add(
 
 def list_open(settings: Settings) -> list[Followup]:
     """Every open followup, soonest due first."""
+    if settings.storage_backend == "postgres":
+        from . import storage_postgres
+
+        return storage_postgres.list_open_followups(settings)
     with _connect(settings) as conn:
         rows = conn.execute(
             "SELECT * FROM followups WHERE status = 'open' ORDER BY due"
@@ -147,6 +156,10 @@ def cancel(settings: Settings, ident: str) -> Followup | None:
     target = _match_open(settings, ident, "cancel")
     if target is None:
         return None
+    if settings.storage_backend == "postgres":
+        from . import storage_postgres
+
+        return target if storage_postgres.cancel_followup(settings, target.id) else None
     with _connect(settings) as conn:
         cursor = conn.execute(
             "UPDATE followups SET status = 'cancelled' WHERE id = ? AND status = 'open'",
@@ -181,6 +194,13 @@ def update(
         thread_id=target.thread_id,
         created_at=target.created_at,
     )
+    if settings.storage_backend == "postgres":
+        from . import storage_postgres
+
+        updated = storage_postgres.update_followup(
+            settings, revised.id, revised.due, revised.topic, revised.context
+        )
+        return revised if updated else None
     with _connect(settings) as conn:
         cursor = conn.execute(
             "UPDATE followups SET due = ?, topic = ?, context = ?"
@@ -200,6 +220,10 @@ def claim_due(settings: Settings, current: datetime | None = None) -> list[Follo
     """
     current = current or now(settings)
     fired_at = current.isoformat(timespec="seconds")
+    if settings.storage_backend == "postgres":
+        from . import storage_postgres
+
+        return storage_postgres.claim_due_followups(settings, fired_at, current)
     due_now = [
         f
         for f in list_open(settings)

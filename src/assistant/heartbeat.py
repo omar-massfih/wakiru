@@ -119,7 +119,14 @@ class Situation:
 # Wake state (last wake / last push / last seen mail) — a tiny KV in followups.db
 # --------------------------------------------------------------------------- #
 
+_KV_NAMESPACE = "heartbeat"
+
+
 def state_get(settings: Settings, key: str) -> str:
+    if settings.storage_backend == "postgres":
+        from . import storage_postgres
+
+        return storage_postgres.kv_get(settings, _KV_NAMESPACE, key)
     with followups._connect(settings) as conn:
         _ensure_state(conn)
         row = conn.execute(
@@ -129,6 +136,11 @@ def state_get(settings: Settings, key: str) -> str:
 
 
 def state_set(settings: Settings, key: str, value: str) -> None:
+    if settings.storage_backend == "postgres":
+        from . import storage_postgres
+
+        storage_postgres.kv_set(settings, _KV_NAMESPACE, key, value)
+        return
     with followups._connect(settings) as conn:
         _ensure_state(conn)
         conn.execute(
@@ -138,6 +150,11 @@ def state_set(settings: Settings, key: str, value: str) -> None:
 
 
 def state_clear(settings: Settings, *keys: str) -> None:
+    if settings.storage_backend == "postgres":
+        from . import storage_postgres
+
+        storage_postgres.kv_clear(settings, _KV_NAMESPACE, list(keys))
+        return
     with followups._connect(settings) as conn:
         _ensure_state(conn)
         conn.executemany(

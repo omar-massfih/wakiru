@@ -79,6 +79,13 @@ def touch(
     if not thread_id:
         return
     stamp = now(settings).isoformat(timespec="seconds")
+    if settings.storage_backend == "postgres":
+        from . import storage_postgres
+
+        storage_postgres.touch_thread(
+            settings, thread_id, channel_of(thread_id), stamp, user, assistant
+        )
+        return
     with _connect(settings) as conn:
         conn.execute(
             "INSERT INTO known_threads (thread_id, channel, last_user_at, last_assistant_at)"
@@ -100,6 +107,10 @@ def touch(
 
 def known_threads(settings: Settings, channel: str | None = None) -> list[ThreadInfo]:
     """Every registered thread, optionally filtered to one channel."""
+    if settings.storage_backend == "postgres":
+        from . import storage_postgres
+
+        return storage_postgres.known_threads(settings, channel)
     query = "SELECT * FROM known_threads"
     params: tuple = ()
     if channel:

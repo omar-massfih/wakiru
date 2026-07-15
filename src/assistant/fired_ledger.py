@@ -121,6 +121,12 @@ def claim(
     SQLite's single writer slot (the claim-first / deliver-after discipline —
     at-most-once delivery, never a duplicate).
     """
+    if settings.storage_backend == "postgres":
+        from . import storage_postgres
+
+        return storage_postgres.claim_fired(
+            settings, spec.table, list(keys), fired_at, current
+        )
     names = ", ".join(name for name, _ in spec.columns)
     slots = ", ".join("?" for _ in spec.columns)
     newly: list[int] = []
