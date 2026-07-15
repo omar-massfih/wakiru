@@ -15,12 +15,17 @@ ledger drivers' ``getattr``) resolves at call time.
 from __future__ import annotations
 
 from .calendar import (
+    caldav_outbox_clear,
+    caldav_outbox_enqueue,
+    caldav_outbox_pending,
     create_event,
     delete_event,
     ensure_calendar_schema,
+    find_by_href,
     get_event,
     list_events,
     restore_event,
+    set_caldav_meta,
     update_event,
 )
 from .core import connect, enabled, require_url, vector_literal
@@ -100,6 +105,9 @@ __all__ = [
     "add_followup",
     "bump_recall",
     "bump_turn_counter",
+    "caldav_outbox_clear",
+    "caldav_outbox_enqueue",
+    "caldav_outbox_pending",
     "calendar_write_rows",
     "cancel_followup",
     "claim_calendar_reminders",
@@ -128,6 +136,7 @@ __all__ = [
     "ensure_tasks_schema",
     "ensure_telegram_schema",
     "ensure_threads_schema",
+    "find_by_href",
     "find_note",
     "get_document",
     "get_event",
@@ -165,6 +174,7 @@ __all__ = [
     "restore_task",
     "search_chunks",
     "search_memory_index",
+    "set_caldav_meta",
     "set_mute",
     "set_salience",
     "task_write_rows",

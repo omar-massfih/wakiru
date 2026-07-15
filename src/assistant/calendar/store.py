@@ -28,7 +28,7 @@ _FIELDS = ("title", "start", "end", "location", "notes", "rrule", "exdates", "ov
 
 # Columns added after the table's first release, migrated in on connect (see
 # :func:`_ensure_columns`). All are TEXT DEFAULT ''.
-_ADDED_COLUMNS = ("rrule", "exdates", "overrides")
+_ADDED_COLUMNS = ("rrule", "exdates", "overrides", "caldav_href", "caldav_etag")
 
 
 @dataclass
@@ -44,6 +44,11 @@ class Event:
     ``exdates`` is a JSON list of occurrence-start ISO strings to skip; ``overrides``
     is a JSON object mapping an occurrence-start ISO string to the changed fields for
     just that occurrence (a moved/edited single instance). Both empty on a plain event.
+
+    ``caldav_href``/``caldav_etag`` map a CalDAV-backed row to its remote resource:
+    ``caldav_href`` is the server path, ``caldav_etag`` the last-seen validator used as
+    the ``If-Match`` precondition on update/delete. Both empty on a purely-local or
+    ICS-mirrored event (see :mod:`assistant.calendar.caldav`).
     """
 
     id: str
@@ -55,6 +60,8 @@ class Event:
     rrule: str = ""
     exdates: str = ""
     overrides: str = ""
+    caldav_href: str = ""
+    caldav_etag: str = ""
     created: str = ""
     updated: str = ""
 
@@ -70,6 +77,7 @@ def _open(settings: Settings) -> sqlite3.Connection:
         " id TEXT PRIMARY KEY, title TEXT NOT NULL, start TEXT NOT NULL,"
         " end TEXT DEFAULT '', location TEXT DEFAULT '', notes TEXT DEFAULT '',"
         " rrule TEXT DEFAULT '', exdates TEXT DEFAULT '', overrides TEXT DEFAULT '',"
+        " caldav_href TEXT DEFAULT '', caldav_etag TEXT DEFAULT '',"
         " created TEXT DEFAULT '', updated TEXT DEFAULT '')"
     )
     _ensure_columns(conn)
@@ -115,6 +123,8 @@ def _row_to_event(row: sqlite3.Row) -> Event:
         rrule=row["rrule"] or "",
         exdates=row["exdates"] or "",
         overrides=row["overrides"] or "",
+        caldav_href=row["caldav_href"] or "",
+        caldav_etag=row["caldav_etag"] or "",
         created=row["created"] or "",
         updated=row["updated"] or "",
     )
@@ -313,12 +323,12 @@ def restore_event(settings: Settings, event: Event) -> Event:
         conn.execute(
             "INSERT OR REPLACE INTO events"
             " (id, title, start, end, location, notes, rrule, exdates, overrides,"
-            " created, updated)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " caldav_href, caldav_etag, created, updated)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 event.id, event.title, event.start, event.end, event.location,
                 event.notes, event.rrule, event.exdates, event.overrides,
-                event.created, event.updated,
+                event.caldav_href, event.caldav_etag, event.created, event.updated,
             ),
         )
     return event
@@ -336,6 +346,39 @@ def delete_event(settings: Settings, event_id: str) -> Event | None:
     with _connect(settings) as conn:
         conn.execute("DELETE FROM events WHERE id = ?", (event_id,))
     return existing
+
+
+def set_caldav_meta(settings: Settings, event_id: str, href: str, etag: str) -> None:
+    """Record the remote resource an event now maps to (CalDAV push result).
+
+    A no-op if the event is absent. ``updated`` is left untouched — this is
+    bookkeeping about where the row lives remotely, not a content change.
+    """
+    if settings.storage_backend == "postgres":
+        from .. import storage_postgres
+
+        storage_postgres.set_caldav_meta(settings, event_id, href, etag)
+        return
+    with _connect(settings) as conn:
+        conn.execute(
+            "UPDATE events SET caldav_href = ?, caldav_etag = ? WHERE id = ?",
+            (href, etag, event_id),
+        )
+
+
+def find_by_href(settings: Settings, href: str) -> Event | None:
+    """The event mapped to a CalDAV resource path, or ``None`` (empty href never matches)."""
+    if not href:
+        return None
+    if settings.storage_backend == "postgres":
+        from .. import storage_postgres
+
+        return storage_postgres.find_by_href(settings, href)
+    with _connect(settings) as conn:
+        row = conn.execute(
+            "SELECT * FROM events WHERE caldav_href = ?", (href,)
+        ).fetchone()
+    return _row_to_event(row) if row else None
 
 
 def find_events(settings: Settings, query: str) -> list[Event]:

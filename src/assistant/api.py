@@ -132,6 +132,27 @@ async def _calendar_sync_loop() -> None:
         await asyncio.sleep(get_settings().calendar_sync_minutes * 60)
 
 
+def _caldav_sync_once(settings) -> dict:
+    """One CalDAV cycle: reconcile queued pushes first, then pull the collection.
+
+    Reconcile before pull so a locally-pending edit lands remotely before the pull
+    might otherwise defer to (and then re-import) a now-stale server copy.
+    """
+    reconciled = calendar_sync.reconcile_caldav(settings) if settings.enable_caldav_write else {}
+    pulled = calendar_sync.pull_caldav(settings)
+    return {"pull": pulled, "reconcile": reconciled}
+
+
+async def _caldav_sync_loop() -> None:
+    """Mirror the writable CalDAV collection and drain the push outbox on a cadence."""
+    while True:
+        try:
+            await asyncio.to_thread(_caldav_sync_once, get_settings())
+        except Exception:
+            logger.exception("caldav sync tick failed")
+        await asyncio.sleep(get_settings().caldav_sync_minutes * 60)
+
+
 def _log_task_death(task: asyncio.Task) -> None:
     """Surface a background task that stopped on its own — it should run forever."""
     if task.cancelled():
@@ -208,6 +229,12 @@ async def lifespan(app: FastAPI):
         logger.info(
             "calendar sync started (%d feed(s), every %d min)",
             len(settings.calendar_ics_urls), settings.calendar_sync_minutes,
+        )
+    if settings.enable_caldav and settings.caldav_url and settings.caldav_sync_minutes > 0:
+        tasks.append(asyncio.create_task(_caldav_sync_loop(), name="caldav-sync"))
+        logger.info(
+            "caldav sync started (write=%s, every %d min)",
+            settings.enable_caldav_write, settings.caldav_sync_minutes,
         )
     if settings.telegram_bot_token:
         tasks.append(
@@ -468,8 +495,16 @@ def reminders_run() -> dict:
 
 @app.post("/calendar/sync", dependencies=[Depends(require_token)])
 def calendar_sync_run() -> dict:
-    """Pull every configured ICS feed now and return per-feed stats."""
-    return {"feeds": calendar_sync.pull_feeds(get_settings())}
+    """Pull ICS feeds now, and (when enabled) run the CalDAV pull + outbox reconcile.
+
+    The in-process tickers call the same logic on their cadences; this endpoint lets
+    both be driven manually or from external cron. All steps are idempotent.
+    """
+    settings = get_settings()
+    result: dict = {"feeds": calendar_sync.pull_feeds(settings)}
+    if settings.enable_caldav and settings.caldav_url:
+        result["caldav"] = _caldav_sync_once(settings)
+    return result
 
 
 @app.post("/briefing/run", dependencies=[Depends(require_token)])

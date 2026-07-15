@@ -63,15 +63,28 @@ def latest_applied_at(
 
 
 def _revert_row(settings: Settings, row: dict) -> str | None:
-    """Apply the reverse of one logged write; return a short summary, or None on failure."""
+    """Apply the reverse of one logged write; return a short summary, or None on failure.
+
+    The local revert is mirrored to CalDAV best-effort: undoing a *create* issues a
+    remote **DELETE** (the roadmap's "undo mapped to remote deletes"); undoing any
+    other write re-PUTs the restored event. The remote step never fails the undo — a
+    push that can't land is queued to the outbox for reconcile.
+    """
+    # Lazy import: ops imports undo, so importing ops at module load would cycle.
+    from .ops import _push_caldav
+
     try:
         if row["op"] == "create":
             deleted = store.delete_event(settings, row["event_id"])
-            return f"removed: {deleted.title}" if deleted else None
+            if deleted is None:
+                return None
+            _push_caldav(settings, None, "cancel", deleted)
+            return f"removed: {deleted.title}"
         if not row["before_json"]:
             return None
         before = store.Event(**json.loads(row["before_json"]))
         restored = store.restore_event(settings, before)
+        _push_caldav(settings, restored, "reschedule", None)
         return f"restored: {restored.title} @ {format_when(settings, restored.start)}"
     except Exception:
         logger.exception("failed to revert write_log row %s", row["id"])

@@ -52,15 +52,82 @@ def _target_id(settings: Settings, op: dict) -> str | None:
         )
         return None
     if matches and sync.is_synced_id(matches[0].id):
-        # Mirrored from an external calendar (one-way sync): the feed is the
-        # source of truth, and the next pull would silently revert any local
-        # change — so refuse rather than pretend.
+        # Read-only ICS mirror: the feed is the source of truth, and the next pull
+        # would silently revert any local change — so refuse rather than pretend.
+        # (CalDAV-backed rows are deliberately NOT refused: is_synced_id is ICS-only,
+        # so they fall through and their edit is pushed back — see _push_caldav.)
         logger.warning(
             "calendar %s target %r is synced from an external calendar; skipping",
             op.get("op"), matches[0].title,
         )
         return None
     return matches[0].id if matches else None
+
+
+# Appended to a write-confirmation when the local write landed but the CalDAV push
+# didn't — the reconcile pass will retry it.
+_UNSYNCED_NOTE = " (not yet synced to your calendar — will retry)"
+
+
+def _push_caldav(
+    settings: Settings,
+    event: store.Event | None,
+    op: str,
+    before: store.Event | None,
+) -> bool:
+    """Best-effort mirror of a local calendar write to the CalDAV collection.
+
+    Returns ``True`` when the remote is in sync (or there is nothing to push),
+    ``False`` when the push failed and was queued to the outbox for reconcile. A
+    CalDAV outage must never break the local write, so *every* failure — a transport
+    error, an ETag conflict, an unbuildable body — is swallowed here into a queued
+    retry. No-op unless ``enable_caldav_write`` is on; ICS-mirrored rows never push.
+    """
+    if not settings.enable_caldav_write:
+        return True
+    row = event if event is not None else before
+    if row is None or sync.is_synced_id(row.id):
+        return True
+
+    from . import caldav, outbox
+
+    try:
+        if op in ("create", "reschedule") and event is not None:
+            href = event.caldav_href or caldav.new_href(settings, event.id)
+            ical = caldav.event_to_ical(settings, event)
+            try:
+                result = caldav.put_event(
+                    settings, href=href, ical=ical, etag=event.caldav_etag or None
+                )
+            except caldav.CalDavError:
+                outbox.enqueue(
+                    settings, event.id, outbox.OP_PUT, href=href,
+                    etag=event.caldav_etag, ical=ical,
+                )
+                raise
+            store.set_caldav_meta(settings, event.id, result.href, result.etag)
+            outbox.clear(settings, event.id)
+            return True
+        if op == "cancel":
+            target = before or event
+            if target is not None and target.caldav_href:
+                try:
+                    caldav.delete_event(
+                        settings, href=target.caldav_href, etag=target.caldav_etag or None
+                    )
+                except caldav.CalDavError:
+                    outbox.enqueue(
+                        settings, target.id, outbox.OP_DELETE,
+                        href=target.caldav_href, etag=target.caldav_etag,
+                    )
+                    raise
+            if target is not None:
+                outbox.clear(settings, target.id)
+            return True
+        return True
+    except Exception:
+        logger.warning("caldav push failed (%s); queued for reconcile", op, exc_info=True)
+        return False
 
 
 def _conflict_note(settings: Settings, event: store.Event) -> str:
@@ -117,6 +184,8 @@ def apply_op(
         suffix = f" ({recurrence.humanize_rrule(event.rrule)})" if event.rrule else ""
         summary = f"created: {event.title} @ {format_when(settings, event.start)}{suffix}"
         summary += _conflict_note(settings, event)
+        if not _push_caldav(settings, event, "create", None):
+            summary += _UNSYNCED_NOTE
         _log_write(settings, thread_id, batch_id, event.id, "create", summary, None)
         return summary
 
@@ -137,6 +206,8 @@ def apply_op(
             return None
         summary = f"rescheduled: {revised.title} @ {format_when(settings, revised.start)}"
         summary += _conflict_note(settings, revised)
+        if not _push_caldav(settings, revised, "reschedule", before):
+            summary += _UNSYNCED_NOTE
         _log_write(settings, thread_id, batch_id, target, "reschedule", summary, before)
         return summary
 
@@ -148,6 +219,8 @@ def apply_op(
         if deleted is None:
             return None
         summary = f"cancelled: {deleted.title}"
+        if not _push_caldav(settings, None, "cancel", deleted):
+            summary += _UNSYNCED_NOTE
         _log_write(settings, thread_id, batch_id, target, "cancel", summary, deleted)
         return summary
 
@@ -178,6 +251,8 @@ def _apply_occurrence_op(
         if updated is None:
             return None
         summary = f"skipped: {master.title} on {format_when(settings, key)}"
+        if not _push_caldav(settings, updated, "reschedule", master):
+            summary += _UNSYNCED_NOTE
         _log_write(settings, thread_id, batch_id, target, "skip", summary, master)
         return summary
 
@@ -192,5 +267,7 @@ def _apply_occurrence_op(
         f"moved: {master.title} {format_when(settings, key)}"
         f" -> {format_when(settings, new_start)}"
     )
+    if not _push_caldav(settings, updated, "reschedule", master):
+        summary += _UNSYNCED_NOTE
     _log_write(settings, thread_id, batch_id, target, "move", summary, master)
     return summary

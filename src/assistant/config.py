@@ -215,6 +215,29 @@ class Settings(BaseSettings):
     # the automatic pull; POST /calendar/sync still works.
     calendar_sync_minutes: int = 15
 
+    # --- Two-way CalDAV sync (opt-in; second switch for writes) ---
+    # Master switch for the CalDAV round-trip: pull one writable collection into the
+    # local store as read+write rows (distinct from the read-only ICS mirror above).
+    # OFF by default — CalDAV needs real external auth, like email.
+    enable_caldav: bool = False
+    # SECOND, independent gate: push local create/reschedule/cancel back to the
+    # collection. Reads work with just enable_caldav; nothing is ever written to the
+    # remote unless this is deliberately set. The reply path pushes; the background
+    # loop only reconciles already user-intended writes.
+    enable_caldav_write: bool = False
+    # The writable calendar *collection* URL (not a principal/home-set). https, and
+    # validated by the SSRF guard like every other outbound fetch.
+    caldav_url: str | None = None
+    # Basic-auth credentials (an app-specific password on Fastmail/iCloud/Nextcloud).
+    caldav_username: str | None = None
+    caldav_password: str | None = None
+    # How to authenticate: "password" (Basic) is the only path today; "oauth"
+    # (Bearer, for Google) is a future slot mirroring mail/oauth.py.
+    caldav_auth: str = "password"
+    # Minutes between CalDAV pulls + outbox reconcile. 0 disables the loop
+    # (POST /calendar/sync still runs it).
+    caldav_sync_minutes: int = 15
+
     # --- Email (opt-in; the only subsystem that talks to an external service) ---
     # Master switch. OFF by default: email is the one capability that needs real
     # external auth (OAuth2 / an app password) and reads private correspondence.
