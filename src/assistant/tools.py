@@ -540,6 +540,41 @@ def _cancel_followup(ctx: ToolContext, target: str) -> str:
     return f"Cancelled follow-up: {cancelled.topic}"
 
 
+def _update_followup(
+    ctx: ToolContext,
+    target: str,
+    when: str = "",
+    topic: str = "",
+    context: str = "",
+) -> str:
+    from . import followups
+    from .calendar.context import format_when, now
+    from .calendar.store import parse_dt
+
+    due = None
+    if when:
+        due = parse_dt(str(when))
+        if due is None:
+            return f"Tool failed: when must be {_ISO}."
+        if due <= now(ctx.settings):
+            return "Tool failed: when is already in the past."
+    if due is None and not topic and not context:
+        return "Tool failed: give at least one of when, topic, or context to change."
+    revised = followups.update(
+        ctx.settings,
+        str(target),
+        due=due,
+        topic=topic or None,
+        context=context or None,
+    )
+    if revised is None:
+        return _NO_MATCH
+    return (
+        f"Follow-up updated: {revised.topic}"
+        f" @ {format_when(ctx.settings, revised.due)} (id {revised.id})"
+    )
+
+
 def _list_followups(ctx: ToolContext) -> str:
     from . import followups
     from .calendar.context import format_when
@@ -560,7 +595,11 @@ def _followup_tools() -> list[ToolSpec]:
             "Schedule yourself to check in with the user about something "
             "later. Use for 'remind me to ask …', promises you made, or "
             "things you decide are worth following up on. When it comes due "
-            "you will be woken to compose the check-in yourself.",
+            "you will be woken to compose the check-in yourself. The context "
+            "field is your note-to-self that every future wake reads, so keep "
+            "your working state there (\"waiting for their reply\", \"step 2 "
+            "of 3: draft done\") and revise it with update_followup as things "
+            "move.",
             _params(
                 {
                     "when": ("string", _ISO),
@@ -573,6 +612,23 @@ def _followup_tools() -> list[ToolSpec]:
                 ["when", "topic"],
             ),
             _schedule_followup,
+        ),
+        ToolSpec(
+            "update_followup",
+            "Revise an open follow-up you are carrying: push its due time out, "
+            "reword the topic, or (most often) update its context with what you "
+            "just learned. Target it by id or an unambiguous topic reference. "
+            "Give at least one of when/topic/context to change.",
+            _params(
+                {
+                    "target": ("string", "Follow-up id or topic"),
+                    "when": ("string", "New due time — " + _ISO),
+                    "topic": ("string", "New one-line topic"),
+                    "context": ("string", "Revised note-to-self for future wakes"),
+                },
+                ["target"],
+            ),
+            _update_followup,
         ),
         ToolSpec(
             "cancel_followup",

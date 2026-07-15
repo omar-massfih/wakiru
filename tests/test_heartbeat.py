@@ -144,6 +144,51 @@ def test_mail_change_is_reported_once_per_snapshot(settings, monkeypatch) -> Non
     assert "unread-mail snapshot changed" not in second.report()
 
 
+def test_open_followups_are_surfaced_before_they_are_due(settings) -> None:
+    # A future (not-yet-due) followup is the assistant's standing intention —
+    # it must appear in every situation report so the model can act on it,
+    # revise it, or let it ride, without waiting for it to fire.
+    followups.add(
+        settings,
+        now(settings) + timedelta(hours=6),
+        "chase the apartment reply",
+        "waiting on the landlord",
+    )
+    situation = heartbeat.gather_situation(settings)
+    assert situation is not None
+    report = situation.report()
+    assert "Open follow-ups you are carrying" in report
+    assert "chase the apartment reply" in report
+    assert "waiting on the landlord" in report  # the note-to-self rides along
+    assert not situation.followups  # not due, so not claimed — still open
+    assert followups.list_open(settings)
+
+
+def test_revised_followup_context_shows_on_the_next_beat(settings, monkeypatch) -> None:
+    # A beat that updates a followup's context; the next beat's report reflects it.
+    f = followups.add(
+        settings, now(settings) + timedelta(hours=6), "chase reply", "no word yet"
+    )
+    _wire_model(
+        monkeypatch,
+        [
+            AIMessage(
+                content="",
+                tool_calls=[{
+                    "name": "update_followup",
+                    "args": {"target": f.id, "context": "landlord replied, sending docs"},
+                    "id": "u1",
+                }],
+            ),
+            AIMessage(content="SILENT"),
+        ],
+    )
+    heartbeat.run_heartbeat(settings)
+    assert followups.list_open(settings)[0].context == "landlord replied, sending docs"
+    later = heartbeat.gather_situation(settings)
+    assert later is not None and "landlord replied, sending docs" in later.report()
+
+
 # --- run_heartbeat: the wake loop and delivery -------------------------------- #
 
 

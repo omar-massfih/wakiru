@@ -54,6 +54,47 @@ def test_cancel_unknown_returns_none(settings) -> None:
     assert followups.cancel(settings, "") is None
 
 
+def test_update_by_id_changes_fields(settings) -> None:
+    f = followups.add(settings, _due_in(settings, hours=1), "ask about interview", "at NAV")
+    new_due = _due_in(settings, days=1)
+    revised = followups.update(
+        settings, f.id, due=new_due, context="waiting on their reply"
+    )
+    assert revised is not None
+    assert revised.due == new_due.isoformat(timespec="seconds")
+    assert revised.context == "waiting on their reply"
+    assert revised.topic == "ask about interview"  # untouched field kept
+    stored = followups.list_open(settings)[0]
+    assert stored.context == "waiting on their reply" and stored.due == revised.due
+
+
+def test_update_by_unambiguous_topic(settings) -> None:
+    followups.add(settings, _due_in(settings, hours=1), "ask about interview")
+    revised = followups.update(settings, "interview", topic="ask how the interview went")
+    assert revised is not None and revised.topic == "ask how the interview went"
+
+
+def test_update_ambiguous_topic_refuses(settings) -> None:
+    followups.add(settings, _due_in(settings, hours=1), "check flight to Oslo")
+    followups.add(settings, _due_in(settings, hours=2), "check flight to Bergen")
+    assert followups.update(settings, "check flight", context="x") is None
+    assert all(f.context == "" for f in followups.list_open(settings))
+
+
+def test_update_with_no_fields_is_a_noop(settings) -> None:
+    f = followups.add(settings, _due_in(settings, hours=1), "unchanged")
+    assert followups.update(settings, f.id) is None
+
+
+def test_update_cannot_touch_a_fired_or_cancelled_followup(settings) -> None:
+    fired = followups.add(settings, _due_in(settings, minutes=-5), "overdue")
+    followups.claim_due(settings)  # → fired
+    cancelled = followups.add(settings, _due_in(settings, hours=1), "changed mind")
+    followups.cancel(settings, cancelled.id)
+    assert followups.update(settings, fired.id, context="x") is None
+    assert followups.update(settings, cancelled.id, context="x") is None
+
+
 def test_claim_due_takes_only_due_and_exactly_once(settings) -> None:
     due = followups.add(settings, _due_in(settings, minutes=-5), "overdue check-in")
     followups.add(settings, _due_in(settings, days=1), "tomorrow's check-in")
@@ -102,6 +143,29 @@ def test_schedule_followup_tool_roundtrip(settings) -> None:
     assert "ask about the viewing" in _run(settings, "list_followups", {})
     assert _run(settings, "cancel_followup", {"target": "viewing"}).startswith("Cancelled")
     assert _run(settings, "list_followups", {}) == "No follow-ups scheduled."
+
+
+def test_update_followup_tool_roundtrip(settings) -> None:
+    f = followups.add(settings, _due_in(settings, hours=1), "ask about the viewing")
+    result = _run(
+        settings, "update_followup",
+        {"target": f.id, "context": "step 2 of 3: viewing booked"},
+    )
+    assert result.startswith("Follow-up updated: ask about the viewing")
+    assert followups.list_open(settings)[0].context == "step 2 of 3: viewing booked"
+
+
+def test_update_followup_tool_refuses_no_fields_and_past_when(settings) -> None:
+    f = followups.add(settings, _due_in(settings, hours=1), "carry me")
+    assert "at least one of" in _run(settings, "update_followup", {"target": f.id})
+    past = _due_in(settings, hours=-1).isoformat(timespec="seconds")
+    assert "already in the past" in _run(
+        settings, "update_followup", {"target": f.id, "when": past}
+    )
+    # An unresolved target reports no-match, not success.
+    assert "No matching item" in _run(
+        settings, "update_followup", {"target": "ghost", "context": "x"}
+    )
 
 
 def test_schedule_followup_rejects_bad_or_past_when(settings) -> None:

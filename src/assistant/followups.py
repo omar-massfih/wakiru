@@ -114,12 +114,13 @@ def list_open(settings: Settings) -> list[Followup]:
     return [_from_row(row) for row in rows]
 
 
-def cancel(settings: Settings, ident: str) -> Followup | None:
-    """Cancel one open followup by id or an unambiguous topic reference.
+def _match_open(settings: Settings, ident: str, action: str) -> Followup | None:
+    """Resolve an open followup by id or an unambiguous topic reference.
 
     A topic reference matching more than one open followup is refused rather
-    than guessed at — cancelling nothing beats cancelling the wrong intent
-    (the same rule the calendar and mute targets follow).
+    than guessed at — touching nothing beats touching the wrong intent (the
+    same rule the calendar and mute targets follow). ``action`` names the
+    caller for the ambiguity log line.
     """
     ident = str(ident).strip()
     if not ident:
@@ -132,18 +133,61 @@ def cancel(settings: Settings, ident: str) -> Followup | None:
     if len(matches) != 1:
         if len(matches) > 1:
             logger.warning(
-                "followup cancel target %r is ambiguous between %d followups; skipping",
+                "followup %s target %r is ambiguous between %d followups; skipping",
+                action,
                 ident,
                 len(matches),
             )
         return None
-    target = matches[0]
+    return matches[0]
+
+
+def cancel(settings: Settings, ident: str) -> Followup | None:
+    """Cancel one open followup by id or an unambiguous topic reference."""
+    target = _match_open(settings, ident, "cancel")
+    if target is None:
+        return None
     with _connect(settings) as conn:
         cursor = conn.execute(
             "UPDATE followups SET status = 'cancelled' WHERE id = ? AND status = 'open'",
             (target.id,),
         )
     return target if cursor.rowcount else None
+
+
+def update(
+    settings: Settings,
+    ident: str,
+    due: datetime | None = None,
+    topic: str | None = None,
+    context: str | None = None,
+) -> Followup | None:
+    """Revise an open followup's due time, topic, or context (note-to-self).
+
+    Resolves the target the same ambiguity-refusing way :func:`cancel` does, and
+    only touches open rows — a fired or cancelled followup is done. Returns the
+    revised row, or ``None`` when nothing matched or no field was given.
+    """
+    if due is None and topic is None and context is None:
+        return None
+    target = _match_open(settings, ident, "update")
+    if target is None:
+        return None
+    revised = Followup(
+        id=target.id,
+        due=due.isoformat(timespec="seconds") if due is not None else target.due,
+        topic=str(topic).strip() if topic is not None else target.topic,
+        context=str(context).strip() if context is not None else target.context,
+        thread_id=target.thread_id,
+        created_at=target.created_at,
+    )
+    with _connect(settings) as conn:
+        cursor = conn.execute(
+            "UPDATE followups SET due = ?, topic = ?, context = ?"
+            " WHERE id = ? AND status = 'open'",
+            (revised.due, revised.topic, revised.context, revised.id),
+        )
+    return revised if cursor.rowcount else None
 
 
 def claim_due(settings: Settings, current: datetime | None = None) -> list[Followup]:

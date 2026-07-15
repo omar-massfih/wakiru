@@ -207,6 +207,21 @@ def gather_situation(
         minutes = int((current - last_heard).total_seconds() / 60)
         info.append(f"You last heard from the user {minutes} minutes ago.")
 
+    # The standing intentions you carry across wakes: open follow-ups not yet
+    # due (the due ones were just claimed above). Surfaced every beat so you can
+    # act toward them, reschedule them, or rewrite their context as things move.
+    open_items = followups.list_open(settings)
+    if open_items:
+        from .calendar.context import format_when
+
+        info.append(
+            "Open follow-ups you are carrying (reschedule, update, or cancel "
+            "them as things change):"
+        )
+        for item in open_items[:5]:
+            line = f"  - {item.topic} @ {format_when(settings, item.due)} (id {item.id})"
+            info.append(line + (f" — {item.context}" if item.context else ""))
+
     return Situation(triggers=triggers, followups=due, info=info)
 
 
