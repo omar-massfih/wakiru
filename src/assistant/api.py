@@ -28,6 +28,7 @@ from pydantic import BaseModel, Field
 from . import slack, telegram, webui
 from .agent import build_agent
 from .briefing import run_briefing
+from .calendar import remote as calendar_remote
 from .calendar import run_reminders
 from .calendar import sync as calendar_sync
 from .calendar.context import now, resolve_tz, upcoming_events
@@ -230,11 +231,11 @@ async def lifespan(app: FastAPI):
             "calendar sync started (%d feed(s), every %d min)",
             len(settings.calendar_ics_urls), settings.calendar_sync_minutes,
         )
-    if settings.enable_caldav and settings.caldav_url and settings.caldav_sync_minutes > 0:
+    if calendar_remote.is_configured(settings) and settings.caldav_sync_minutes > 0:
         tasks.append(asyncio.create_task(_caldav_sync_loop(), name="caldav-sync"))
         logger.info(
-            "caldav sync started (write=%s, every %d min)",
-            settings.enable_caldav_write, settings.caldav_sync_minutes,
+            "remote calendar sync started (provider=%s, write=%s, every %d min)",
+            settings.caldav_provider, settings.enable_caldav_write, settings.caldav_sync_minutes,
         )
     if settings.telegram_bot_token:
         tasks.append(
@@ -502,7 +503,7 @@ def calendar_sync_run() -> dict:
     """
     settings = get_settings()
     result: dict = {"feeds": calendar_sync.pull_feeds(settings)}
-    if settings.enable_caldav and settings.caldav_url:
+    if calendar_remote.is_configured(settings):
         result["caldav"] = _caldav_sync_once(settings)
     return result
 

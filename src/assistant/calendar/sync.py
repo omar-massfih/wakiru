@@ -233,26 +233,19 @@ def pull_feed(settings: Settings, url: str) -> dict:
 
 
 def pull_caldav(settings: Settings) -> dict:
-    """Mirror the writable CalDAV collection into read+write local rows.
+    """Mirror the writable remote calendar (CalDAV or Google) into read+write local rows.
 
     Unlike the ICS pull, these rows carry ``caldav_href``/``caldav_etag`` and are
     *not* refused by the write path — a later local edit is pushed back. A row with
     a queued outbox push (a local edit that hasn't reached the server) wins over the
     remote copy until reconcile settles it, so the pull never clobbers a pending edit.
     """
-    from . import caldav, outbox
+    from . import outbox, remote
 
-    resources = caldav.list_resources(settings)
-    incoming: dict[str, store.Event] = {}
-    for res in resources:
-        for uid, event in parse_vevents(res.ical, settings).items():
-            event.id = _caldav_local_id(uid)
-            event.caldav_href = res.href
-            event.caldav_etag = res.etag
-            incoming[event.id] = event
+    incoming: dict[str, store.Event] = {e.id: e for e in remote.list_events(settings)}
 
-    # CalDAV-backed rows are exactly those carrying an href (foreign 'cdv…' events
-    # and our own successfully-pushed writes alike).
+    # Remote-backed rows are exactly those carrying an href (foreign events and our
+    # own successfully-pushed writes alike).
     existing = {e.id: e for e in store.list_events(settings) if e.caldav_href}
 
     added = updated = skipped = 0
@@ -301,29 +294,32 @@ def reconcile_caldav(settings: Settings) -> dict:
     remote* — the pending intent is dropped and the next pull overwrites local — so an
     interactive edit that lost a race never silently stomps a newer remote change.
     """
-    from . import caldav, outbox
+    from . import outbox, remote
 
     reconciled = dropped = still_pending = 0
     for row in outbox.pending(settings):
         event_id = row["event_id"]
         try:
             if row["op"] == outbox.OP_DELETE:
-                caldav.delete_event(settings, href=row["href"], etag=row["etag"] or None)
+                remote.delete(settings, row["href"], row["etag"] or None)
             else:
-                result = caldav.put_event(
-                    settings, href=row["href"], ical=row["ical"], etag=row["etag"] or None
-                )
-                store.set_caldav_meta(settings, event_id, result.href, result.etag)
+                event = store.get_event(settings, event_id)
+                if event is None:  # created then deleted before we could push — moot
+                    outbox.clear(settings, event_id)
+                    dropped += 1
+                    continue
+                href, etag = remote.upsert(settings, event)
+                store.set_caldav_meta(settings, event_id, href, etag)
             outbox.clear(settings, event_id)
             reconciled += 1
-        except caldav.CalDavConflictError:
+        except remote.RemoteConflictError:
             outbox.clear(settings, event_id)  # remote wins; the next pull fixes local
             dropped += 1
             logger.warning(
                 "caldav reconcile: %s %s conflicts remotely; deferring to the server",
                 row["op"], event_id,
             )
-        except caldav.CalDavError:
+        except remote.RemoteError:
             still_pending += 1  # still offline — leave it queued for the next pass
 
     return {"reconciled": reconciled, "dropped": dropped, "still_pending": still_pending}

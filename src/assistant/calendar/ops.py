@@ -89,33 +89,24 @@ def _push_caldav(
     if row is None or sync.is_synced_id(row.id):
         return True
 
-    from . import caldav, outbox
+    from . import outbox, remote
 
     try:
         if op in ("create", "reschedule") and event is not None:
-            href = event.caldav_href or caldav.new_href(settings, event.id)
-            ical = caldav.event_to_ical(settings, event)
             try:
-                result = caldav.put_event(
-                    settings, href=href, ical=ical, etag=event.caldav_etag or None
-                )
-            except caldav.CalDavError:
-                outbox.enqueue(
-                    settings, event.id, outbox.OP_PUT, href=href,
-                    etag=event.caldav_etag, ical=ical,
-                )
+                href, etag = remote.upsert(settings, event)
+            except Exception:
+                outbox.enqueue(settings, event.id, outbox.OP_PUT)
                 raise
-            store.set_caldav_meta(settings, event.id, result.href, result.etag)
+            store.set_caldav_meta(settings, event.id, href, etag)
             outbox.clear(settings, event.id)
             return True
         if op == "cancel":
             target = before or event
             if target is not None and target.caldav_href:
                 try:
-                    caldav.delete_event(
-                        settings, href=target.caldav_href, etag=target.caldav_etag or None
-                    )
-                except caldav.CalDavError:
+                    remote.delete(settings, target.caldav_href, target.caldav_etag or None)
+                except Exception:
                     outbox.enqueue(
                         settings, target.id, outbox.OP_DELETE,
                         href=target.caldav_href, etag=target.caldav_etag,
@@ -126,7 +117,7 @@ def _push_caldav(
             return True
         return True
     except Exception:
-        logger.warning("caldav push failed (%s); queued for reconcile", op, exc_info=True)
+        logger.warning("remote calendar push failed (%s); queued for reconcile", op, exc_info=True)
         return False
 
 

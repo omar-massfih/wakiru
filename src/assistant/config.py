@@ -225,8 +225,16 @@ class Settings(BaseSettings):
     # remote unless this is deliberately set. The reply path pushes; the background
     # loop only reconciles already user-intended writes.
     enable_caldav_write: bool = False
+    # Which remote-calendar transport to use: "caldav" (RFC 4791, for Fastmail/
+    # iCloud/Nextcloud) or "google" (the Google Calendar REST API v3, because Google
+    # walls off CalDAV — v1 is dead and v2 returns 403 to normal OAuth apps). The
+    # "google" provider reuses the OAuth credentials below.
+    caldav_provider: str = "caldav"
+    # Google provider only: which calendar to sync ("primary", or a calendar id /
+    # email). Ignored for the CalDAV provider.
+    google_calendar_id: str = "primary"
     # The writable calendar *collection* URL (not a principal/home-set). https, and
-    # validated by the SSRF guard like every other outbound fetch.
+    # validated by the SSRF guard like every other outbound fetch. CalDAV provider only.
     caldav_url: str | None = None
     # Basic-auth credentials (an app-specific password on Fastmail/iCloud/Nextcloud).
     caldav_username: str | None = None

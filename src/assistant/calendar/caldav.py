@@ -183,6 +183,24 @@ def list_resources(settings: Settings) -> list[RemoteResource]:
     return _parse_multistatus(body)
 
 
+def list_events(settings: Settings) -> list[store.Event]:
+    """The collection's events as upsert-ready ``store.Event`` rows (id + href + etag).
+
+    The shared parser (:func:`sync.parse_vevents`) turns each resource's VCALENDAR into
+    events; ids are the CalDAV-local ids (``cdv…``, or our own stripped ``@wakiru``).
+    """
+    from . import sync
+
+    events: list[store.Event] = []
+    for resource in list_resources(settings):
+        for uid, event in sync.parse_vevents(resource.ical, settings).items():
+            event.id = sync._caldav_local_id(uid)
+            event.caldav_href = resource.href
+            event.caldav_etag = resource.etag
+            events.append(event)
+    return events
+
+
 def _parse_multistatus(body: bytes) -> list[RemoteResource]:
     try:
         root = ET.fromstring(body)
