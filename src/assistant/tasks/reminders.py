@@ -15,10 +15,10 @@ from datetime import datetime, timedelta
 
 from .. import fired_ledger
 from ..calendar.context import now
-from ..calendar.reminders import START_GRACE, _repeat_slot
 from ..calendar.store import parse_dt
 from ..config import Settings, get_settings
 from ..notify import deliver_reminder
+from ..reminder_windows import due_slots
 from . import store
 
 # The dedupe ledger lives in the same ``tasks.db`` file the store uses.
@@ -53,55 +53,32 @@ def due_task_reminders(settings: Settings, current: datetime | None = None) -> l
 
     current = current or now(settings)
     repeat = settings.reminder_repeat_minutes
-    max_lead = max(leads)
-    overdue_floor = timedelta(minutes=-settings.reminder_overdue_max_minutes)
     reminders: list[dict] = []
     for task in store.list_tasks(settings):  # open tasks only
         due = parse_dt(task.due)
         if due is None:
             continue
         remaining = due - current
-        if repeat > 0:
-            # Repeat mode: nudge every `repeat` minutes from the outermost lead
-            # onward, and keep nagging while overdue until the task is done or the
-            # overdue window is exhausted. Each countdown band is a distinct slot.
-            if not (overdue_floor <= remaining <= timedelta(minutes=max_lead)):
-                continue
-            slot = _repeat_slot(remaining, repeat)
-            message = task_reminder_message(
-                settings, task.id, task.title, task.due, remaining, slot
-            )
-            reminders.append(
-                {
-                    "task_id": task.id,
-                    "title": task.title,
-                    "due": task.due,
-                    "lead_minutes": slot,
-                    "covered_leads": [slot],
-                    "message": message,
-                }
-            )
-            continue
-        due_leads = sorted(
-            lead for lead in leads
-            if timedelta(0) <= remaining <= timedelta(minutes=lead)
+        # In repeat mode the nagging continues while overdue, until the task is
+        # done or the overdue window is exhausted.
+        slots = due_slots(
+            remaining, leads, repeat,
+            repeat_floor=timedelta(minutes=-settings.reminder_overdue_max_minutes),
         )
-        if not due_leads and -START_GRACE <= remaining < timedelta(0):
-            # The at-due band, mirroring the calendar's at-start nudge (lead 0).
-            due_leads = [0]
-        if due_leads:
-            reminders.append(
-                {
-                    "task_id": task.id,
-                    "title": task.title,
-                    "due": task.due,
-                    "lead_minutes": due_leads[0],
-                    "covered_leads": due_leads,
-                    "message": task_reminder_message(
-                        settings, task.id, task.title, task.due, remaining, due_leads[0]
-                    ),
-                }
-            )
+        if not slots:
+            continue
+        reminders.append(
+            {
+                "task_id": task.id,
+                "title": task.title,
+                "due": task.due,
+                "lead_minutes": slots[0],
+                "covered_leads": slots,
+                "message": task_reminder_message(
+                    settings, task.id, task.title, task.due, remaining, slots[0]
+                ),
+            }
+        )
     return reminders
 
 

@@ -13,12 +13,12 @@ in-process ticker and a manual ``POST /reminders/run`` can both drive it safely.
 
 from __future__ import annotations
 
-import math
 from datetime import datetime, timedelta
 
 from .. import fired_ledger
 from ..config import Settings, get_settings
 from ..notify import deliver_reminder
+from ..reminder_windows import START_GRACE, due_slots
 from . import recurrence, store
 from .context import now
 
@@ -28,23 +28,6 @@ _LEDGER = fired_ledger.FiredLedgerSpec(
     columns=(("event_id", "TEXT"), ("event_start", "TEXT"), ("lead_minutes", "INTEGER")),
     db_path=lambda settings: settings.calendar_db_path,
 )
-
-
-# How long after its start an event still gets its one "starting now" nudge —
-# wide enough to cover ticker jitter and a short restart landing exactly on the
-# boundary. The ledger still dedupes, so the at-start band fires at most once.
-START_GRACE = timedelta(minutes=5)
-
-
-def _repeat_slot(remaining: timedelta, repeat_minutes: int) -> int:
-    """Bucket a countdown into a stable per-interval slot (floored whole minutes).
-
-    Successive ``repeat_minutes``-wide bands map to distinct integers, so each band
-    claims the dedupe ledger exactly once (the ledger's ``lead_minutes`` column
-    doubles as the slot key). Negative values are overdue bands, used only for
-    tasks that keep nagging past their due time.
-    """
-    return math.floor(remaining.total_seconds() / 60 / repeat_minutes) * repeat_minutes
 
 
 def due_reminders(settings: Settings, current: datetime | None = None) -> list[dict]:
@@ -83,57 +66,32 @@ def due_reminders(settings: Settings, current: datetime | None = None) -> list[d
     events = recurrence.occurrences_in(settings, current - START_GRACE, horizon)
 
     repeat = settings.reminder_repeat_minutes
-    max_lead = max(leads)
     reminders: list[dict] = []
     for event in events:
         start = store.parse_dt(event.start)
         if start is None:
             continue
         remaining = start - current
-        if repeat > 0:
-            # Repeat mode: begin at the outermost lead, then re-notify every
-            # `repeat` minutes until the event starts, plus ONE "starting now"
-            # nudge just after it begins (the single negative slot the grace
-            # window allows). Each countdown band is a distinct slot, claimed
-            # (and pushed) exactly once.
-            grace = min(START_GRACE, timedelta(minutes=repeat))
-            if not (-grace <= remaining <= timedelta(minutes=max_lead)):
-                continue
-            slot = _repeat_slot(remaining, repeat)
-            reminders.append(
-                {
-                    "event_id": event.id,
-                    "title": event.title,
-                    "start": event.start,
-                    "lead_minutes": slot,
-                    "covered_leads": [slot],
-                    "message": event_reminder_message(
-                        settings, event.id, event.title, event.start, remaining, slot
-                    ),
-                }
-            )
-            continue
-        due_leads = sorted(
-            lead for lead in leads
-            if timedelta(0) <= remaining <= timedelta(minutes=lead)
+        # In repeat mode the nagging stops at the event's start, bar the ONE
+        # "starting now" nudge the grace window allows (the single negative slot).
+        slots = due_slots(
+            remaining, leads, repeat,
+            repeat_floor=-min(START_GRACE, timedelta(minutes=repeat)),
         )
-        if not due_leads and -START_GRACE <= remaining < timedelta(0):
-            # The at-start band: one final "starting now" nudge, keyed as lead 0
-            # so it dedupes independently of the ahead-of-time leads.
-            due_leads = [0]
-        if due_leads:
-            reminders.append(
-                {
-                    "event_id": event.id,
-                    "title": event.title,
-                    "start": event.start,
-                    "lead_minutes": due_leads[0],
-                    "covered_leads": due_leads,
-                    "message": event_reminder_message(
-                        settings, event.id, event.title, event.start, remaining, due_leads[0]
-                    ),
-                }
-            )
+        if not slots:
+            continue
+        reminders.append(
+            {
+                "event_id": event.id,
+                "title": event.title,
+                "start": event.start,
+                "lead_minutes": slots[0],
+                "covered_leads": slots,
+                "message": event_reminder_message(
+                    settings, event.id, event.title, event.start, remaining, slots[0]
+                ),
+            }
+        )
     return reminders
 
 
