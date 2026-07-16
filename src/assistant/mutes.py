@@ -24,7 +24,8 @@ from contextlib import contextmanager
 from datetime import datetime
 
 from .calendar.store import parse_dt
-from .config import Settings
+from .config import Settings, postgres_backend
+from .sqlite_util import open_db, transaction
 
 logger = logging.getLogger(__name__)
 
@@ -36,11 +37,7 @@ _ID_KEYS = {"event": "event_id", "task": "task_id"}
 def _open(settings: Settings) -> sqlite3.Connection:
     """Open the mutes DB and ensure the table exists (WAL, fresh connection —
     the same discipline as calendar.reminders._open)."""
-    settings.memory_path.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(settings.mutes_db_path)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout = 5000")
-    conn.execute("PRAGMA journal_mode = WAL")
+    conn = open_db(settings.mutes_db_path)
     conn.execute(
         "CREATE TABLE IF NOT EXISTS reminder_mutes ("
         " scope TEXT NOT NULL, target_id TEXT NOT NULL,"
@@ -53,12 +50,8 @@ def _open(settings: Settings) -> sqlite3.Connection:
 
 @contextmanager
 def _connect(settings: Settings) -> Iterator[sqlite3.Connection]:
-    conn = _open(settings)
-    try:
-        with conn:
-            yield conn
-    finally:
-        conn.close()
+    with transaction(_open(settings)) as conn:
+        yield conn
 
 
 def _prune(conn: sqlite3.Connection, current: datetime) -> None:
@@ -85,9 +78,7 @@ def set_mute(
 ) -> None:
     """Upsert one mute: no nudges for (scope, target_id) until ``until``."""
     current = current or datetime.now().astimezone()
-    if settings.storage_backend == "postgres":
-        from . import storage_postgres
-
+    if storage_postgres := postgres_backend(settings):
         storage_postgres.set_mute(settings, scope, target_id, until, reason, current)
         return
     with _connect(settings) as conn:
@@ -107,9 +98,7 @@ def set_mute(
 
 def clear_mute(settings: Settings, scope: str, target_id: str) -> bool:
     """Delete one mute; True if a row existed."""
-    if settings.storage_backend == "postgres":
-        from . import storage_postgres
-
+    if storage_postgres := postgres_backend(settings):
         return storage_postgres.clear_mute(settings, scope, target_id)
     with _connect(settings) as conn:
         cursor = conn.execute(
@@ -121,9 +110,7 @@ def clear_mute(settings: Settings, scope: str, target_id: str) -> bool:
 
 def active_mutes(settings: Settings, current: datetime) -> dict[tuple[str, str], datetime]:
     """Every unexpired mute as ``{(scope, target_id): until}`` — one read per tick."""
-    if settings.storage_backend == "postgres":
-        from . import storage_postgres
-
+    if storage_postgres := postgres_backend(settings):
         rows = storage_postgres.list_mutes(settings)
     else:
         with _connect(settings) as conn:

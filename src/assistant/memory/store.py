@@ -30,7 +30,7 @@ from pathlib import Path
 
 import yaml
 
-from ..config import Settings
+from ..config import Settings, postgres_backend
 
 # The three cognitive stores; each kind lives in a same-named subdirectory.
 _KINDS = frozenset({"episodic", "semantic", "procedural"})
@@ -125,9 +125,7 @@ def memory_root(settings: Settings) -> Path:
 
 
 def note_path(settings: Settings, note: Note) -> Path:
-    if settings.storage_backend == "postgres":
-        from .. import storage_postgres
-
+    if storage_postgres := postgres_backend(settings):
         return storage_postgres.virtual_note_path(settings, note)
     # note.kind is always a valid kind (normalized in __post_init__).
     return memory_root(settings) / note.kind / f"{note.name}.md"
@@ -183,9 +181,7 @@ def unique_name(settings: Settings, slug: str, keep: str | None = None) -> str:
     free name is found. This prevents two unrelated facts whose descriptions
     slugify identically from silently overwriting each other.
     """
-    if settings.storage_backend == "postgres":
-        from .. import storage_postgres
-
+    if storage_postgres := postgres_backend(settings):
         return storage_postgres.unique_name(settings, slug, keep)
     existing = {n.name for n in list_notes(settings)}
     if slug == keep or slug not in existing:
@@ -198,9 +194,7 @@ def unique_name(settings: Settings, slug: str, keep: str | None = None) -> str:
 
 def write_note(settings: Settings, note: Note) -> Path:
     """Write a note to the configured store."""
-    if settings.storage_backend == "postgres":
-        from .. import storage_postgres
-
+    if storage_postgres := postgres_backend(settings):
         return storage_postgres.write_note(settings, note)
     path = note_path(settings, note)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -210,9 +204,7 @@ def write_note(settings: Settings, note: Note) -> Path:
 
 def list_notes(settings: Settings) -> list[Note]:
     """All live notes, sorted by name (trashed notes excluded)."""
-    if settings.storage_backend == "postgres":
-        from .. import storage_postgres
-
+    if storage_postgres := postgres_backend(settings):
         return storage_postgres.list_notes(settings)
     root = memory_root(settings)
     notes: list[Note] = []
@@ -233,9 +225,7 @@ def find_note(settings: Settings, name: str) -> Note | None:
     paths directly — this runs several times per save, and a full ``rglob``
     scan grows linearly with the store.
     """
-    if settings.storage_backend == "postgres":
-        from .. import storage_postgres
-
+    if storage_postgres := postgres_backend(settings):
         return storage_postgres.find_note(settings, name)
     root = memory_root(settings)
     for kind_dir in _KINDS:
@@ -255,9 +245,7 @@ def purge_stale_files(settings: Settings, name: str, keep_kind: str) -> None:
     episode promoted to semantic), so a rename across directories never leaves a
     stale duplicate behind.
     """
-    if settings.storage_backend == "postgres":
-        from .. import storage_postgres
-
+    if storage_postgres := postgres_backend(settings):
         storage_postgres.purge_stale_files(settings, name, keep_kind)
         return
     root = memory_root(settings)
@@ -276,9 +264,7 @@ def delete_note(settings: Settings, name: str) -> Note | None:
     confirmation — stays recoverable by hand until :func:`prune_trash` ages it
     out during consolidation.
     """
-    if settings.storage_backend == "postgres":
-        from .. import storage_postgres
-
+    if storage_postgres := postgres_backend(settings):
         return storage_postgres.delete_note(settings, name)
     note = find_note(settings, name)
     if note is None:
@@ -300,9 +286,7 @@ def delete_note(settings: Settings, name: str) -> Note | None:
 
 def prune_trash(settings: Settings, max_age_days: int) -> int:
     """Permanently remove trashed notes older than ``max_age_days``."""
-    if settings.storage_backend == "postgres":
-        from .. import storage_postgres
-
+    if storage_postgres := postgres_backend(settings):
         return storage_postgres.prune_trash(settings, max_age_days)
     trash = memory_root(settings) / TRASH_DIRNAME
     if not trash.exists():
@@ -325,9 +309,7 @@ def prune_trash(settings: Settings, max_age_days: int) -> int:
 
 def regenerate_index(settings: Settings) -> Path:
     """Rewrite/export ``MEMORY.md`` from the configured note store."""
-    if settings.storage_backend == "postgres":
-        from .. import storage_postgres
-
+    if storage_postgres := postgres_backend(settings):
         return storage_postgres.regenerate_index(settings)
     notes = list_notes(settings)
     lines = ["# Memory index", ""]
@@ -353,9 +335,7 @@ def regenerate_index(settings: Settings) -> Path:
 
 def read_index(settings: Settings) -> str:
     """Current ``MEMORY.md`` contents, regenerating if absent."""
-    if settings.storage_backend == "postgres":
-        from .. import storage_postgres
-
+    if storage_postgres := postgres_backend(settings):
         return storage_postgres.read_index(settings)
     path = memory_root(settings) / INDEX_FILENAME
     if not path.exists():

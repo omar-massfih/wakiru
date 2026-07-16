@@ -20,7 +20,8 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime
 
-from ..config import Settings
+from ..config import Settings, postgres_backend
+from ..sqlite_util import open_db, transaction
 
 # The two remote operations a queued push maps to.
 OP_PUT = "put"
@@ -28,11 +29,7 @@ OP_DELETE = "delete"
 
 
 def _open(settings: Settings) -> sqlite3.Connection:
-    settings.memory_path.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(settings.calendar_db_path)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout = 5000")
-    conn.execute("PRAGMA journal_mode = WAL")
+    conn = open_db(settings.calendar_db_path)
     conn.execute(
         "CREATE TABLE IF NOT EXISTS caldav_outbox ("
         " event_id TEXT PRIMARY KEY, op TEXT NOT NULL,"
@@ -44,12 +41,8 @@ def _open(settings: Settings) -> sqlite3.Connection:
 
 @contextmanager
 def _connect(settings: Settings) -> Iterator[sqlite3.Connection]:
-    conn = _open(settings)
-    try:
-        with conn:
-            yield conn
-    finally:
-        conn.close()
+    with transaction(_open(settings)) as conn:
+        yield conn
 
 
 def _now(settings: Settings) -> str:
@@ -69,9 +62,7 @@ def enqueue(
 ) -> None:
     """Park a failed push for reconcile; the latest intent per event replaces any prior."""
     queued_at = _now(settings)
-    if settings.storage_backend == "postgres":
-        from .. import storage_postgres
-
+    if storage_postgres := postgres_backend(settings):
         storage_postgres.caldav_outbox_enqueue(
             settings, event_id, op, href, etag, ical, queued_at
         )
@@ -87,9 +78,7 @@ def enqueue(
 
 def pending(settings: Settings) -> list[dict]:
     """Every queued push, oldest first (as dicts: event_id, op, href, etag, ical)."""
-    if settings.storage_backend == "postgres":
-        from .. import storage_postgres
-
+    if storage_postgres := postgres_backend(settings):
         return storage_postgres.caldav_outbox_pending(settings)
     with _connect(settings) as conn:
         rows = conn.execute(
@@ -101,9 +90,7 @@ def pending(settings: Settings) -> list[dict]:
 
 def has_pending(settings: Settings, event_id: str) -> bool:
     """Whether a push is queued for this event (the pull must not clobber it)."""
-    if settings.storage_backend == "postgres":
-        from .. import storage_postgres
-
+    if storage_postgres := postgres_backend(settings):
         return any(r["event_id"] == event_id for r in storage_postgres.caldav_outbox_pending(settings))
     with _connect(settings) as conn:
         row = conn.execute(
@@ -114,9 +101,7 @@ def has_pending(settings: Settings, event_id: str) -> bool:
 
 def clear(settings: Settings, event_id: str) -> None:
     """Drop a queued push once it has been successfully replayed (or abandoned)."""
-    if settings.storage_backend == "postgres":
-        from .. import storage_postgres
-
+    if storage_postgres := postgres_backend(settings):
         storage_postgres.caldav_outbox_clear(settings, event_id)
         return
     with _connect(settings) as conn:

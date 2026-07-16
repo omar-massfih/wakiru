@@ -22,7 +22,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from ..calendar.context import now
-from ..config import Settings
+from ..config import Settings, postgres_backend
 
 logger = logging.getLogger(__name__)
 
@@ -52,9 +52,7 @@ def _decode(payload: str) -> tuple[str, datetime] | None:
 
 
 def _load(settings: Settings) -> tuple[str, datetime] | None:
-    if settings.storage_backend == "postgres":
-        from .. import storage_postgres
-
+    if storage_postgres := postgres_backend(settings):
         payload = storage_postgres.kv_get(settings, _KV_NAMESPACE, _KV_KEY)
         return _decode(payload) if payload else None
     try:
@@ -71,9 +69,7 @@ def _save(settings: Settings, text: str, fetched_at: datetime) -> None:
     payload = json.dumps(
         {"text": text, "fetched_at": fetched_at.isoformat(timespec="seconds")}
     )
-    if settings.storage_backend == "postgres":
-        from .. import storage_postgres
-
+    if storage_postgres := postgres_backend(settings):
         storage_postgres.kv_set(settings, _KV_NAMESPACE, _KV_KEY, payload)
         return
     settings.memory_path.mkdir(parents=True, exist_ok=True)

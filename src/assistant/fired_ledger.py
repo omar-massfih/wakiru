@@ -25,7 +25,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from .config import Settings
+from .config import Settings, postgres_backend
+from .sqlite_util import open_db, transaction
 
 logger = logging.getLogger(__name__)
 
@@ -49,11 +50,7 @@ class FiredLedgerSpec:
 
 def _open(spec: FiredLedgerSpec, settings: Settings) -> sqlite3.Connection:
     """Open the spec's DB and ensure its ledger table exists (WAL + busy timeout)."""
-    settings.memory_path.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(spec.db_path(settings))
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout = 5000")
-    conn.execute("PRAGMA journal_mode = WAL")
+    conn = open_db(spec.db_path(settings))
     cols = ", ".join(f"{name} {sql_type} NOT NULL" for name, sql_type in spec.columns)
     key = ", ".join(name for name, _ in spec.columns)
     conn.execute(
@@ -66,12 +63,8 @@ def _open(spec: FiredLedgerSpec, settings: Settings) -> sqlite3.Connection:
 @contextmanager
 def connect(spec: FiredLedgerSpec, settings: Settings) -> Iterator[sqlite3.Connection]:
     """One transaction on a fresh connection, closed on exit."""
-    conn = _open(spec, settings)
-    try:
-        with conn:
-            yield conn
-    finally:
-        conn.close()
+    with transaction(_open(spec, settings)) as conn:
+        yield conn
 
 
 def _parse_stamp(raw: str) -> datetime | None:
@@ -121,9 +114,7 @@ def claim(
     SQLite's single writer slot (the claim-first / deliver-after discipline —
     at-most-once delivery, never a duplicate).
     """
-    if settings.storage_backend == "postgres":
-        from . import storage_postgres
-
+    if storage_postgres := postgres_backend(settings):
         return storage_postgres.claim_fired(
             settings, spec.table, list(keys), fired_at, current
         )
@@ -185,9 +176,7 @@ def fire_due(
     # transaction, where it would hold SQLite's single writer slot past other
     # writers' busy timeouts. The cost is at-most-once delivery: a claimed
     # reminder whose push fails is not retried.
-    if settings.storage_backend == "postgres":
-        from . import storage_postgres
-
+    if storage_postgres := postgres_backend(settings):
         sent = getattr(storage_postgres, pg_claim)(settings, due, fired_at, current)
     else:
         # Claim every lead window each reminder is currently inside, so the

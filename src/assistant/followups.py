@@ -25,7 +25,8 @@ from datetime import datetime
 
 from .calendar.context import now
 from .calendar.store import parse_dt
-from .config import Settings
+from .config import Settings, postgres_backend
+from .sqlite_util import open_db, transaction
 
 logger = logging.getLogger(__name__)
 
@@ -43,11 +44,7 @@ class Followup:
 
 
 def _open(settings: Settings) -> sqlite3.Connection:
-    settings.memory_path.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(settings.followups_db_path)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout = 5000")
-    conn.execute("PRAGMA journal_mode = WAL")
+    conn = open_db(settings.followups_db_path)
     conn.execute(
         "CREATE TABLE IF NOT EXISTS followups ("
         " id TEXT PRIMARY KEY, due TEXT NOT NULL, topic TEXT NOT NULL,"
@@ -60,12 +57,8 @@ def _open(settings: Settings) -> sqlite3.Connection:
 
 @contextmanager
 def _connect(settings: Settings) -> Iterator[sqlite3.Connection]:
-    conn = _open(settings)
-    try:
-        with conn:
-            yield conn
-    finally:
-        conn.close()
+    with transaction(_open(settings)) as conn:
+        yield conn
 
 
 def _from_row(row: sqlite3.Row) -> Followup:
@@ -88,9 +81,7 @@ def add(
         thread_id=thread_id,
         created_at=now(settings).isoformat(timespec="seconds"),
     )
-    if settings.storage_backend == "postgres":
-        from . import storage_postgres
-
+    if storage_postgres := postgres_backend(settings):
         storage_postgres.add_followup(settings, followup)
         return followup
     with _connect(settings) as conn:
@@ -112,9 +103,7 @@ def add(
 
 def list_open(settings: Settings) -> list[Followup]:
     """Every open followup, soonest due first."""
-    if settings.storage_backend == "postgres":
-        from . import storage_postgres
-
+    if storage_postgres := postgres_backend(settings):
         return storage_postgres.list_open_followups(settings)
     with _connect(settings) as conn:
         rows = conn.execute(
@@ -156,9 +145,7 @@ def cancel(settings: Settings, ident: str) -> Followup | None:
     target = _match_open(settings, ident, "cancel")
     if target is None:
         return None
-    if settings.storage_backend == "postgres":
-        from . import storage_postgres
-
+    if storage_postgres := postgres_backend(settings):
         return target if storage_postgres.cancel_followup(settings, target.id) else None
     with _connect(settings) as conn:
         cursor = conn.execute(
@@ -194,9 +181,7 @@ def update(
         thread_id=target.thread_id,
         created_at=target.created_at,
     )
-    if settings.storage_backend == "postgres":
-        from . import storage_postgres
-
+    if storage_postgres := postgres_backend(settings):
         updated = storage_postgres.update_followup(
             settings, revised.id, revised.due, revised.topic, revised.context
         )
@@ -220,9 +205,7 @@ def claim_due(settings: Settings, current: datetime | None = None) -> list[Follo
     """
     current = current or now(settings)
     fired_at = current.isoformat(timespec="seconds")
-    if settings.storage_backend == "postgres":
-        from . import storage_postgres
-
+    if storage_postgres := postgres_backend(settings):
         return storage_postgres.claim_due_followups(settings, fired_at, current)
     due_now = [
         f

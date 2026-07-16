@@ -26,7 +26,8 @@ from datetime import datetime
 
 from .calendar.context import now
 from .calendar.store import parse_dt
-from .config import Settings
+from .config import Settings, postgres_backend
+from .sqlite_util import open_db, transaction
 
 logger = logging.getLogger(__name__)
 
@@ -48,11 +49,7 @@ def channel_of(thread_id: str) -> str:
 
 
 def _open(settings: Settings) -> sqlite3.Connection:
-    settings.memory_path.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(settings.threads_db_path)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout = 5000")
-    conn.execute("PRAGMA journal_mode = WAL")
+    conn = open_db(settings.threads_db_path)
     conn.execute(
         "CREATE TABLE IF NOT EXISTS known_threads ("
         " thread_id TEXT PRIMARY KEY, channel TEXT NOT NULL,"
@@ -64,12 +61,8 @@ def _open(settings: Settings) -> sqlite3.Connection:
 
 @contextmanager
 def _connect(settings: Settings) -> Iterator[sqlite3.Connection]:
-    conn = _open(settings)
-    try:
-        with conn:
-            yield conn
-    finally:
-        conn.close()
+    with transaction(_open(settings)) as conn:
+        yield conn
 
 
 def touch(
@@ -79,9 +72,7 @@ def touch(
     if not thread_id:
         return
     stamp = now(settings).isoformat(timespec="seconds")
-    if settings.storage_backend == "postgres":
-        from . import storage_postgres
-
+    if storage_postgres := postgres_backend(settings):
         storage_postgres.touch_thread(
             settings, thread_id, channel_of(thread_id), stamp, user, assistant
         )
@@ -107,9 +98,7 @@ def touch(
 
 def known_threads(settings: Settings, channel: str | None = None) -> list[ThreadInfo]:
     """Every registered thread, optionally filtered to one channel."""
-    if settings.storage_backend == "postgres":
-        from . import storage_postgres
-
+    if storage_postgres := postgres_backend(settings):
         return storage_postgres.known_threads(settings, channel)
     query = "SELECT * FROM known_threads"
     params: tuple = ()

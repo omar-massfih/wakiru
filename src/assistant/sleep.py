@@ -33,7 +33,7 @@ from datetime import time as dtime
 from . import fired_ledger, threads
 from .agent import maybe_summarize
 from .calendar.context import now
-from .config import Settings, get_settings
+from .config import Settings, get_settings, postgres_backend
 from .memory import consolidate_memory, store
 
 logger = logging.getLogger(__name__)
@@ -62,9 +62,7 @@ _KV_NAMESPACE = "sleep"
 # briefing/sleep ledgers live in), created lazily like heartbeat's state table.
 # Under Postgres it lands in the shared assistant_kv table instead.
 def _state_get(settings: Settings, key: str) -> str:
-    if settings.storage_backend == "postgres":
-        from . import storage_postgres
-
+    if storage_postgres := postgres_backend(settings):
         return storage_postgres.kv_get(settings, _KV_NAMESPACE, key)
     with fired_ledger.connect(_LEDGER, settings) as conn:
         _ensure_state(conn)
@@ -75,9 +73,7 @@ def _state_get(settings: Settings, key: str) -> str:
 
 
 def _state_set(settings: Settings, key: str, value: str) -> None:
-    if settings.storage_backend == "postgres":
-        from . import storage_postgres
-
+    if storage_postgres := postgres_backend(settings):
         storage_postgres.kv_set(settings, _KV_NAMESPACE, key, value)
         return
     with fired_ledger.connect(_LEDGER, settings) as conn:

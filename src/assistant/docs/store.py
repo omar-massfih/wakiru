@@ -18,8 +18,9 @@ from datetime import UTC, datetime
 
 import sqlite_vec
 
-from ..config import Settings
+from ..config import Settings, postgres_backend
 from ..memory.embeddings import embed_passages, embed_query
+from ..sqlite_util import open_db
 
 _VEC_TABLE = "chunk_vec"
 
@@ -46,11 +47,7 @@ def _serialize(vector: list[float]) -> bytes:
 
 
 def _connect(settings: Settings) -> sqlite3.Connection:
-    settings.memory_path.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(settings.docs_db_path)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout = 5000")
-    conn.execute("PRAGMA journal_mode = WAL")
+    conn = open_db(settings.docs_db_path)
     conn.enable_load_extension(True)
     sqlite_vec.load(conn)
     conn.enable_load_extension(False)
@@ -135,9 +132,7 @@ def chunk_text(text: str, target_chars: int) -> list[str]:
 
 def add_document(settings: Settings, title: str, text: str) -> Document:
     """Ingest a document: store it, chunk it, embed each chunk, index the vectors."""
-    if settings.storage_backend == "postgres":
-        from .. import storage_postgres
-
+    if storage_postgres := postgres_backend(settings):
         pieces = chunk_text(text, settings.docs_chunk_chars)
         vectors = embed_passages(pieces, settings) if pieces else []
         _check_vectors(pieces, vectors)
@@ -177,9 +172,7 @@ def add_document(settings: Settings, title: str, text: str) -> Document:
 
 
 def list_documents(settings: Settings) -> list[Document]:
-    if settings.storage_backend == "postgres":
-        from .. import storage_postgres
-
+    if storage_postgres := postgres_backend(settings):
         return storage_postgres.list_documents(settings)
     conn = _connect(settings)
     try:
@@ -197,9 +190,7 @@ def list_documents(settings: Settings) -> list[Document]:
 
 
 def get_document(settings: Settings, doc_id: str) -> Document | None:
-    if settings.storage_backend == "postgres":
-        from .. import storage_postgres
-
+    if storage_postgres := postgres_backend(settings):
         return storage_postgres.get_document(settings, doc_id)
     conn = _connect(settings)
     try:
@@ -215,9 +206,7 @@ def get_document(settings: Settings, doc_id: str) -> Document | None:
 
 def delete_document(settings: Settings, doc_id: str) -> bool:
     """Delete a document and its chunks (and their vectors). Returns whether it existed."""
-    if settings.storage_backend == "postgres":
-        from .. import storage_postgres
-
+    if storage_postgres := postgres_backend(settings):
         return storage_postgres.delete_document(settings, doc_id)
     conn = _connect(settings)
     try:
@@ -260,9 +249,7 @@ def reindex(settings: Settings) -> int:
 
     Returns the number of documents indexed.
     """
-    if settings.storage_backend == "postgres":
-        from .. import storage_postgres
-
+    if storage_postgres := postgres_backend(settings):
         return storage_postgres.reindex_docs(settings)
     conn = _connect(settings)
     try:
@@ -320,9 +307,7 @@ def search_chunks(settings: Settings, query: str, top_k: int | None = None) -> l
     if not query:
         return []
     top_k = top_k or settings.docs_recall_top_k
-    if settings.storage_backend == "postgres":
-        from .. import storage_postgres
-
+    if storage_postgres := postgres_backend(settings):
         return storage_postgres.search_chunks(settings, embed_query(query, settings), top_k)
     conn = _connect(settings)
     try:

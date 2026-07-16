@@ -522,3 +522,20 @@ class Settings(BaseSettings):
 def get_settings() -> Settings:
     """Return a cached Settings instance."""
     return Settings()
+
+
+def postgres_backend(settings: Settings):
+    """Return the ``storage_postgres`` module when ``STORAGE_BACKEND=postgres``, else ``None``.
+
+    The local sqlite stores dispatch to their Postgres twins through this: a
+    ``if pg := postgres_backend(settings):`` guard replaces the copy-pasted
+    ``storage_backend == "postgres"`` check plus lazy import. The import stays
+    lazy so the sqlite path never pulls in psycopg, and the *module* is returned
+    (not pre-bound functions) so tests that monkeypatch ``storage_postgres``
+    attributes are still resolved at call time.
+    """
+    if settings.storage_backend != "postgres":
+        return None
+    from . import storage_postgres
+
+    return storage_postgres

@@ -29,7 +29,8 @@ from datetime import date
 
 import sqlite_vec
 
-from ..config import Settings
+from ..config import Settings, postgres_backend
+from ..sqlite_util import open_db
 from .locks import locked
 
 VEC_TABLE = "vec_notes"
@@ -45,10 +46,7 @@ def content_hash(text: str) -> str:
 
 
 def _connect(settings: Settings) -> sqlite3.Connection:
-    settings.memory_path.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(settings.memory_db_path)
-    conn.execute("PRAGMA busy_timeout = 5000")
-    conn.execute("PRAGMA journal_mode = WAL")
+    conn = open_db(settings.memory_db_path, row_factory=False)
     conn.enable_load_extension(True)
     sqlite_vec.load(conn)
     conn.enable_load_extension(False)
@@ -112,9 +110,7 @@ def upsert(
     text_hash: str = "",
 ) -> None:
     """Insert or replace the index entry for ``name`` (preserving its rowid data)."""
-    if settings.storage_backend == "postgres":
-        from .. import storage_postgres
-
+    if storage_postgres := postgres_backend(settings):
         storage_postgres.upsert_memory_index(
             settings, name, path, description, vector, kind=kind, salience=salience,
             updated=updated, last_recalled=last_recalled, recall_count=recall_count,
@@ -145,9 +141,7 @@ def upsert(
 
 def remove(settings: Settings, name: str) -> bool:
     """Drop ``name`` from the index. Returns whether it existed."""
-    if settings.storage_backend == "postgres":
-        from .. import storage_postgres
-
+    if storage_postgres := postgres_backend(settings):
         return storage_postgres.remove_memory_index(settings, name)
     conn = _connect(settings)
     try:
@@ -169,9 +163,7 @@ def search_ranked(
     """Top-k as ``(name, path, description, kind, salience, recall_count,
     last_recalled, similarity)`` — everything recall needs to re-rank cheaply.
     """
-    if settings.storage_backend == "postgres":
-        from .. import storage_postgres
-
+    if storage_postgres := postgres_backend(settings):
         return storage_postgres.search_memory_index(settings, query_vector, k)
     conn = _connect(settings)
     try:
@@ -200,9 +192,7 @@ def list_entries(
     consolidation eviction pass without opening any files. ``salience`` is the
     *effective* value (consolidation may have decayed it below the file's copy).
     """
-    if settings.storage_backend == "postgres":
-        from .. import storage_postgres
-
+    if storage_postgres := postgres_backend(settings):
         return storage_postgres.list_memory_entries(settings)
     conn = _connect(settings)
     try:
@@ -221,9 +211,7 @@ def bump_turn_counter(settings: Settings) -> int:
     survives server restarts (an in-process counter would reset and could starve
     consolidation under frequent restarts).
     """
-    if settings.storage_backend == "postgres":
-        from .. import storage_postgres
-
+    if storage_postgres := postgres_backend(settings):
         return storage_postgres.bump_turn_counter(settings)
     conn = _connect(settings)
     try:
@@ -241,9 +229,7 @@ def bump_turn_counter(settings: Settings) -> int:
 
 
 def bump_recall(settings: Settings, names: list[str]) -> None:
-    if settings.storage_backend == "postgres":
-        from .. import storage_postgres
-
+    if storage_postgres := postgres_backend(settings):
         storage_postgres.bump_recall(settings, names)
         return
     """Reinforce: increment ``recall_count`` and stamp ``last_recalled`` = today.
@@ -268,9 +254,7 @@ def bump_recall(settings: Settings, names: list[str]) -> None:
 
 def set_salience(settings: Settings, name: str, salience: float) -> None:
     """Update the cached salience used for re-ranking (index-only)."""
-    if settings.storage_backend == "postgres":
-        from .. import storage_postgres
-
+    if storage_postgres := postgres_backend(settings):
         storage_postgres.set_salience(settings, name, salience)
         return
     conn = _connect(settings)
@@ -285,9 +269,7 @@ def set_salience(settings: Settings, name: str, salience: float) -> None:
 
 def get_stats(settings: Settings, name: str) -> tuple[int, str] | None:
     """Return ``(recall_count, last_recalled)`` for ``name``, or ``None``."""
-    if settings.storage_backend == "postgres":
-        from .. import storage_postgres
-
+    if storage_postgres := postgres_backend(settings):
         return storage_postgres.get_stats(settings, name)
     conn = _connect(settings)
     try:
@@ -316,9 +298,7 @@ def reindex(settings: Settings) -> int:
 
     Returns the number of notes indexed.
     """
-    if settings.storage_backend == "postgres":
-        from .. import storage_postgres
-
+    if storage_postgres := postgres_backend(settings):
         return storage_postgres.reindex_memory(settings)
     from . import store
     from .embeddings import embed_passages

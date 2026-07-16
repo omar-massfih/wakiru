@@ -47,7 +47,7 @@ from langchain_core.messages import (
 from . import followups, persona, threads
 from .calendar.context import now
 from .calendar.store import parse_dt
-from .config import Settings, get_settings
+from .config import Settings, get_settings, postgres_backend
 from .context_providers import build_context
 from .followups import Followup
 from .llm import build_model
@@ -123,9 +123,7 @@ _KV_NAMESPACE = "heartbeat"
 
 
 def state_get(settings: Settings, key: str) -> str:
-    if settings.storage_backend == "postgres":
-        from . import storage_postgres
-
+    if storage_postgres := postgres_backend(settings):
         return storage_postgres.kv_get(settings, _KV_NAMESPACE, key)
     with followups._connect(settings) as conn:
         _ensure_state(conn)
@@ -136,9 +134,7 @@ def state_get(settings: Settings, key: str) -> str:
 
 
 def state_set(settings: Settings, key: str, value: str) -> None:
-    if settings.storage_backend == "postgres":
-        from . import storage_postgres
-
+    if storage_postgres := postgres_backend(settings):
         storage_postgres.kv_set(settings, _KV_NAMESPACE, key, value)
         return
     with followups._connect(settings) as conn:
@@ -150,9 +146,7 @@ def state_set(settings: Settings, key: str, value: str) -> None:
 
 
 def state_clear(settings: Settings, *keys: str) -> None:
-    if settings.storage_backend == "postgres":
-        from . import storage_postgres
-
+    if storage_postgres := postgres_backend(settings):
         storage_postgres.kv_clear(settings, _KV_NAMESPACE, list(keys))
         return
     with followups._connect(settings) as conn:

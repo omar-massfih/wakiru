@@ -56,9 +56,7 @@ def target_threads(settings: Settings) -> list[str]:
     return targets
 
 
-def record_to_thread(
-    agent: CompiledStateGraph, settings: Settings, thread_id: str, text: str
-) -> None:
+def record_to_thread(agent: CompiledStateGraph, thread_id: str, text: str) -> None:
     """Append a delivered push to one thread's working memory, best-effort."""
     try:
         agent.update_state(
@@ -77,6 +75,6 @@ def record_push(
     if agent is None or not settings.enable_proactive_loop_in or not text:
         return
     for thread_id in target_threads(settings):
-        record_to_thread(agent, settings, thread_id, text)
+        record_to_thread(agent, thread_id, text)
 
 

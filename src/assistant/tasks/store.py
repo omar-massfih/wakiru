@@ -21,7 +21,8 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from ..calendar.store import parse_dt  # shared tz-aware ISO parsing
-from ..config import Settings
+from ..config import Settings, postgres_backend
+from ..sqlite_util import open_db, transaction
 
 # Columns a caller may set on create/update (id + timestamps + done_at managed here).
 _FIELDS = ("title", "due", "notes")
@@ -47,11 +48,7 @@ class Task:
 
 
 def _open(settings: Settings) -> sqlite3.Connection:
-    settings.memory_path.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(settings.tasks_db_path)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout = 5000")
-    conn.execute("PRAGMA journal_mode = WAL")
+    conn = open_db(settings.tasks_db_path)
     conn.execute(
         "CREATE TABLE IF NOT EXISTS tasks ("
         " id TEXT PRIMARY KEY, title TEXT NOT NULL, done INTEGER DEFAULT 0,"
@@ -64,12 +61,8 @@ def _open(settings: Settings) -> sqlite3.Connection:
 @contextmanager
 def _connect(settings: Settings) -> Iterator[sqlite3.Connection]:
     """One transaction on a fresh connection, closed on exit (see calendar.store)."""
-    conn = _open(settings)
-    try:
-        with conn:
-            yield conn
-    finally:
-        conn.close()
+    with transaction(_open(settings)) as conn:
+        yield conn
 
 
 def _row_to_task(row: sqlite3.Row) -> Task:
@@ -123,9 +116,7 @@ def create_task(
     settings: Settings, title: str, due: str = "", notes: str = ""
 ) -> Task:
     """Insert a new open task and return it (with a generated id and timestamps)."""
-    if settings.storage_backend == "postgres":
-        from .. import storage_postgres
-
+    if storage_postgres := postgres_backend(settings):
         return storage_postgres.create_task(settings, title, due, notes)
     now = _stamp_now(settings)
     task = Task(
@@ -147,9 +138,7 @@ def create_task(
 
 
 def get_task(settings: Settings, task_id: str) -> Task | None:
-    if settings.storage_backend == "postgres":
-        from .. import storage_postgres
-
+    if storage_postgres := postgres_backend(settings):
         return storage_postgres.get_task(settings, task_id)
     with _connect(settings) as conn:
         row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
@@ -159,9 +148,7 @@ def get_task(settings: Settings, task_id: str) -> Task | None:
 def list_tasks(settings: Settings, include_done: bool = False) -> list[Task]:
     """Open tasks (soonest due first, undated last). ``include_done`` adds
     completed ones after the open ones."""
-    if settings.storage_backend == "postgres":
-        from .. import storage_postgres
-
+    if storage_postgres := postgres_backend(settings):
         tasks = storage_postgres.list_tasks(settings)
     else:
         with _connect(settings) as conn:
@@ -178,9 +165,7 @@ def list_tasks(settings: Settings, include_done: bool = False) -> list[Task]:
 
 def update_task(settings: Settings, task_id: str, **fields: str) -> Task | None:
     """Update the given columns on a task; return it, or ``None`` if absent."""
-    if settings.storage_backend == "postgres":
-        from .. import storage_postgres
-
+    if storage_postgres := postgres_backend(settings):
         updates = {k: str(v).strip() for k, v in fields.items() if k in _FIELDS and v is not None}
         return storage_postgres.update_task(settings, task_id, updates)
     updates = {
@@ -207,9 +192,7 @@ def update_task(settings: Settings, task_id: str, **fields: str) -> Task | None:
 
 def complete_task(settings: Settings, task_id: str) -> Task | None:
     """Mark a task done (idempotent); return it, or ``None`` if absent."""
-    if settings.storage_backend == "postgres":
-        from .. import storage_postgres
-
+    if storage_postgres := postgres_backend(settings):
         return storage_postgres.complete_task(settings, task_id)
     existing = get_task(settings, task_id)
     if existing is None:
@@ -228,9 +211,7 @@ def complete_task(settings: Settings, task_id: str) -> Task | None:
 def restore_task(settings: Settings, task: Task) -> Task:
     """Re-insert a full task snapshot verbatim, overwriting any current row with
     the same id. Used by the undo path (see :mod:`.undo`); never bumps ``updated``."""
-    if settings.storage_backend == "postgres":
-        from .. import storage_postgres
-
+    if storage_postgres := postgres_backend(settings):
         return storage_postgres.restore_task(settings, task)
     with _connect(settings) as conn:
         conn.execute(
@@ -247,9 +228,7 @@ def restore_task(settings: Settings, task: Task) -> Task:
 
 def delete_task(settings: Settings, task_id: str) -> Task | None:
     """Delete a task by id; return it if it existed."""
-    if settings.storage_backend == "postgres":
-        from .. import storage_postgres
-
+    if storage_postgres := postgres_backend(settings):
         return storage_postgres.delete_task(settings, task_id)
     existing = get_task(settings, task_id)
     if existing is None:

@@ -22,7 +22,8 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from .config import Settings
+from .config import Settings, postgres_backend
+from .sqlite_util import open_db, transaction
 
 logger = logging.getLogger(__name__)
 
@@ -66,18 +67,8 @@ def _parse_dt(value: str) -> datetime | None:
     return parse_dt(value)
 
 
-def _postgres(settings: Settings):
-    from . import storage_postgres
-
-    return storage_postgres
-
-
 def _open(spec: LedgerSpec, settings: Settings) -> sqlite3.Connection:
-    settings.memory_path.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(spec.db_path(settings))
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout = 5000")
-    conn.execute("PRAGMA journal_mode = WAL")
+    conn = open_db(spec.db_path(settings))
     conn.execute(
         "CREATE TABLE IF NOT EXISTS write_log ("
         " id INTEGER PRIMARY KEY AUTOINCREMENT, thread_id TEXT NOT NULL,"
@@ -91,12 +82,8 @@ def _open(spec: LedgerSpec, settings: Settings) -> sqlite3.Connection:
 @contextmanager
 def connect(spec: LedgerSpec, settings: Settings) -> Iterator[sqlite3.Connection]:
     """One transaction on a fresh connection, closed on exit (see store._connect)."""
-    conn = _open(spec, settings)
-    try:
-        with conn:
-            yield conn
-    finally:
-        conn.close()
+    with transaction(_open(spec, settings)) as conn:
+        yield conn
 
 
 def record_write(
@@ -114,8 +101,8 @@ def record_write(
         return
     try:
         applied_at = _now(settings).isoformat(timespec="seconds")
-        if settings.storage_backend == "postgres":
-            record = getattr(_postgres(settings), spec.pg_record)
+        if storage_postgres := postgres_backend(settings):
+            record = getattr(storage_postgres, spec.pg_record)
             record(
                 settings, thread_id, batch_id, target_id, op, summary,
                 before_json, applied_at,
@@ -143,8 +130,8 @@ def latest_applied_at(
     ``None`` if nothing is recent enough). Lets the cross-ledger arbiter in
     :mod:`assistant.undo` decide which subsystem owns the most recent write."""
     cutoff = _now(settings) - timedelta(minutes=window_minutes)
-    if settings.storage_backend == "postgres":
-        rows = getattr(_postgres(settings), spec.pg_rows)(settings, thread_id)
+    if storage_postgres := postgres_backend(settings):
+        rows = getattr(storage_postgres, spec.pg_rows)(settings, thread_id)
         if not rows:
             return None
         applied_at = _parse_dt(str(rows[0]["applied_at"]))
@@ -179,8 +166,8 @@ def undo_latest(
     """
     cutoff = _now(settings) - timedelta(minutes=window_minutes)
 
-    if settings.storage_backend == "postgres":
-        all_rows = getattr(_postgres(settings), spec.pg_rows)(settings, thread_id)
+    if storage_postgres := postgres_backend(settings):
+        all_rows = getattr(storage_postgres, spec.pg_rows)(settings, thread_id)
         if not all_rows:
             return "Nothing to undo."
         latest = all_rows[0]
@@ -223,8 +210,8 @@ def undo_latest(
         return "Nothing to undo."
 
     undone_at = _now(settings).isoformat(timespec="seconds")
-    if settings.storage_backend == "postgres":
-        getattr(_postgres(settings), spec.pg_mark_undone)(
+    if storage_postgres := postgres_backend(settings):
+        getattr(storage_postgres, spec.pg_mark_undone)(
             settings, reverted_ids, undone_at
         )
     else:

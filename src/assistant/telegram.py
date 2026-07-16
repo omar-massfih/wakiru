@@ -40,7 +40,7 @@ from markdown_it import MarkdownIt
 from markdown_it.token import Token
 
 from .chat import error_reply, run_chat, run_upkeep
-from .config import Settings
+from .config import Settings, postgres_backend
 
 logger = logging.getLogger(__name__)
 
@@ -80,9 +80,7 @@ def _paired_path(settings: Settings):
 
 def _paired_chats(settings: Settings) -> list[int]:
     """Chats paired at runtime (trust-on-first-use), persisted across restarts."""
-    if settings.storage_backend == "postgres":
-        from . import storage_postgres
-
+    if storage_postgres := postgres_backend(settings):
         return storage_postgres.paired_telegram_chats(settings)
     try:
         return [int(c) for c in json.loads(_paired_path(settings).read_text())]
@@ -100,9 +98,7 @@ def _pair(settings: Settings, chat_id: int) -> None:
     this file from another thread, and a partial read is swallowed as "no
     paired chats", which would silently drop a reminder fan-out.
     """
-    if settings.storage_backend == "postgres":
-        from . import storage_postgres
-
+    if storage_postgres := postgres_backend(settings):
         storage_postgres.pair_telegram_chat(settings, chat_id)
         return
     settings.memory_path.mkdir(parents=True, exist_ok=True)

@@ -21,7 +21,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 
-from ..config import Settings
+from ..config import Settings, postgres_backend
+from ..sqlite_util import open_db, transaction
 
 # Columns a caller may set on create/update (id + timestamps are managed here).
 _FIELDS = ("title", "start", "end", "location", "notes", "rrule", "exdates", "overrides")
@@ -67,11 +68,7 @@ class Event:
 
 
 def _open(settings: Settings) -> sqlite3.Connection:
-    settings.memory_path.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(settings.calendar_db_path)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout = 5000")
-    conn.execute("PRAGMA journal_mode = WAL")
+    conn = open_db(settings.calendar_db_path)
     conn.execute(
         "CREATE TABLE IF NOT EXISTS events ("
         " id TEXT PRIMARY KEY, title TEXT NOT NULL, start TEXT NOT NULL,"
@@ -86,18 +83,9 @@ def _open(settings: Settings) -> sqlite3.Connection:
 
 @contextmanager
 def _connect(settings: Settings) -> Iterator[sqlite3.Connection]:
-    """One transaction on a fresh connection, closed on exit.
-
-    ``with sqlite3.connect(...)`` alone commits but never closes — cleanup
-    would ride on CPython refcounting. This keeps every call site's
-    ``with _connect(settings) as conn`` shape while closing deterministically.
-    """
-    conn = _open(settings)
-    try:
-        with conn:
-            yield conn
-    finally:
-        conn.close()
+    """One transaction on a fresh connection, closed on exit."""
+    with transaction(_open(settings)) as conn:
+        yield conn
 
 
 def _ensure_columns(conn: sqlite3.Connection) -> None:
@@ -196,9 +184,7 @@ def create_event(
     rrule: str = "",
 ) -> Event:
     """Insert a new event and return it (with a generated id and timestamps)."""
-    if settings.storage_backend == "postgres":
-        from .. import storage_postgres
-
+    if storage_postgres := postgres_backend(settings):
         return storage_postgres.create_event(settings, title, start, end, location, notes, rrule)
     now = _stamp_now(settings)
     event = Event(
@@ -226,9 +212,7 @@ def create_event(
 
 
 def get_event(settings: Settings, event_id: str) -> Event | None:
-    if settings.storage_backend == "postgres":
-        from .. import storage_postgres
-
+    if storage_postgres := postgres_backend(settings):
         return storage_postgres.get_event(settings, event_id)
     with _connect(settings) as conn:
         row = conn.execute(
@@ -247,9 +231,7 @@ def list_events(
     Bounds are optional and inclusive. Events with an unparseable start are
     excluded when either bound is given, and otherwise sorted to the end.
     """
-    if settings.storage_backend == "postgres":
-        from .. import storage_postgres
-
+    if storage_postgres := postgres_backend(settings):
         events = storage_postgres.list_events(settings)
     else:
         with _connect(settings) as conn:
@@ -277,9 +259,7 @@ def update_event(settings: Settings, event_id: str, **fields: str | None) -> Eve
 
     Only known, non-``None`` fields in :data:`_FIELDS` are applied.
     """
-    if settings.storage_backend == "postgres":
-        from .. import storage_postgres
-
+    if storage_postgres := postgres_backend(settings):
         updates = {k: str(v).strip() for k, v in fields.items() if k in _FIELDS and v is not None}
         return storage_postgres.update_event(settings, event_id, updates)
     updates = {
@@ -315,9 +295,7 @@ def restore_event(settings: Settings, event: Event) -> Event:
     (recreate the deleted row) or to put back a full pre-mutation snapshot
     after a reschedule/skip/move.
     """
-    if settings.storage_backend == "postgres":
-        from .. import storage_postgres
-
+    if storage_postgres := postgres_backend(settings):
         return storage_postgres.restore_event(settings, event)
     with _connect(settings) as conn:
         conn.execute(
@@ -336,9 +314,7 @@ def restore_event(settings: Settings, event: Event) -> Event:
 
 def delete_event(settings: Settings, event_id: str) -> Event | None:
     """Delete an event by id; return it if it existed."""
-    if settings.storage_backend == "postgres":
-        from .. import storage_postgres
-
+    if storage_postgres := postgres_backend(settings):
         return storage_postgres.delete_event(settings, event_id)
     existing = get_event(settings, event_id)
     if existing is None:
@@ -354,9 +330,7 @@ def set_caldav_meta(settings: Settings, event_id: str, href: str, etag: str) -> 
     A no-op if the event is absent. ``updated`` is left untouched — this is
     bookkeeping about where the row lives remotely, not a content change.
     """
-    if settings.storage_backend == "postgres":
-        from .. import storage_postgres
-
+    if storage_postgres := postgres_backend(settings):
         storage_postgres.set_caldav_meta(settings, event_id, href, etag)
         return
     with _connect(settings) as conn:
@@ -370,9 +344,7 @@ def find_by_href(settings: Settings, href: str) -> Event | None:
     """The event mapped to a CalDAV resource path, or ``None`` (empty href never matches)."""
     if not href:
         return None
-    if settings.storage_backend == "postgres":
-        from .. import storage_postgres
-
+    if storage_postgres := postgres_backend(settings):
         return storage_postgres.find_by_href(settings, href)
     with _connect(settings) as conn:
         row = conn.execute(

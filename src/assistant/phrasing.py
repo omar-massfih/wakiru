@@ -128,7 +128,7 @@ def task_reminder_message(
 ) -> str:
     """A natural one-line nudge for a task due in ``remaining`` (or overdue)."""
     if remaining < timedelta(0):
-        return _overdue_task_message(settings, task_id, title, due_iso, -remaining, slot)
+        return _overdue_task_message(task_id, title, due_iso, -remaining, slot)
     local = _local_dt(settings, due_iso)
     if local is None:
         return f"Task due: {title} {_humanize(remaining)}"
@@ -156,7 +156,6 @@ def task_reminder_message(
 
 
 def _overdue_task_message(
-    settings: Settings,
     task_id: str,
     title: str,
     due_iso: str,
