@@ -8,6 +8,7 @@ import json
 import logging
 import secrets
 import uuid
+from collections.abc import Callable
 from contextlib import asynccontextmanager
 from datetime import datetime
 from functools import lru_cache
@@ -51,28 +52,42 @@ from .tasks.reminders import run_task_reminders
 logger = logging.getLogger(__name__)
 
 
-async def _reminder_tick_loop() -> None:
-    """Fire due reminders on a wall-clock cadence, independent of chat traffic.
+async def _ticker(label: str, worker: Callable[[], object], interval: Callable[[], float]) -> None:
+    """Run ``worker`` forever on a wall-clock cadence, independent of chat traffic.
 
-    ``run_reminders`` is synchronous (SQLite + a urllib POST), so it runs in a
-    worker thread to keep the event loop free. Best-effort: any error is logged and
-    the loop keeps ticking. The dedupe ledger makes each pass idempotent.
+    The workers are synchronous (SQLite + urllib), so each tick runs in a worker
+    thread to keep the event loop free. Best-effort: any error is logged and the
+    loop keeps ticking; the workers' own dedupe ledgers / idempotent upserts make
+    every pass safe to repeat. ``interval`` is a callable so a tick always sleeps
+    on the current settings.
     """
     while True:
         try:
-            # The agent rides along so each delivered push is also recorded
-            # into the authorized chats' working memory (proactive loop-in).
-            await asyncio.to_thread(run_reminders, get_settings(), _agent())
-            await asyncio.to_thread(run_task_reminders, get_settings(), _agent())
-            # The daily briefing rides the same tick; its own ledger makes it
-            # exactly-once per day and a cheap no-op every other pass.
-            await asyncio.to_thread(run_briefing, get_settings(), agent=_agent())
-            # The unread-mail snapshot rides along too, on its own (slower)
-            # cadence — a no-op tick when email is off or the snapshot is fresh.
-            await asyncio.to_thread(mail_snapshot.maybe_refresh, get_settings())
+            await asyncio.to_thread(worker)
         except Exception:
-            logger.exception("reminder tick failed")
-        await asyncio.sleep(get_settings().reminder_tick_seconds)
+            logger.exception("%s tick failed", label)
+        await asyncio.sleep(interval())
+
+
+def _reminder_tick_once() -> None:
+    """One reminder pass plus the cheap jobs that ride the same tick."""
+    # The agent rides along so each delivered push is also recorded
+    # into the authorized chats' working memory (proactive loop-in).
+    run_reminders(get_settings(), _agent())
+    run_task_reminders(get_settings(), _agent())
+    # The daily briefing rides the same tick; its own ledger makes it
+    # exactly-once per day and a cheap no-op every other pass.
+    run_briefing(get_settings(), agent=_agent())
+    # The unread-mail snapshot rides along too, on its own (slower)
+    # cadence — a no-op tick when email is off or the snapshot is fresh.
+    mail_snapshot.maybe_refresh(get_settings())
+
+
+async def _reminder_tick_loop() -> None:
+    """Fire due reminders (and ride-along jobs) on the reminder cadence."""
+    await _ticker(
+        "reminder", _reminder_tick_once, lambda: get_settings().reminder_tick_seconds
+    )
 
 
 async def _heartbeat_loop() -> None:
@@ -111,26 +126,20 @@ async def _sleep_loop() -> None:
     every tick outside the due window a cheap no-op, so a 5-minute cadence just
     bounds how late after ``sleep_time`` the pass lands.
     """
-    while True:
-        try:
-            await asyncio.to_thread(run_sleep, get_settings(), _agent())
-        except Exception:
-            logger.exception("sleep tick failed")
-        await asyncio.sleep(300)
+    await _ticker("sleep", lambda: run_sleep(get_settings(), _agent()), lambda: 300)
 
 
 async def _calendar_sync_loop() -> None:
     """Mirror the configured ICS feeds on their own (slower) cadence.
 
-    Same best-effort discipline as the reminder ticker; the upsert is idempotent
-    so an overlapping manual POST /calendar/sync is harmless.
+    The upsert is idempotent so an overlapping manual POST /calendar/sync is
+    harmless.
     """
-    while True:
-        try:
-            await asyncio.to_thread(calendar_sync.pull_feeds, get_settings())
-        except Exception:
-            logger.exception("calendar sync tick failed")
-        await asyncio.sleep(get_settings().calendar_sync_minutes * 60)
+    await _ticker(
+        "calendar sync",
+        lambda: calendar_sync.pull_feeds(get_settings()),
+        lambda: get_settings().calendar_sync_minutes * 60,
+    )
 
 
 def _caldav_sync_once(settings) -> dict:
@@ -146,12 +155,11 @@ def _caldav_sync_once(settings) -> dict:
 
 async def _caldav_sync_loop() -> None:
     """Mirror the writable CalDAV collection and drain the push outbox on a cadence."""
-    while True:
-        try:
-            await asyncio.to_thread(_caldav_sync_once, get_settings())
-        except Exception:
-            logger.exception("caldav sync tick failed")
-        await asyncio.sleep(get_settings().caldav_sync_minutes * 60)
+    await _ticker(
+        "caldav sync",
+        lambda: _caldav_sync_once(get_settings()),
+        lambda: get_settings().caldav_sync_minutes * 60,
+    )
 
 
 def _log_task_death(task: asyncio.Task) -> None:
