@@ -136,16 +136,125 @@ def run_codex(prompt: str, settings: Settings | None = None) -> str:
         return result.stdout.strip()
 
 
+class CodexStreamParser:
+    """Reduce ``codex exec --json`` stdout lines to user-visible text deltas.
+
+    Depending on the CLI version the text of an ``agent_message`` item lands as
+    growing snapshots (``item.updated``) or one whole ``item.completed`` — both
+    shapes reduce to increments here, with ``"\\n\\n"`` inserted between distinct
+    message items. Failure events are collected on :attr:`failure` rather than
+    raised, so the process owner decides how to surface them after the stream.
+    """
+
+    def __init__(self) -> None:
+        self.emitted = ""  # text already emitted for the current agent_message item
+        self.item_id: str | None = None
+        self.failure: str | None = None
+
+    def feed(self, line: str) -> list[str]:
+        """The deltas one stdout line unlocks (often none)."""
+        try:
+            event = json.loads(line)
+        except ValueError:
+            return []  # non-JSON chatter interleaved on stdout
+        etype = event.get("type", "")
+        if etype in ("item.updated", "item.completed"):
+            item = event.get("item") or {}
+            if item.get("type") != "agent_message":
+                return []
+            deltas: list[str] = []
+            text = item.get("text") or ""
+            if item.get("id") != self.item_id:  # a new message item begins
+                if self.emitted:
+                    deltas.append("\n\n")
+                self.item_id = item.get("id")
+                self.emitted = ""
+            if text.startswith(self.emitted):
+                delta = text[len(self.emitted) :]
+            else:  # snapshot diverged from what we sent — resync whole
+                delta = ("\n" if self.emitted else "") + text
+            self.emitted = text
+            if delta:
+                deltas.append(delta)
+            return deltas
+        if etype == "turn.failed":
+            self.failure = (event.get("error") or {}).get("message") or self.failure
+        elif etype == "error":
+            self.failure = self.failure or event.get("message")
+        return []
+
+
+class _StreamingCodexProcess:
+    """One streaming ``codex exec --json`` subprocess and its plumbing threads.
+
+    Feeds stdin and drains stderr on daemon threads so neither pipe can deadlock
+    against the owner's blocking reads of stdout, and arms a watchdog Timer
+    instead of ``subprocess.run(timeout=)`` so those reads stay blocking and
+    chunks flow the moment codex prints them.
+    """
+
+    def __init__(self, cmd: list[str], prompt: str, timeout: float, codex_bin: str) -> None:
+        try:
+            self.proc = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+        except FileNotFoundError as exc:
+            raise CodexError(f"Codex binary {codex_bin!r} not found on PATH.") from exc
+
+        self.timed_out = threading.Event()
+        self._stderr_text: list[str] = []
+
+        def _feed_stdin() -> None:
+            try:
+                assert self.proc.stdin is not None
+                self.proc.stdin.write(prompt)
+                self.proc.stdin.close()
+            except (BrokenPipeError, OSError):  # codex exited first
+                pass
+
+        def _drain_stderr() -> None:
+            assert self.proc.stderr is not None
+            self._stderr_text.append(self.proc.stderr.read())
+
+        threading.Thread(target=_feed_stdin, daemon=True).start()
+        threading.Thread(target=_drain_stderr, daemon=True).start()
+
+        def _expire() -> None:
+            self.timed_out.set()
+            self.proc.kill()
+
+        self._watchdog = threading.Timer(timeout, _expire)
+        self._watchdog.start()
+
+    def kill(self) -> None:
+        self.proc.kill()
+
+    def reap(self) -> None:
+        self._watchdog.cancel()
+        try:
+            # Normal path: stdout hit EOF because codex is exiting; killed
+            # paths (watchdog / GeneratorExit) reap immediately.
+            self.proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            self.proc.kill()
+            self.proc.wait()
+
+    def stderr(self) -> str:
+        return (self._stderr_text[0].strip() if self._stderr_text else "") or ""
+
+
 def run_codex_stream(prompt: str, settings: Settings | None = None) -> Iterator[str]:
     """Run one Codex turn and yield the reply text incrementally.
 
-    Drives ``codex exec --json`` (JSONL events on stdout) and yields the new
-    text of each ``agent_message`` item as events arrive. Depending on the CLI
-    version the item text lands as growing snapshots (``item.updated``) or one
-    whole ``item.completed`` — both shapes reduce to increments here, so worst
-    case the caller gets the full reply in a single chunk (never less than the
-    non-streaming path). Error semantics match :func:`run_codex`: any failure
-    raises :class:`CodexError`, possibly after some text has been yielded.
+    Drives ``codex exec --json`` and reduces its JSONL events to text deltas via
+    :class:`CodexStreamParser`; worst case the caller gets the full reply in a
+    single chunk (never less than the non-streaming path). Error semantics match
+    :func:`run_codex`: any failure raises :class:`CodexError`, possibly after
+    some text has been yielded.
 
     The concurrency slot is held until the generator is exhausted or closed;
     closing it early kills the subprocess.
@@ -155,105 +264,29 @@ def run_codex_stream(prompt: str, settings: Settings | None = None) -> Iterator[
     with _codex_slot(settings), tempfile.TemporaryDirectory() as tmp:
         out_path = Path(tmp) / "last_message.txt"
         cmd = build_command(str(out_path), settings, json_events=True)
-
+        runner = _StreamingCodexProcess(
+            cmd, prompt, settings.codex_timeout, settings.codex_bin
+        )
+        parser = CodexStreamParser()
         try:
-            proc = subprocess.Popen(
-                cmd,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
-        except FileNotFoundError as exc:
-            raise CodexError(
-                f"Codex binary {settings.codex_bin!r} not found on PATH."
-            ) from exc
-
-        # Feed stdin and drain stderr on threads so neither pipe can deadlock
-        # against our blocking reads of stdout.
-        def _feed_stdin() -> None:
-            try:
-                assert proc.stdin is not None
-                proc.stdin.write(prompt)
-                proc.stdin.close()
-            except (BrokenPipeError, OSError):  # codex exited first
-                pass
-
-        stderr_text: list[str] = []
-
-        def _drain_stderr() -> None:
-            assert proc.stderr is not None
-            stderr_text.append(proc.stderr.read())
-
-        threading.Thread(target=_feed_stdin, daemon=True).start()
-        threading.Thread(target=_drain_stderr, daemon=True).start()
-
-        # Watchdog instead of subprocess.run(timeout=): reads below must stay
-        # blocking so chunks flow the moment codex prints them.
-        timed_out = threading.Event()
-
-        def _expire() -> None:
-            timed_out.set()
-            proc.kill()
-
-        watchdog = threading.Timer(settings.codex_timeout, _expire)
-        watchdog.start()
-
-        emitted = ""  # text already yielded for the current agent_message item
-        item_id: str | None = None
-        failure: str | None = None
-        try:
-            assert proc.stdout is not None
-            for line in proc.stdout:
-                try:
-                    event = json.loads(line)
-                except ValueError:
-                    continue  # non-JSON chatter interleaved on stdout
-                etype = event.get("type", "")
-                if etype in ("item.updated", "item.completed"):
-                    item = event.get("item") or {}
-                    if item.get("type") != "agent_message":
-                        continue
-                    text = item.get("text") or ""
-                    if item.get("id") != item_id:  # a new message item begins
-                        if emitted:
-                            yield "\n\n"
-                        item_id = item.get("id")
-                        emitted = ""
-                    if text.startswith(emitted):
-                        delta = text[len(emitted) :]
-                    else:  # snapshot diverged from what we sent — resync whole
-                        delta = ("\n" if emitted else "") + text
-                    emitted = text
-                    if delta:
-                        yield delta
-                elif etype == "turn.failed":
-                    failure = (event.get("error") or {}).get("message") or failure
-                elif etype == "error":
-                    failure = failure or event.get("message")
+            assert runner.proc.stdout is not None
+            for line in runner.proc.stdout:
+                yield from parser.feed(line)
         except GeneratorExit:  # consumer stopped iterating — don't leave codex running
-            proc.kill()
+            runner.kill()
             raise
         finally:
-            watchdog.cancel()
-            try:
-                # Normal path: stdout hit EOF because codex is exiting; killed
-                # paths (watchdog / GeneratorExit) reap immediately.
-                proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait()
+            runner.reap()
 
-        if timed_out.is_set():
+        if runner.timed_out.is_set():
             raise CodexTimeoutError(f"Codex timed out after {settings.codex_timeout}s.")
-        if failure or proc.returncode != 0:
-            stderr = (stderr_text[0].strip() if stderr_text else "") or ""
+        if parser.failure or runner.proc.returncode != 0:
             raise CodexError(
-                failure
-                or f"Codex exited with code {proc.returncode}: {stderr}"
+                parser.failure
+                or f"Codex exited with code {runner.proc.returncode}: {runner.stderr()}"
             )
 
-        if not emitted and out_path.exists():
+        if not parser.emitted and out_path.exists():
             # No agent_message events surfaced (schema drift?) — fall back to
             # the -o file so the caller still gets the reply, in one chunk.
             message = out_path.read_text(encoding="utf-8").strip()
