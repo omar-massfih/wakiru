@@ -14,39 +14,24 @@ logged to the undo ledger under the turn's batch.
 
 from __future__ import annotations
 
-import logging
-
+from .. import write_ops
 from ..config import Settings
 from . import store, undo
 
-logger = logging.getLogger(__name__)
-
-
-# Ops whose schema defines "title" as the NEW value, not an identifier. Looking
-# the target up by it would resolve to whichever task already bears the new name
-# — a row the user never referred to.
-_TITLE_IS_NEW_VALUE = {"update"}
+# The find/record_write lambdas resolve store/undo attributes at call time so
+# test monkeypatches on those modules keep working (the same rationale as
+# write_ledger.LedgerSpec naming its pg adapters by string).
+_SPEC: write_ops.WriteOpsSpec[store.Task] = write_ops.WriteOpsSpec(
+    kind="task",
+    noun="tasks",
+    find=lambda settings, ident: store.find_tasks(settings, ident),
+    title_is_new_value=frozenset({"update"}),  # "update" carries the new title
+    record_write=lambda *args: undo.record_write(*args),
+)
 
 
 def _target_id(settings: Settings, op: dict) -> str | None:
-    """Resolve the task an op refers to, by id or a fuzzy title fallback.
-
-    A fuzzy reference matching more than one task is skipped rather than guessed
-    at — the same ambiguity guard the calendar extractor uses."""
-    ident = op.get("id") or op.get("query")
-    if not ident and op["op"] not in _TITLE_IS_NEW_VALUE:
-        ident = op.get("title")
-    if not ident:
-        return None
-    matches = store.find_tasks(settings, str(ident))
-    if len(matches) > 1:
-        logger.warning(
-            "task %s target %r is ambiguous between %d tasks (%s); skipping",
-            op.get("op"), ident, len(matches),
-            ", ".join(t.title for t in matches[:5]),
-        )
-        return None
-    return matches[0].id if matches else None
+    return write_ops.resolve_target(_SPEC, settings, op)
 
 
 def _log_write(
@@ -58,9 +43,7 @@ def _log_write(
     summary: str,
     before: store.Task | None,
 ) -> None:
-    if not (thread_id and batch_id and settings.enable_write_confirmation):
-        return
-    undo.record_write(settings, thread_id, batch_id, task_id, op, summary, before)
+    write_ops.log_write(_SPEC, settings, thread_id, batch_id, task_id, op, summary, before)
 
 
 def apply_op(

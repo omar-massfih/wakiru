@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 
+from .. import write_ops
 from ..config import Settings
 from . import recurrence, store, sync, undo
 from .context import format_when, overlapping_events, resolve_tz
@@ -24,44 +25,38 @@ from .context import format_when, overlapping_events, resolve_tz
 logger = logging.getLogger(__name__)
 
 
-# Ops whose schema defines "title" as the NEW value, not an identifier. Looking
-# the target up by it would resolve to whichever event already bears the new name
-# — an appointment the user never referred to.
-_TITLE_IS_NEW_VALUE = {"reschedule", "move"}
+def _refuse_ics_mirror(settings: Settings, op: dict, match: store.Event) -> bool:
+    """Veto writes to rows mirrored from a read-only ICS feed.
+
+    The feed is the source of truth, and the next pull would silently revert any
+    local change — so refuse rather than pretend. (CalDAV-backed rows are
+    deliberately NOT refused: is_synced_id is ICS-only, so they fall through and
+    their edit is pushed back — see _push_caldav.)
+    """
+    if not sync.is_synced_id(match.id):
+        return False
+    logger.warning(
+        "calendar %s target %r is synced from an external calendar; skipping",
+        op.get("op"), match.title,
+    )
+    return True
+
+
+# The find/record_write lambdas resolve store/undo attributes at call time so
+# test monkeypatches on those modules keep working (the same rationale as
+# write_ledger.LedgerSpec naming its pg adapters by string).
+_SPEC: write_ops.WriteOpsSpec[store.Event] = write_ops.WriteOpsSpec(
+    kind="calendar",
+    noun="events",
+    find=lambda settings, ident: store.find_events(settings, ident),
+    title_is_new_value=frozenset({"reschedule", "move"}),  # both carry the new title
+    record_write=lambda *args: undo.record_write(*args),
+    refuse_match=_refuse_ics_mirror,
+)
 
 
 def _target_id(settings: Settings, op: dict) -> str | None:
-    """Resolve the event an op refers to, by id or a fuzzy title/query fallback.
-
-    Every op that lands here mutates or deletes, so a fuzzy reference matching
-    more than one event is skipped rather than guessed at — cancelling nothing
-    beats cancelling the wrong appointment (the same rule memory's fuzzy forget
-    applies). An exact id always resolves unambiguously.
-    """
-    ident = op.get("id") or op.get("query")
-    if not ident and op["op"] not in _TITLE_IS_NEW_VALUE:
-        ident = op.get("title")
-    if not ident:
-        return None
-    matches = store.find_events(settings, str(ident))
-    if len(matches) > 1:
-        logger.warning(
-            "calendar %s target %r is ambiguous between %d events (%s); skipping",
-            op.get("op"), ident, len(matches),
-            ", ".join(e.title for e in matches[:5]),
-        )
-        return None
-    if matches and sync.is_synced_id(matches[0].id):
-        # Read-only ICS mirror: the feed is the source of truth, and the next pull
-        # would silently revert any local change — so refuse rather than pretend.
-        # (CalDAV-backed rows are deliberately NOT refused: is_synced_id is ICS-only,
-        # so they fall through and their edit is pushed back — see _push_caldav.)
-        logger.warning(
-            "calendar %s target %r is synced from an external calendar; skipping",
-            op.get("op"), matches[0].title,
-        )
-        return None
-    return matches[0].id if matches else None
+    return write_ops.resolve_target(_SPEC, settings, op)
 
 
 # Appended to a write-confirmation when the local write landed but the CalDAV push
@@ -149,9 +144,7 @@ def _log_write(
     summary: str,
     before: store.Event | None,
 ) -> None:
-    if not (thread_id and batch_id and settings.enable_write_confirmation):
-        return
-    undo.record_write(settings, thread_id, batch_id, event_id, op, summary, before)
+    write_ops.log_write(_SPEC, settings, thread_id, batch_id, event_id, op, summary, before)
 
 
 def apply_op(
