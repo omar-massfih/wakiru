@@ -546,6 +546,40 @@ def _transcribe_voice(token: str, settings: Settings, voice: dict) -> str:
         return transcribe(tmp.name, settings)
 
 
+def _voice_turn_text(
+    token: str, settings: Settings, chat_id: int, voice: dict
+) -> str | None:
+    """Turn an authorized chat's voice note into turn text, or ``None`` to drop it.
+
+    Owns the whole voice policy — feature gate, duration cap, transcription, and
+    every user-facing reply on the way out (a refusal, a failure apology, or the
+    transcript echo that makes a mishearing obvious before the reply lands).
+    """
+    if not settings.enable_voice:
+        send_message(token, chat_id, "Voice notes are off. Set ENABLE_VOICE=true to use them.")
+        return None
+    if (voice.get("duration") or 0) > settings.voice_max_seconds:
+        send_message(
+            token,
+            chat_id,
+            f"That voice note is too long — keep it under {settings.voice_max_seconds}s.",
+        )
+        return None
+    try:
+        with _typing(token, chat_id):
+            text = _transcribe_voice(token, settings, voice)
+    except Exception:
+        logger.exception("voice transcription failed for chat %s", chat_id)
+        send_message(token, chat_id, "Sorry — I couldn't make out that voice note. Try again?")
+        return None
+    if not text:
+        send_message(token, chat_id, "I couldn't hear any speech in that voice note.")
+        return None
+    # Echo the transcript so a mishearing is obvious before the reply lands.
+    send_message(token, chat_id, f"🎙 Heard: “{text}”")
+    return text
+
+
 def handle_update(
     agent: CompiledStateGraph, settings: Settings, update: dict
 ) -> Callable[[], None] | None:
@@ -579,28 +613,9 @@ def handle_update(
         return None
 
     if text is None:  # a voice note from an authorized chat
-        if not settings.enable_voice:
-            send_message(token, chat_id, "Voice notes are off. Set ENABLE_VOICE=true to use them.")
+        text = _voice_turn_text(token, settings, chat_id, voice)
+        if text is None:
             return None
-        if (voice.get("duration") or 0) > settings.voice_max_seconds:
-            send_message(
-                token,
-                chat_id,
-                f"That voice note is too long — keep it under {settings.voice_max_seconds}s.",
-            )
-            return None
-        try:
-            with _typing(token, chat_id):
-                text = _transcribe_voice(token, settings, voice)
-        except Exception:
-            logger.exception("voice transcription failed for chat %s", chat_id)
-            send_message(token, chat_id, "Sorry — I couldn't make out that voice note. Try again?")
-            return None
-        if not text:
-            send_message(token, chat_id, "I couldn't hear any speech in that voice note.")
-            return None
-        # Echo the transcript so a mishearing is obvious before the reply lands.
-        send_message(token, chat_id, f"🎙 Heard: “{text}”")
 
     thread_id = f"telegram:{chat_id}"
 
