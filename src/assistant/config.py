@@ -346,9 +346,17 @@ class Settings(BaseSettings):
     # Master switch: fire proactive reminders ahead of upcoming events.
     enable_reminders: bool = True
     # Fire a reminder this many minutes before an event. A list, so several leads
-    # per event work (e.g. [1440, 60] = a day before and an hour before). The
-    # default nudges twice: an hour out and again 15 minutes out.
-    reminder_lead_minutes: list[int] = [60, 15]
+    # per event work (e.g. [1440, 60] = a day before and an hour before). With
+    # importance classification on (below) this is the NORMAL-tier schedule; with
+    # it off, the uniform schedule for every event.
+    reminder_lead_minutes: list[int] = [15]
+    # Master switch: classify each event's importance with the LLM (one call per
+    # new event, cached in calendar.db) and pick its lead schedule per tier.
+    # False => every event uses reminder_lead_minutes (uniform legacy behavior).
+    reminder_importance_enabled: bool = True
+    # Lead schedule for critical events (doctor, flight, exam, deadline …):
+    # 2 days, 1 day, 3 hours, 1 hour, 15 minutes before.
+    reminder_lead_minutes_critical: list[int] = [2880, 1440, 180, 60, 15]
     # ntfy topic URL / generic webhook the reminder is POSTed to. None => reminders
     # are still computed and returned by the endpoint, just not pushed anywhere.
     reminder_webhook_url: str | None = None

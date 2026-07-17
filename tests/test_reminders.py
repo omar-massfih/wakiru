@@ -22,6 +22,7 @@ def settings(tmp_path) -> Settings:
     return Settings(
         memory_dir=str(tmp_path / "memory"),
         timezone="Europe/Oslo",
+        reminder_importance_enabled=False,  # uniform-lead semantics under test
         enable_reminders=True,
         reminder_lead_minutes=[60],
         reminder_webhook_url=None,  # no push; run_reminders still computes + records
@@ -126,6 +127,7 @@ def test_multiple_leads_fire_only_open_window(tmp_path) -> None:
     settings = Settings(
         memory_dir=str(tmp_path / "memory"),
         timezone="Europe/Oslo",
+        reminder_importance_enabled=False,  # uniform-lead semantics under test
         reminder_lead_minutes=[1440, 60],  # a day before, and an hour before
     )
     _event_in(settings, "Flight", hours=12)  # inside the day window, outside the hour one
@@ -167,6 +169,7 @@ def test_webhook_delivery(tmp_path, monkeypatch) -> None:
     settings = Settings(
         memory_dir=str(tmp_path / "memory"),
         timezone="Europe/Oslo",
+        reminder_importance_enabled=False,  # uniform-lead semantics under test
         reminder_lead_minutes=[60],
         reminder_webhook_url="https://ntfy.example/topic",
     )
@@ -214,6 +217,7 @@ def test_non_latin1_title_still_delivers(tmp_path, monkeypatch) -> None:
     settings = Settings(
         memory_dir=str(tmp_path / "memory"),
         timezone="Europe/Oslo",
+        reminder_importance_enabled=False,  # uniform-lead semantics under test
         reminder_lead_minutes=[60],
         reminder_webhook_url="https://ntfy.example/topic",
     )
@@ -288,6 +292,7 @@ def test_event_inside_several_lead_windows_fires_once(tmp_path) -> None:
     settings = Settings(
         memory_dir=str(tmp_path / "memory"),
         timezone="Europe/Oslo",
+        reminder_importance_enabled=False,  # uniform-lead semantics under test
         reminder_lead_minutes=[1440, 60],
     )
     # Booked half an hour ahead: inside BOTH windows -> one push, not two
@@ -308,6 +313,7 @@ def test_repeat_fires_each_band_until_start(tmp_path, monkeypatch) -> None:
     settings = Settings(
         memory_dir=str(tmp_path / "memory"),
         timezone="Europe/Oslo",
+        reminder_importance_enabled=False,  # uniform-lead semantics under test
         reminder_lead_minutes=[60],
         reminder_repeat_minutes=15,
     )
@@ -333,6 +339,7 @@ def test_repeat_same_band_is_idempotent(tmp_path, monkeypatch) -> None:
     settings = Settings(
         memory_dir=str(tmp_path / "memory"),
         timezone="Europe/Oslo",
+        reminder_importance_enabled=False,  # uniform-lead semantics under test
         reminder_lead_minutes=[60],
         reminder_repeat_minutes=15,
     )
@@ -349,6 +356,7 @@ def test_repeat_silent_after_start(tmp_path, monkeypatch) -> None:
     settings = Settings(
         memory_dir=str(tmp_path / "memory"),
         timezone="Europe/Oslo",
+        reminder_importance_enabled=False,  # uniform-lead semantics under test
         reminder_lead_minutes=[60],
         reminder_repeat_minutes=15,
     )
@@ -364,6 +372,7 @@ def test_repeat_at_start_band_fires_once(tmp_path, monkeypatch) -> None:
     settings = Settings(
         memory_dir=str(tmp_path / "memory"),
         timezone="Europe/Oslo",
+        reminder_importance_enabled=False,  # uniform-lead semantics under test
         reminder_lead_minutes=[60],
         reminder_repeat_minutes=15,
     )
@@ -391,6 +400,7 @@ def test_repeat_skip_occurrence_stops_remaining_nudges(tmp_path, monkeypatch) ->
     settings = Settings(
         memory_dir=str(tmp_path / "memory"),
         timezone="Europe/Oslo",
+        reminder_importance_enabled=False,  # uniform-lead semantics under test
         reminder_lead_minutes=[60],
         reminder_repeat_minutes=15,
     )
@@ -481,3 +491,75 @@ def test_delivered_reminder_also_records_on_slack_threads(settings, monkeypatch)
     pushed = f"⏰ {fired[0]['message']}"
     assert ("telegram:7", pushed) in agent.recorded
     assert ("slack:C9:U1", pushed) in agent.recorded
+
+
+# --- importance tiers ------------------------------------------------------ #
+
+
+@pytest.fixture
+def tiered_settings(tmp_path) -> Settings:
+    return Settings(
+        memory_dir=str(tmp_path / "memory"),
+        timezone="Europe/Oslo",
+        reminder_importance_enabled=True,
+        reminder_lead_minutes=[15],
+        reminder_lead_minutes_critical=[2880, 1440, 180, 60, 15],
+    )
+
+
+def _stub_tiers(monkeypatch, verdicts: dict[str, str]) -> None:
+    from assistant.calendar import importance
+
+    monkeypatch.setattr(
+        importance, "_classify_llm", lambda settings, events: dict(verdicts)
+    )
+
+
+def test_critical_event_fires_days_ahead(tiered_settings, monkeypatch) -> None:
+    event = _event_in(tiered_settings, "Legetime hos Dr. Berg", hours=36)
+    _stub_tiers(monkeypatch, {event.id: "critical"})
+    fired = reminders.run_reminders(tiered_settings)
+    assert len(fired) == 1
+    assert fired[0]["tier"] == "critical"
+    assert fired[0]["lead_minutes"] == 2880  # the 2-day window is open
+    assert "2 days" in fired[0]["message"]
+    assert reminders.run_reminders(tiered_settings) == []  # ledger holds
+
+
+def test_normal_event_silent_days_ahead(tiered_settings, monkeypatch) -> None:
+    event = _event_in(tiered_settings, "Coffee with Anna", hours=36)
+    _stub_tiers(monkeypatch, {event.id: "normal"})
+    assert reminders.run_reminders(tiered_settings) == []
+
+
+def test_normal_event_fires_inside_short_lead(tiered_settings, monkeypatch) -> None:
+    event = _event_in(tiered_settings, "Coffee with Anna", minutes=10)
+    _stub_tiers(monkeypatch, {event.id: "normal"})
+    fired = reminders.run_reminders(tiered_settings)
+    assert len(fired) == 1
+    assert fired[0]["tier"] == "normal"
+    assert fired[0]["lead_minutes"] == 15
+
+
+def test_flag_off_ignores_criticality(tmp_path) -> None:
+    settings = Settings(
+        memory_dir=str(tmp_path / "memory"),
+        timezone="Europe/Oslo",
+        reminder_importance_enabled=False,
+        reminder_lead_minutes=[15],
+    )
+    _event_in(settings, "Legetime", hours=36)  # would be critical if classified
+    assert reminders.run_reminders(settings) == []
+
+
+def test_classifier_crash_degrades_to_normal_leads(tiered_settings, monkeypatch) -> None:
+    from assistant.calendar import importance
+
+    def boom(settings, events):
+        raise RuntimeError("tiers exploded")
+
+    monkeypatch.setattr(importance, "tiers_for", boom)
+    _event_in(tiered_settings, "Legetime", minutes=10)  # inside the normal lead
+    fired = reminders.run_reminders(tiered_settings)
+    assert len(fired) == 1  # reminders never blocked by classification
+    assert fired[0]["tier"] == "normal"

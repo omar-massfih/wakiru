@@ -5,22 +5,30 @@ user chats. Reminders are the missing third path: unprompted nudges ahead of an
 event ("Dentist in 1 hour"), driven by a wall-clock ticker rather than chat traffic.
 
 :func:`run_reminders` is the entry point. On each call it finds events entering a
-configured *lead* window (:attr:`Settings.reminder_lead_minutes`), fires each one
-exactly once via a small SQLite dedupe ledger, and pushes it through
-:func:`assistant.notify.deliver_reminder`. It is best-effort and idempotent, so the
-in-process ticker and a manual ``POST /reminders/run`` can both drive it safely.
+configured *lead* window, fires each one exactly once via a small SQLite dedupe
+ledger, and pushes it through :func:`assistant.notify.deliver_reminder`. Which
+lead windows apply is per event: with importance classification on
+(:attr:`Settings.reminder_importance_enabled`, see :mod:`.importance`), critical
+events (doctor, flight, exam …) get the long multi-day schedule and everything
+else the short :attr:`Settings.reminder_lead_minutes`; with it off, every event
+uses :attr:`Settings.reminder_lead_minutes` uniformly. It is best-effort and
+idempotent, so the in-process ticker and a manual ``POST /reminders/run`` can
+both drive it safely.
 """
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta
 
 from .. import fired_ledger
 from ..config import Settings, get_settings
 from ..notify import deliver_reminder
 from ..reminder_windows import START_GRACE, due_slots
-from . import recurrence, store
+from . import importance, recurrence, store
 from .context import now
+
+logger = logging.getLogger(__name__)
 
 # The dedupe ledger lives in the same ``calendar.db`` file the store uses.
 _LEDGER = fired_ledger.FiredLedgerSpec(
@@ -33,16 +41,19 @@ _LEDGER = fired_ledger.FiredLedgerSpec(
 def due_reminders(settings: Settings, current: datetime | None = None) -> list[dict]:
     """Reminders that should fire as of ``current`` (defaults to the assistant's now).
 
-    An event is due when it starts within the next L minutes for a configured lead
-    L, plus one final "starting now" band just after it begins (within
+    An event is due when it starts within the next L minutes for one of its lead
+    windows L — the tier schedule :mod:`.importance` picks for it, or the uniform
+    :attr:`Settings.reminder_lead_minutes` when classification is off — plus one
+    final "starting now" band just after it begins (within
     :data:`START_GRACE`, keyed as lead/slot 0 or below so the countdown bands stay
     distinct). An event inside several lead windows at once (e.g.
     booked half an hour ahead with leads of a day and an hour) yields ONE reminder,
     not one per lead: ``lead_minutes`` is the smallest due lead and ``covered_leads``
     lists every lead window the event is currently inside, so the caller can claim
     them together instead of pushing duplicates. Returns one dict per event:
-    ``{event_id, title, start, lead_minutes, covered_leads, message}``. Pure — it
-    does not touch the ledger or deliver anything.
+    ``{event_id, title, start, tier, lead_minutes, covered_leads, message}``.
+    Pure apart from the importance cache — it does not touch the ledger or
+    deliver anything.
 
     When :attr:`Settings.reminder_repeat_minutes` is set, the leads instead only
     mark when reminders *begin* (their max); the event then re-nudges every
@@ -50,24 +61,46 @@ def due_reminders(settings: Settings, current: datetime | None = None) -> list[d
     carried in ``lead_minutes``/``covered_leads``, so the same claim-once ledger
     path fires each band exactly once.
     """
-    leads = settings.reminder_lead_minutes
-    if not leads:
+    classify = settings.reminder_importance_enabled
+    max_lead = (
+        importance.max_lead_minutes(settings)
+        if classify
+        else max(settings.reminder_lead_minutes, default=0)
+    )
+    if not max_lead:
         return []
     # Deferred: phrasing imports calendar.context, so a module-level import here
     # would cycle through the calendar package's __init__.
     from ..phrasing import event_reminder_message
 
     current = current or now(settings)
-    horizon = current + timedelta(minutes=max(leads))
+    horizon = current + timedelta(minutes=max_lead)
     # Expand recurring series so each occurrence is nudged on its own; the ledger
     # keys on the occurrence start, so a weekly standup fires once per week. The
     # window opens START_GRACE early so a just-started event is still seen for
     # its at-start nudge.
     events = recurrence.occurrences_in(settings, current - START_GRACE, horizon)
 
+    tiers: dict[str, str] = {}
+    if classify and events:
+        try:
+            tiers = importance.tiers_for(settings, events)
+        except Exception:
+            # Classification is advisory: any surprise degrades every event to
+            # the normal schedule rather than blocking reminders.
+            logger.exception("importance lookup failed; using normal leads")
+
     repeat = settings.reminder_repeat_minutes
     reminders: list[dict] = []
     for event in events:
+        tier = tiers.get(event.id, importance.TIER_NORMAL)
+        leads = (
+            importance.leads_for(settings, tier)
+            if classify
+            else settings.reminder_lead_minutes
+        )
+        if not leads:
+            continue
         start = store.parse_dt(event.start)
         if start is None:
             continue
@@ -85,6 +118,7 @@ def due_reminders(settings: Settings, current: datetime | None = None) -> list[d
                 "event_id": event.id,
                 "title": event.title,
                 "start": event.start,
+                "tier": tier,
                 "lead_minutes": slots[0],
                 "covered_leads": slots,
                 "message": event_reminder_message(
