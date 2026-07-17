@@ -197,11 +197,16 @@ def test_heartbeat_mode_never_offers_send_email(tmp_path) -> None:
     )
     chat_names = {t.name for t in available_tools(settings)}
     heartbeat_names = {t.name for t in available_tools(settings, mode="heartbeat")}
-    assert "send_email" in chat_names
-    assert "send_email" not in heartbeat_names
+    assert {"send_email", "send_reply"} <= chat_names
+    assert not {"send_email", "send_reply"} & heartbeat_names
     # `undo` is also chat-only: a background wake has no conversation whose
     # latest write it could revert.
     assert "undo" in chat_names and "undo" not in heartbeat_names
-    # Heartbeat mode drops send_email/undo and adds its own set_next_wake.
+    # Heartbeat mode drops the send tools and undo, drops the mutating mail
+    # tools while triage is not opted in (email_triage_max_actions = 0), and
+    # adds its own set_next_wake.
     assert "set_next_wake" in heartbeat_names and "set_next_wake" not in chat_names
-    assert heartbeat_names == (chat_names - {"send_email", "undo"}) | {"set_next_wake"}
+    triage_only = {"reply_email", "archive_email", "mark_email_read", "label_email"}
+    assert heartbeat_names == (
+        chat_names - {"send_email", "send_reply", "undo"} - triage_only
+    ) | {"set_next_wake"}

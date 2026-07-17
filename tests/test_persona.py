@@ -71,11 +71,17 @@ def test_email_section_and_send_gate() -> None:
 
     draft_only = persona.system_prompt(_settings(enable_email=True))
     assert "Email:" in draft_only and "send_email" not in draft_only
+    # The mailbox-management verbs ride with the email section itself…
+    assert "reply_email" in draft_only and "archive_email" in draft_only
+    assert "mark_email_read" in draft_only
+    # …but the send tools only appear behind the second switch.
+    assert "send_reply" not in draft_only
 
     sending = persona.system_prompt(
         _settings(enable_email=True, enable_email_send=True)
     )
     assert "send_email" in sending and "never send unprompted" in sending
+    assert "send_reply" in sending
 
 
 def test_reminder_etiquette_follows_reminders_flag() -> None:

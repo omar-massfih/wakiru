@@ -62,6 +62,7 @@ from .ledgers import (
     record_task_write,
     task_write_rows,
 )
+from .mail import ensure_mail_schema, mail_audit_rows, record_mail_audit
 from .memory import (
     bump_recall,
     bump_turn_counter,
@@ -131,6 +132,7 @@ __all__ = [
     "ensure_fired_schema",
     "ensure_followups_schema",
     "ensure_kv_schema",
+    "ensure_mail_schema",
     "ensure_memory_schema",
     "ensure_mutes_schema",
     "ensure_tasks_schema",
@@ -153,6 +155,7 @@ __all__ = [
     "list_notes",
     "list_open_followups",
     "list_tasks",
+    "mail_audit_rows",
     "mark_calendar_writes_undone",
     "mark_task_writes_undone",
     "meta_get",
@@ -163,6 +166,7 @@ __all__ = [
     "purge_stale_files",
     "read_index",
     "record_calendar_write",
+    "record_mail_audit",
     "record_task_write",
     "regenerate_index",
     "reindex_docs",

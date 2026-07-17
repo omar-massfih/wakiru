@@ -10,10 +10,14 @@ Two rules the registry enforces structurally rather than by prompt:
 
 * Every tool is gated by its subsystem's enable flag — a disabled capability is
   simply not offered to the model.
-* ``send_email`` is registered only when ``enable_email_send`` is set (the
-  second, independent switch) **and** only in ``mode="chat"`` — background
-  paths (the heartbeat) request ``mode="heartbeat"``, which never contains
-  ``send_email``, so mail can never be sent except from a live conversation.
+* ``send_email`` / ``send_reply`` are registered only when
+  ``enable_email_send`` is set (the second, independent switch) **and** only in
+  ``mode="chat"`` — background paths (the heartbeat) request
+  ``mode="heartbeat"``, which never contains a send tool, so mail can never be
+  sent except from a live conversation. The other mailbox mutations (archive /
+  label / mark-read / draft-reply) appear in heartbeat mode only when
+  ``email_triage_max_actions`` opts in, and are then capped by a per-wake
+  budget.
 
 ``execute_tool`` never raises: a failure becomes the tool's result string, so
 the loop always produces a ``ToolMessage`` and the model can self-correct.
@@ -23,7 +27,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from .config import Settings
 
@@ -418,7 +422,7 @@ def _docs_tools() -> list[ToolSpec]:
 
 
 # --------------------------------------------------------------------------- #
-# Email — read/draft when enabled; send only behind the second switch
+# Email — read/draft/manage when enabled; send only behind the second switch
 # --------------------------------------------------------------------------- #
 
 def _list_email(ctx: ToolContext, unread_only: bool = True) -> str:
@@ -457,6 +461,80 @@ def _send_email(ctx: ToolContext, to: str, subject: str, body: str) -> str:
     return mail_client.send_message(ctx.settings, str(to), str(subject), str(body))
 
 
+def _mail_mutated(result: str) -> bool:
+    """Whether a mail client result string reports a performed mutation.
+
+    The client returns "No message with uid …" when nothing happened and an
+    explanatory "This server has folders…" refusal for unsupported label
+    removal; every other return is the summary of a change that was made.
+    """
+    return not result.startswith(("No message with uid", "This server has"))
+
+
+def _record_mail_action(
+    ctx: ToolContext, action: str, uid: str, detail: str, *, invalidate: bool = False
+) -> None:
+    """Audit a performed mailbox mutation; optionally stale the unread snapshot."""
+    from .mail import audit as mail_audit
+
+    actor = f"chat:{ctx.thread_id}" if ctx.thread_id else "heartbeat"
+    mail_audit.record(ctx.settings, actor, action, uid, detail)
+    if invalidate:
+        try:
+            from .mail import snapshot as mail_snapshot
+
+            mail_snapshot.invalidate(ctx.settings)
+        except Exception:
+            logger.debug("mail snapshot invalidation failed", exc_info=True)
+
+
+def _reply_email(ctx: ToolContext, uid: str, body: str, reply_all: bool = False) -> str:
+    from .mail import client as mail_client
+
+    result = mail_client.save_reply_draft(
+        ctx.settings, str(uid), str(body), bool(reply_all)
+    )
+    if _mail_mutated(result):
+        _record_mail_action(ctx, "reply_draft", str(uid), result)
+    return result
+
+
+def _send_reply(ctx: ToolContext, uid: str, body: str, reply_all: bool = False) -> str:
+    from .mail import client as mail_client
+
+    result = mail_client.send_reply(ctx.settings, str(uid), str(body), bool(reply_all))
+    if _mail_mutated(result):
+        _record_mail_action(ctx, "reply_sent", str(uid), result)
+    return result
+
+
+def _archive_email(ctx: ToolContext, uid: str) -> str:
+    from .mail import client as mail_client
+
+    result = mail_client.archive_message(ctx.settings, str(uid))
+    if _mail_mutated(result):
+        _record_mail_action(ctx, "archive", str(uid), result, invalidate=True)
+    return result
+
+
+def _mark_email_read(ctx: ToolContext, uid: str, unread: bool = False) -> str:
+    from .mail import client as mail_client
+
+    result = mail_client.mark_read(ctx.settings, str(uid), bool(unread))
+    if _mail_mutated(result):
+        _record_mail_action(ctx, "mark_read", str(uid), result, invalidate=True)
+    return result
+
+
+def _label_email(ctx: ToolContext, uid: str, label: str, remove: bool = False) -> str:
+    from .mail import client as mail_client
+
+    result = mail_client.set_label(ctx.settings, str(uid), str(label), bool(remove))
+    if _mail_mutated(result):
+        _record_mail_action(ctx, "label", str(uid), result)
+    return result
+
+
 def _email_tools(settings: Settings) -> list[ToolSpec]:
     tools = [
         ToolSpec(
@@ -487,6 +565,58 @@ def _email_tools(settings: Settings) -> list[ToolSpec]:
             ),
             _draft_email,
         ),
+        ToolSpec(
+            "reply_email",
+            "Draft a properly threaded reply to a message by uid (saves to the "
+            "drafts folder; does not send). Prefer this over draft_email when "
+            "answering an existing message.",
+            _params(
+                {
+                    "uid": ("string", "Message uid from list_email"),
+                    "body": ("string", "Plain-text reply body"),
+                    "reply_all": (
+                        "boolean",
+                        "Also Cc the original To/Cc recipients (default false)",
+                    ),
+                },
+                ["uid", "body"],
+            ),
+            _reply_email,
+        ),
+        ToolSpec(
+            "archive_email",
+            "Archive a message: remove it from the inbox without deleting it "
+            "(recoverable — on Gmail it stays in All Mail).",
+            _params({"uid": ("string", "Message uid from list_email")}, ["uid"]),
+            _archive_email,
+        ),
+        ToolSpec(
+            "mark_email_read",
+            "Mark a message read (or back to unread with unread=true). Reading "
+            "with read_email never does this implicitly.",
+            _params(
+                {
+                    "uid": ("string", "Message uid from list_email"),
+                    "unread": ("boolean", "Mark unread instead (default false)"),
+                },
+                ["uid"],
+            ),
+            _mark_email_read,
+        ),
+        ToolSpec(
+            "label_email",
+            "Apply or remove a label on a message (Gmail); on folder-based "
+            "servers, labeling moves the message to that folder.",
+            _params(
+                {
+                    "uid": ("string", "Message uid from list_email"),
+                    "label": ("string", "Label or folder name"),
+                    "remove": ("boolean", "Remove the label instead (default false)"),
+                },
+                ["uid", "label"],
+            ),
+            _label_email,
+        ),
     ]
     if settings.enable_email_send:
         tools.append(
@@ -503,6 +633,26 @@ def _email_tools(settings: Settings) -> list[ToolSpec]:
                     ["to", "subject", "body"],
                 ),
                 _send_email,
+            )
+        )
+        tools.append(
+            ToolSpec(
+                "send_reply",
+                "Send a threaded reply to a message by uid. Only after the user "
+                "explicitly confirmed sending this exact reply in this "
+                "conversation.",
+                _params(
+                    {
+                        "uid": ("string", "Message uid from list_email"),
+                        "body": ("string", "Plain-text reply body"),
+                        "reply_all": (
+                            "boolean",
+                            "Also Cc the original To/Cc recipients (default false)",
+                        ),
+                    },
+                    ["uid", "body"],
+                ),
+                _send_reply,
             )
         )
     return tools
@@ -731,13 +881,45 @@ def _undo_tools() -> list[ToolSpec]:
 # Registry + dispatch
 # --------------------------------------------------------------------------- #
 
+_MAIL_MUTATING = frozenset(
+    {"reply_email", "archive_email", "mark_email_read", "label_email"}
+)
+
+
+def _budgeted(spec: ToolSpec, budget: dict[str, int]) -> ToolSpec:
+    """Cap a mutating mail tool to the heartbeat's per-wake triage budget.
+
+    The registry is rebuilt on every wake, so the shared counter is naturally
+    per-wake. Only performed mutations consume budget — a "no message with
+    uid" miss or a refusal does not. The ceiling holds structurally, whatever
+    the prompt says.
+    """
+    inner = spec.run
+
+    def run(ctx: ToolContext, **args: object) -> str:
+        if budget["n"] <= 0:
+            return (
+                "Tool failed: the mailbox triage budget for this wake is used "
+                "up. Leave the rest of the inbox for the next wake."
+            )
+        result = inner(ctx, **args)
+        if _mail_mutated(result):
+            budget["n"] -= 1
+        return result
+
+    return replace(spec, run=run)
+
+
 def available_tools(settings: Settings, mode: str = "chat") -> list[ToolSpec]:
     """Every tool the current configuration offers the model.
 
-    ``mode="heartbeat"`` is the background variant: identical except that
-    ``send_email`` is structurally absent — no prompt, bug, or jailbreak can
+    ``mode="heartbeat"`` is the background variant: ``send_email`` and
+    ``send_reply`` are structurally absent — no prompt, bug, or jailbreak can
     make a background wake send mail — and so is ``undo``, since a background
-    wake has no conversation whose latest write it could revert.
+    wake has no conversation whose latest write it could revert. The mutating
+    mail tools (archive / label / mark-read / draft-reply) are absent too
+    unless ``email_triage_max_actions`` opts in, and then they share a
+    per-wake mutation budget.
     """
     tools: list[ToolSpec] = []
     if settings.enable_calendar:
@@ -759,9 +941,21 @@ def available_tools(settings: Settings, mode: str = "chat") -> list[ToolSpec]:
         tools += _followup_tools()
     if mode == "heartbeat":
         # set_next_wake is background-only: in chat, "wake me before X" is a
-        # follow-up. The send_email/undo exclusion is untouched below it.
+        # follow-up. The send exclusion is untouched below it.
         tools += _wake_tools()
-        tools = [spec for spec in tools if spec.name not in ("send_email", "undo")]
+        tools = [
+            spec
+            for spec in tools
+            if spec.name not in ("send_email", "send_reply", "undo")
+        ]
+        if settings.email_triage_max_actions > 0:
+            budget = {"n": settings.email_triage_max_actions}
+            tools = [
+                _budgeted(spec, budget) if spec.name in _MAIL_MUTATING else spec
+                for spec in tools
+            ]
+        else:
+            tools = [spec for spec in tools if spec.name not in _MAIL_MUTATING]
     return tools
 
 

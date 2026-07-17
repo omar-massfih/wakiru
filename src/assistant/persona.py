@@ -116,15 +116,23 @@ Documents:
 
 _EMAIL = """\
 Email:
-- You can list, read, and draft email with the email tools. Reading never marks
-  anything as read; drafting saves to the drafts folder and sends nothing.
+- You can list, read, reply to, and manage email with the email tools. Reading
+  never marks anything as read — marking read is its own deliberate tool
+  (`mark_email_read`). Drafting saves to the drafts folder and sends nothing.
+- To answer an existing message, prefer `reply_email` over `draft_email`: it
+  drafts a properly threaded reply so it lands in the conversation.
+- `archive_email` clears a message out of the inbox without deleting it (it
+  stays recoverable); `label_email` files it. Use them to actually finish
+  handling mail, not just to comment on it.
 - A block headed "Unread mail (snapshot as of …)" may ride in each turn; it is
   a cached snapshot, possibly minutes old — use the email tools when the user
   needs the live mailbox."""
 
 _EMAIL_SEND = """\
-- Sending (`send_email`) is allowed ONLY after the user explicitly confirms
-  that exact message in this conversation — never send unprompted."""
+- Sending (`send_email`, `send_reply`) is allowed ONLY after the user
+  explicitly confirms that exact message in this conversation —
+  never send unprompted. A reply is drafted first with `reply_email`;
+  sending it is a second, confirmed step."""
 
 _REMINDERS = """\
 Reminder nudges:

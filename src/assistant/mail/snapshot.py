@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from ..calendar.context import now
@@ -108,6 +108,20 @@ def refresh(settings: Settings) -> str | None:
     text = _render(messages)
     _save(settings, text, now(settings))
     return text
+
+
+def invalidate(settings: Settings) -> None:
+    """Mark the persisted snapshot stale so the next ticker tick refetches.
+
+    Called after a mutation that changes the unread set (archive, mark read):
+    :func:`current` then withholds the outdated block instead of presenting a
+    mailbox that no longer exists — without any IMAP on the tool path.
+    """
+    stored = _load(settings)
+    if stored is None:
+        return
+    text, _ = stored
+    _save(settings, text, datetime(1970, 1, 1, tzinfo=UTC))
 
 
 def maybe_refresh(settings: Settings) -> None:

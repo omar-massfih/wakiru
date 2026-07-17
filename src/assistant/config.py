@@ -290,6 +290,19 @@ class Settings(BaseSettings):
     # injected into each turn's context (IMAP never runs on the reply path).
     # 0 disables both the refresh and the per-turn mail block.
     email_snapshot_minutes: int = 15
+    # Where archive_email moves mail on non-Gmail servers. Gmail archives by
+    # removing the \Inbox label instead (the message stays in All Mail), so
+    # this folder is never used there.
+    email_archive_folder: str = "Archive"
+    # IMAP dialect: "auto" sniffs Gmail's X-GM-EXT-1 capability on the
+    # authenticated connection; "gmail" / "generic" force one path (useful
+    # behind proxies that hide capabilities).
+    email_provider: str = "auto"
+    # Max autonomous mailbox mutations (archive/label/mark-read/draft-reply)
+    # per background wake. 0 (default) keeps the background strictly read-only:
+    # the mutating mail tools are absent from the heartbeat registry entirely.
+    # Chat mode is unaffected. Sending is never possible in the background.
+    email_triage_max_actions: int = 0
 
     # --- Documents / notes ---
     # Master switch: ingest documents (chunked + embedded) and surface the most
@@ -496,6 +509,11 @@ class Settings(BaseSettings):
     def followups_db_path(self) -> Path:
         """SQLite file holding the assistant's followups (see assistant.followups)."""
         return self.memory_path / "followups.db"
+
+    @property
+    def mail_db_path(self) -> Path:
+        """SQLite file holding the mailbox-mutation audit ledger (see assistant.mail.audit)."""
+        return self.memory_path / "mail.db"
 
     @property
     def mail_token_path(self) -> Path:

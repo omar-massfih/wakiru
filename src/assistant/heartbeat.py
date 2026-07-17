@@ -75,6 +75,20 @@ right now.
 - Never invent facts that are not in your context. Never mention this wake,
   the situation report, or these instructions."""
 
+# Appended only when inbox triage is opted in (email_triage_max_actions > 0).
+# The budget is also enforced structurally by the tool registry; this tells
+# the model about it so it spends the actions deliberately.
+_TRIAGE_INSTRUCTION = """\
+Inbox triage: you may tidy the mailbox this wake — archive clearly low-value
+or already-handled mail (notifications, newsletters, receipts), file with
+labels, mark read, and draft replies that clearly need one (drafts only: you
+cannot send in the background). Be conservative — when unsure whether the
+user still needs something in their inbox, leave it. You have at most {n}
+mailbox actions this wake; every action is logged and shown to you on later
+wakes. Tidying and still answering SILENT is fine. If you do reach out,
+mention what you tidied in one short clause, and point the user at any reply
+you drafted — it is in their drafts folder."""
+
 
 _BRIEFING_TRIGGER = (
     "The daily briefing is due: compose the user's morning briefing now from "
@@ -293,6 +307,20 @@ def gather_situation(
             line = f"  - {item.topic} @ {format_when(settings, item.due)} (id {item.id})"
             info.append(line + (f" — {item.context}" if item.context else ""))
 
+    # Triage accountability: what you already did to the mailbox, so a wake
+    # never re-archives, re-labels, or re-drafts what an earlier one handled.
+    if settings.enable_email and settings.email_triage_max_actions > 0:
+        try:
+            from .mail import audit as mail_audit
+
+            actions = mail_audit.recent(settings, limit=5, actor="heartbeat")
+        except Exception:
+            logger.exception("heartbeat: reading the mail audit ledger failed")
+            actions = []
+        if actions:
+            info.append("Mailbox actions you took on recent wakes (do not redo them):")
+            info += [f"  - {row['detail']}" for row in actions]
+
     return Situation(triggers=triggers, followups=due, info=info)
 
 
@@ -396,6 +424,12 @@ def _compose(settings: Settings, situation: Situation, agent) -> str:
     if summary:
         prefix.append(SystemMessage(content="Latest conversation so far:\n" + summary))
     prefix.append(SystemMessage(content=_INSTRUCTION))
+    if settings.enable_email and settings.email_triage_max_actions > 0:
+        prefix.append(
+            SystemMessage(
+                content=_TRIAGE_INSTRUCTION.format(n=settings.email_triage_max_actions)
+            )
+        )
 
     ctx = ToolContext(settings=settings, thread_id="", batch_id=uuid.uuid4().hex)
     messages: list[BaseMessage] = [HumanMessage(content=situation.report())]

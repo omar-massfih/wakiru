@@ -26,9 +26,10 @@ Telegram bot  /
   path (in the background), not as a graph node.
 - **`tools.py`** — the tool registry the model acts through: calendar
   (create/reschedule/cancel/skip/move), tasks (add/complete/update/remove), memory
-  (remember/forget/search), document search, and email (list/read/draft; `send_email` exists
-  only when `ENABLE_EMAIL_SEND` is on). Each tool wraps a guarded write path, so ambiguity
-  guards, conflict notes, and the undo ledger all apply.
+  (remember/forget/search), document search, and email (list/read/draft, threaded replies,
+  archive, mark read, label; `send_email`/`send_reply` exist only when `ENABLE_EMAIL_SEND`
+  is on). Each tool wraps a guarded write path, so ambiguity guards, conflict notes, and
+  the undo ledger all apply.
 - **`chat.py`** — the channel-agnostic core: one turn of conversation plus its
   post-reply upkeep (memory learning, summary folding, consolidation), shared by
   every channel so they all behave identically. Calendar/task writes happen through
@@ -46,8 +47,12 @@ Telegram bot  /
   write about X" works), and a whole document can be summarized on demand.
 - **`mail/`** — the only subsystem that talks to an external service, and the only one
   **off by default** (`ENABLE_EMAIL`). Stdlib IMAP/SMTP with XOAUTH2 or an app password.
-  Reads use `BODY.PEEK` (never marks your mail read) and are surfaced on request only,
-  not injected each turn. Drafting is the default write; **sending** needs a second,
+  Reads use `BODY.PEEK` (never marks your mail read — that is its own deliberate tool) and
+  are surfaced on request only, not injected each turn. The assistant can also *manage* the
+  mailbox: threaded replies (drafted by default), archive (recoverable — Gmail keeps the
+  message in All Mail), mark read/unread, and labels; every mutation lands in an audit
+  ledger (`mail.db`). The background heartbeat can triage the inbox too, but only when
+  `EMAIL_TRIAGE_MAX_ACTIONS` opts in, capped per wake — and **sending** needs a second,
   independent switch (`ENABLE_EMAIL_SEND`) and never happens in the background.
 - **`telegram.py`** — the Telegram channel (see below): a stdlib-only long-polling
   bridge started alongside the server when a bot token is configured. Everything goes to

@@ -82,6 +82,79 @@ def test_email_tools_appear_without_send_unless_gated() -> None:
     assert "send_email" in gated
 
 
+def test_email_manage_tools_and_send_reply_gating() -> None:
+    names = {s.name for s in available_tools(Settings(enable_email=True))}
+    assert {"reply_email", "archive_email", "mark_email_read", "label_email"} <= names
+    assert "send_reply" not in names  # second switch off, like send_email
+
+    gated = {
+        s.name
+        for s in available_tools(Settings(enable_email=True, enable_email_send=True))
+    }
+    assert "send_reply" in gated
+
+
+def test_heartbeat_registry_never_sends_and_gates_triage() -> None:
+    enabled = Settings(enable_email=True, enable_email_send=True)
+    beat = {s.name for s in available_tools(enabled, mode="heartbeat")}
+    assert "send_email" not in beat and "send_reply" not in beat
+    # Triage off (the default): the mutating mail tools are structurally
+    # absent too — the background stays read-only.
+    assert not beat & {"reply_email", "archive_email", "mark_email_read", "label_email"}
+    assert {"list_email", "read_email"} <= beat
+
+    triage = enabled.model_copy(update={"email_triage_max_actions": 2})
+    beat = {s.name for s in available_tools(triage, mode="heartbeat")}
+    assert {"reply_email", "archive_email", "mark_email_read", "label_email"} <= beat
+    assert "send_email" not in beat and "send_reply" not in beat  # still never
+
+
+def test_heartbeat_triage_budget_caps_mutations(settings, monkeypatch) -> None:
+    triage = settings.model_copy(
+        update={
+            "enable_email": True,
+            "email_address": "me@example.com",
+            "email_triage_max_actions": 2,
+        }
+    )
+    monkeypatch.setattr(
+        "assistant.mail.client.archive_message",
+        lambda s, uid: f"archived: “x” (uid {uid})",
+    )
+    specs = {s.name: s for s in available_tools(triage, mode="heartbeat")}
+    ctx = ToolContext(settings=triage, thread_id="")  # a wake has no thread
+
+    assert "archived" in execute_tool(specs["archive_email"], ctx, {"uid": "1"})
+    assert "archived" in execute_tool(specs["archive_email"], ctx, {"uid": "2"})
+    third = execute_tool(specs["archive_email"], ctx, {"uid": "3"})
+    assert "budget" in third and "archived" not in third
+
+    # Both mutations were audited under the heartbeat actor.
+    from assistant.mail import audit
+
+    assert len(audit.recent(triage, actor="heartbeat")) == 2
+
+
+def test_heartbeat_triage_misses_do_not_consume_budget(settings, monkeypatch) -> None:
+    triage = settings.model_copy(
+        update={
+            "enable_email": True,
+            "email_address": "me@example.com",
+            "email_triage_max_actions": 1,
+        }
+    )
+    results = iter(["No message with uid 9.", "archived: “x”"])
+    monkeypatch.setattr(
+        "assistant.mail.client.archive_message", lambda s, uid: next(results)
+    )
+    specs = {s.name: s for s in available_tools(triage, mode="heartbeat")}
+    ctx = ToolContext(settings=triage, thread_id="")
+
+    assert "No message" in execute_tool(specs["archive_email"], ctx, {"uid": "9"})
+    # The miss didn't spend the single action — the real mutation still fits.
+    assert "archived" in execute_tool(specs["archive_email"], ctx, {"uid": "1"})
+
+
 def test_disabled_subsystems_drop_their_tools() -> None:
     names = {
         s.name

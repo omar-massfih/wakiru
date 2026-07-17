@@ -520,3 +520,48 @@ def test_forced_briefing_bypasses_time_gate_only(settings) -> None:
     scheduled = heartbeat.gather_situation(with_briefing, _at(with_briefing, "08:00"))
     assert scheduled is not None
     assert "daily briefing" not in scheduled.report().lower()
+
+
+# --- inbox triage on the wake --------------------------------------------------- #
+
+
+def _triage(settings: Settings) -> Settings:
+    return settings.model_copy(
+        update={
+            "enable_email": True,
+            "email_address": "me@example.com",
+            "email_triage_max_actions": 3,
+        }
+    )
+
+
+def test_situation_report_surfaces_own_recent_mailbox_actions(settings) -> None:
+    triage = _triage(settings)
+    from assistant.mail import audit
+
+    audit.record(triage, "heartbeat", "archive", "5", "archived: “Newsletter” from x")
+    audit.record(triage, "chat:t1", "label", "6", "labeled 'Other': “Reply” from y")
+
+    report = heartbeat.gather_situation(triage).report()
+    assert "Mailbox actions you took on recent wakes" in report
+    assert "archived: “Newsletter” from x" in report
+    # Chat-side actions are the user's business, not the wake's memory.
+    assert "labeled 'Other'" not in report
+
+
+def test_no_triage_means_no_mailbox_lines(settings) -> None:
+    report = heartbeat.gather_situation(settings).report()
+    assert "Mailbox actions" not in report
+
+
+def test_triage_instruction_rides_only_when_opted_in(settings, monkeypatch) -> None:
+    model = _wire_model(monkeypatch, [AIMessage(content="SILENT")])
+    heartbeat.run_heartbeat(settings)
+    joined = "\n".join(str(m.content) for m in model.prompts[0])
+    assert "Inbox triage" not in joined
+
+    model = _wire_model(monkeypatch, [AIMessage(content="SILENT")])
+    heartbeat.run_heartbeat(_triage(settings))
+    joined = "\n".join(str(m.content) for m in model.prompts[0])
+    assert "Inbox triage" in joined and "at most 3" in joined
+    assert "drafts only" in joined  # the no-send rule is restated to the model
