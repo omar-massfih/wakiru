@@ -203,10 +203,12 @@ def test_heartbeat_mode_never_offers_send_email(tmp_path) -> None:
     # latest write it could revert.
     assert "undo" in chat_names and "undo" not in heartbeat_names
     # Heartbeat mode drops the send tools and undo, drops the mutating mail
-    # tools while triage is not opted in (email_triage_max_actions = 0), and
-    # adds its own set_next_wake.
+    # tools while triage is not opted in (email_triage_max_actions = 0), drops
+    # the chat-only doc actions (ingest/summarize spend tokens and grow docs.db),
+    # and adds its own set_next_wake.
     assert "set_next_wake" in heartbeat_names and "set_next_wake" not in chat_names
     triage_only = {"reply_email", "archive_email", "mark_email_read", "label_email"}
+    chat_only_docs = {"ingest_attachment", "summarize_document"}
     assert heartbeat_names == (
-        chat_names - {"send_email", "send_reply", "undo"} - triage_only
+        chat_names - {"send_email", "send_reply", "undo"} - triage_only - chat_only_docs
     ) | {"set_next_wake"}

@@ -23,11 +23,12 @@ import imaplib
 import logging
 import re
 import smtplib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from email import message_from_bytes
 from email.header import decode_header, make_header
 from email.message import EmailMessage
+from email.message import Message as MimePart
 from email.utils import getaddresses, make_msgid, parseaddr
 
 from ..config import Settings
@@ -40,7 +41,8 @@ _TIMEOUT_SECONDS = 20
 
 @dataclass
 class Message:
-    """One mailbox message. ``body`` is populated only by :func:`read_message`."""
+    """One mailbox message. ``body`` and ``attachments`` (filenames) are
+    populated only by :func:`read_message`."""
 
     uid: str
     sender: str
@@ -48,6 +50,7 @@ class Message:
     date: str
     unread: bool = False
     body: str = ""
+    attachments: list[str] = field(default_factory=list)
 
 
 class MailDisabledError(RuntimeError):
@@ -147,15 +150,86 @@ def read_message(settings: Settings, uid: str) -> Message | None:
         if not fetched or not isinstance(fetched[0], tuple):
             return None
         parsed = message_from_bytes(fetched[0][1])
-        return Message(
-            uid=uid,
-            sender=_decode(parsed.get("From")),
-            subject=_decode(parsed.get("Subject")),
-            date=_decode(parsed.get("Date")),
-            body=_plain_text_body(parsed),
-        )
+        return _parse_message(uid, parsed)
     finally:
         _close(conn)
+
+
+def _parse_message(uid: str, parsed) -> Message:
+    """A full :class:`Message` (body + attachment names) from a parsed fetch."""
+    return Message(
+        uid=uid,
+        sender=_decode(parsed.get("From")),
+        subject=_decode(parsed.get("Subject")),
+        date=_decode(parsed.get("Date")),
+        body=_plain_text_body(parsed),
+        attachments=[name for name, _ in _attachment_parts(parsed)],
+    )
+
+
+def _attachment_parts(parsed) -> list[tuple[str, MimePart]]:
+    """(decoded filename, part) for every part carrying a filename — the
+    standard attachment signal (named inline parts count too; they are just as
+    ingestable)."""
+    return [
+        (_decode(filename), part)
+        for part in parsed.walk()
+        if (filename := part.get_filename())
+    ]
+
+
+def read_with_attachment(
+    settings: Settings, uid: str, name: str = ""
+) -> tuple[Message | None, tuple[str, bytes] | None]:
+    """One fetch, two answers: the message (as :func:`read_message`) and one
+    resolved attachment's ``(filename, content)``.
+
+    ``name`` matches the filename case-insensitively — a *unique* exact match
+    first, then a *unique* substring; an empty ``name`` means the message's
+    only attachment. The attachment half is ``None`` when nothing matches
+    unambiguously (the caller can name the options from
+    :attr:`Message.attachments`). One ``BODY.PEEK[]`` round-trip serves both —
+    the message can't change between "list the attachments" and "take this
+    one", and reading stays unread. The whole message is buffered either way
+    (imaplib offers no partial fetch worth the BODYSTRUCTURE gymnastics), so
+    any size cap is the caller's to apply to the returned bytes.
+    """
+    conn = imap_connect(settings)
+    try:
+        conn.select("INBOX", readonly=True)
+        _, fetched = conn.uid("FETCH", uid, "(BODY.PEEK[])")
+        if not fetched or not isinstance(fetched[0], tuple):
+            return None, None
+        parsed = message_from_bytes(fetched[0][1])
+    finally:
+        _close(conn)
+    parts = _attachment_parts(parsed)
+    message = _parse_message(uid, parsed)
+    needle = name.strip().lower()
+    if not needle:
+        matches = parts if len(parts) == 1 else []
+    else:
+        exact = [(f, p) for f, p in parts if f.lower() == needle]
+        if exact:
+            # Two parts with the same filename stay ambiguous — never pick one
+            # silently.
+            matches = exact if len(exact) == 1 else []
+        else:
+            substring = [(f, p) for f, p in parts if needle in f.lower()]
+            matches = substring if len(substring) == 1 else []
+    if not matches:
+        return message, None
+    filename, part = matches[0]
+    payload = part.get_payload(decode=True)
+    return message, (filename, payload if isinstance(payload, bytes) else b"")
+
+
+def fetch_attachment(
+    settings: Settings, uid: str, name: str = ""
+) -> tuple[str, bytes] | None:
+    """Just the attachment half of :func:`read_with_attachment`."""
+    _, attachment = read_with_attachment(settings, uid, name)
+    return attachment
 
 
 def _plain_text_body(parsed) -> str:

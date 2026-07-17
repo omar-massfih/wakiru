@@ -674,6 +674,7 @@ def email_read(uid: str) -> dict:
         "subject": message.subject,
         "date": message.date,
         "body": message.body,
+        "attachments": message.attachments,
     }
 
 

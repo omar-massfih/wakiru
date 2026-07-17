@@ -195,6 +195,168 @@ def test_unread_summary_handles_mailbox_error(settings, monkeypatch) -> None:
     assert "Couldn't reach your mailbox" in context.unread_summary(settings)
 
 
+# --- attachments -------------------------------------------------------------- #
+
+
+def _raw_with_attachments(*files: tuple[str, bytes]) -> bytes:
+    message = EmailMessage()
+    message["From"] = "Alice <a@x.com>"
+    message["Subject"] = "Report attached"
+    message["Date"] = "Mon, 1 Jan 2026 09:00:00 +0000"
+    message.set_content("see attached")
+    for filename, content in files:
+        message.add_attachment(
+            content, maintype="application", subtype="octet-stream", filename=filename
+        )
+    return message.as_bytes()
+
+
+def test_read_message_lists_attachment_names(settings, monkeypatch) -> None:
+    raw = _raw_with_attachments(("report.pdf", b"x"), ("notes.txt", b"y"))
+    monkeypatch.setattr(client, "imap_connect", lambda s: _FakeIMAP(raw={"7": raw}))
+    message = client.read_message(settings, "7")
+    assert message.attachments == ["report.pdf", "notes.txt"]
+    assert "see attached" in message.body  # attachment parts never leak into body
+
+
+def test_fetch_attachment_only_one_needs_no_name(settings, monkeypatch) -> None:
+    raw = _raw_with_attachments(("report.pdf", b"pdf-bytes"))
+    fake = _FakeIMAP(raw={"7": raw})
+    monkeypatch.setattr(client, "imap_connect", lambda s: fake)
+    filename, content = client.fetch_attachment(settings, "7")
+    assert (filename, content) == ("report.pdf", b"pdf-bytes")
+    # Fetching an attachment must never mark the message read.
+    assert ("select", "INBOX", True) in fake.commands
+    assert any("BODY.PEEK" in str(c) for c in fake.commands)
+
+
+def test_fetch_attachment_by_substring(settings, monkeypatch) -> None:
+    raw = _raw_with_attachments(("Q3 Report.pdf", b"pdf"), ("notes.txt", b"txt"))
+    monkeypatch.setattr(client, "imap_connect", lambda s: _FakeIMAP(raw={"7": raw}))
+    filename, content = client.fetch_attachment(settings, "7", "report")
+    assert (filename, content) == ("Q3 Report.pdf", b"pdf")
+
+
+def test_fetch_attachment_refuses_ambiguity(settings, monkeypatch) -> None:
+    raw = _raw_with_attachments(("a-report.pdf", b"1"), ("b-report.pdf", b"2"))
+    monkeypatch.setattr(client, "imap_connect", lambda s: _FakeIMAP(raw={"7": raw}))
+    assert client.fetch_attachment(settings, "7") is None  # two, no name given
+    assert client.fetch_attachment(settings, "7", "report") is None  # matches both
+    assert client.fetch_attachment(settings, "7", "a-report.pdf") is not None
+
+
+def test_fetch_attachment_refuses_duplicate_exact_names(settings, monkeypatch) -> None:
+    raw = _raw_with_attachments(("image.png", b"1"), ("image.png", b"2"))
+    monkeypatch.setattr(client, "imap_connect", lambda s: _FakeIMAP(raw={"7": raw}))
+    # Never silently pick one of two identically-named parts.
+    assert client.fetch_attachment(settings, "7", "image.png") is None
+
+
+def test_read_with_attachment_is_one_fetch(settings, monkeypatch) -> None:
+    raw = _raw_with_attachments(("report.pdf", b"pdf"))
+    fake = _FakeIMAP(raw={"7": raw})
+    monkeypatch.setattr(client, "imap_connect", lambda s: fake)
+    message, attachment = client.read_with_attachment(settings, "7")
+    assert message.attachments == ["report.pdf"]
+    assert attachment == ("report.pdf", b"pdf")
+    assert len([c for c in fake.commands if c[1] == "FETCH"]) == 1
+
+
+def _fake_embed(texts, prefix: str = "", settings=None):
+    """Deterministic bag-of-words embedder (see test_docs.py) at dim 64."""
+    import math
+    import re as re_mod
+    import zlib
+
+    vecs = []
+    for text in texts:
+        v = [0.0] * 64
+        for word in re_mod.findall(r"[a-z0-9]+", text.lower()):
+            v[zlib.crc32(word.encode()) % 64] += 1.0
+        norm = math.sqrt(sum(x * x for x in v)) or 1.0
+        vecs.append([x / norm for x in v])
+    return vecs
+
+
+def test_ingest_attachment_tool_lands_in_docs(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr("assistant.memory.embeddings._embed", _fake_embed)
+    s = Settings(
+        memory_dir=str(tmp_path / "memory"),
+        enable_email=True,
+        email_address="me@example.com",
+        email_auth="password",
+        email_password="app-password",
+        enable_docs=True,
+        docs_min_similarity=0.1,
+    )
+    raw = _raw_with_attachments(("notes.txt", b"quarterly revenue grew nicely"))
+    monkeypatch.setattr(client, "imap_connect", lambda _s: _FakeIMAP(raw={"7": raw}))
+
+    from assistant.docs import store as docs_store
+    from assistant.tools import ToolContext, tool_map
+
+    spec = tool_map(s)["ingest_attachment"]
+    result = spec.run(ToolContext(settings=s), uid="7")
+    assert "Ingested notes.txt" in result
+    docs = docs_store.list_documents(s)
+    assert len(docs) == 1 and "email from Alice" in docs[0].title
+    chunks = docs_store.search_chunks(s, "quarterly revenue")
+    assert chunks and "revenue" in chunks[0].text
+    # Re-ingesting the same attachment is refused, not duplicated.
+    again = spec.run(ToolContext(settings=s), uid="7")
+    assert "already ingested" in again
+    assert len(docs_store.list_documents(s)) == 1
+
+
+def test_ingest_attachment_tool_absent_without_docs(tmp_path) -> None:
+    from assistant.tools import tool_map
+
+    s = Settings(
+        memory_dir=str(tmp_path / "memory"),
+        enable_email=True,
+        email_address="me@example.com",
+        email_auth="password",
+        email_password="app-password",
+        enable_docs=False,
+    )
+    assert "ingest_attachment" not in tool_map(s)
+
+
+def test_ingest_attachment_tool_names_options_on_ambiguity(tmp_path, monkeypatch) -> None:
+    raw = _raw_with_attachments(("a.pdf", b"1"), ("b.pdf", b"2"))
+    monkeypatch.setattr(client, "imap_connect", lambda _s: _FakeIMAP(raw={"7": raw}))
+    s = Settings(
+        memory_dir=str(tmp_path / "memory"),
+        enable_email=True,
+        email_address="me@example.com",
+        email_auth="password",
+        email_password="app-password",
+        enable_docs=True,
+    )
+    from assistant.tools import ToolContext, tool_map
+
+    result = tool_map(s)["ingest_attachment"].run(ToolContext(settings=s), uid="7")
+    assert "name one of" in result and "a.pdf" in result and "b.pdf" in result
+
+
+def test_ingest_and_summarize_are_chat_only(tmp_path) -> None:
+    from assistant.tools import available_tools
+
+    s = Settings(
+        memory_dir=str(tmp_path / "memory"),
+        enable_email=True,
+        email_address="me@example.com",
+        email_auth="password",
+        email_password="app-password",
+        enable_docs=True,
+        enable_heartbeat=True,
+    )
+    beat = {spec.name for spec in available_tools(s, mode="heartbeat")}
+    assert "ingest_attachment" not in beat and "summarize_document" not in beat
+    chat = {spec.name for spec in available_tools(s)}
+    assert {"ingest_attachment", "summarize_document"} <= chat
+
+
 # --- draft (the default write) ---------------------------------------------- #
 
 

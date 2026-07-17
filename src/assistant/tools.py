@@ -417,6 +417,31 @@ def _search_documents(ctx: ToolContext, query: str) -> str:
     return "\n\n".join(f"From “{c.doc_title}”:\n{c.text}" for c in chunks)
 
 
+def _summarize_document(ctx: ToolContext, target: str) -> str:
+    from .docs import store as docs_store
+    from .docs import summarize as docs_summarize
+
+    target = str(target).strip()
+    doc = docs_store.get_document(ctx.settings, target)
+    if doc is None:
+        # Fall back to a unique case-insensitive title-substring match, so the
+        # model can summarize straight from a search result's title.
+        needle = target.lower()
+        matches = [
+            d for d in docs_store.list_documents(ctx.settings)
+            if needle and needle in d.title.lower()
+        ]
+        if len(matches) != 1:
+            titles = ", ".join(f"“{d.title}”" for d in matches)
+            return (
+                f"Ambiguous document — matches: {titles}." if matches
+                else f"No document matching {target!r}."
+            )
+        doc = matches[0]
+    summary = docs_summarize.summarize_document(ctx.settings, doc.id)
+    return summary or f"Could not summarize “{doc.title}”."
+
+
 def _docs_tools() -> list[ToolSpec]:
     return [
         ToolSpec(
@@ -424,6 +449,16 @@ def _docs_tools() -> list[ToolSpec]:
             "Search the user's ingested documents and notes for relevant passages.",
             _params({"query": ("string", "What to look for")}, ["query"]),
             _search_documents,
+        ),
+        ToolSpec(
+            "summarize_document",
+            "Summarize one ingested document as a whole (search_documents only "
+            "returns passages).",
+            _params(
+                {"target": ("string", "Document id, or a distinctive part of its title")},
+                ["target"],
+            ),
+            _summarize_document,
         ),
     ]
 
@@ -450,9 +485,12 @@ def _read_email(ctx: ToolContext, uid: str) -> str:
     message = mail_client.read_message(ctx.settings, str(uid))
     if message is None:
         return f"No message with uid {uid}."
+    attachments = (
+        f"Attachments: {', '.join(message.attachments)}\n" if message.attachments else ""
+    )
     return (
         f"From: {message.sender}\nSubject: {message.subject}\n"
-        f"Date: {message.date}\n\n{message.body}"
+        f"Date: {message.date}\n{attachments}\n{message.body}"
     )
 
 
@@ -466,6 +504,50 @@ def _send_email(ctx: ToolContext, to: str, subject: str, body: str) -> str:
     from .mail import client as mail_client
 
     return mail_client.send_message(ctx.settings, str(to), str(subject), str(body))
+
+
+def _ingest_attachment(ctx: ToolContext, uid: str, name: str = "") -> str:
+    from .docs import extract as docs_extract
+    from .docs import store as docs_store
+    from .mail import client as mail_client
+
+    message, fetched = mail_client.read_with_attachment(
+        ctx.settings, str(uid), str(name or "")
+    )
+    if message is None:
+        return f"No message with uid {uid}."
+    if fetched is None:
+        if not message.attachments:
+            return "That message has no attachments."
+        return (
+            "Couldn't pin down one attachment — name one of: "
+            + ", ".join(message.attachments)
+        )
+    filename, content = fetched
+    limit = ctx.settings.docs_upload_max_bytes
+    if len(content) > limit:
+        return f"{filename} exceeds the {limit}-byte ingest limit."
+    # Subject in the title keys the dedupe to this message, so re-ingesting the
+    # same attachment is refused while a later email with an updated file of
+    # the same name is not.
+    title = f"{filename} — {message.subject} — email from {message.sender}"
+    existing = [
+        d for d in docs_store.list_documents(ctx.settings) if d.title == title
+    ]
+    if existing:
+        return (
+            f"{filename} from that email is already ingested as document "
+            f"{existing[0].id} (“{title}”)."
+        )
+    try:
+        text = docs_extract.extract_text(filename, content)
+    except docs_extract.ExtractionError as exc:
+        return f"Could not extract text from {filename}: {exc}"
+    doc = docs_store.add_document(ctx.settings, title, text)
+    return (
+        f"Ingested {filename} as document {doc.id} (“{title}”). Its content is "
+        "now searchable with search_documents; summarize_document gives an overview."
+    )
 
 
 def _mail_mutated(result: str) -> bool:
@@ -625,6 +707,27 @@ def _email_tools(settings: Settings) -> list[ToolSpec]:
             _label_email,
         ),
     ]
+    if settings.enable_docs:
+        tools.append(
+            ToolSpec(
+                "ingest_attachment",
+                "Ingest an email attachment (PDF, DOCX, or text-like) into the "
+                "user's documents so it becomes searchable and summarizable. "
+                "Never marks the message read.",
+                _params(
+                    {
+                        "uid": ("string", "Message uid from list_email"),
+                        "name": (
+                            "string",
+                            "Attachment filename (needed only when the message"
+                            " has several)",
+                        ),
+                    },
+                    ["uid"],
+                ),
+                _ingest_attachment,
+            )
+        )
     if settings.enable_email_send:
         tools.append(
             ToolSpec(
@@ -1246,12 +1349,17 @@ def available_tools(settings: Settings, mode: str = "chat") -> list[ToolSpec]:
         tools += _watch_tools()
     if mode == "heartbeat":
         # set_next_wake is background-only: in chat, "wake me before X" is a
-        # follow-up. The send exclusion is untouched below it.
+        # follow-up. The send exclusion is untouched below it. Ingest and
+        # whole-document summarize stay chat-only too: a background wake should
+        # not grow docs.db or spend a map-reduce of LLM calls unprompted.
         tools += _wake_tools()
         tools = [
             spec
             for spec in tools
-            if spec.name not in ("send_email", "send_reply", "undo")
+            if spec.name not in (
+                "send_email", "send_reply", "undo",
+                "ingest_attachment", "summarize_document",
+            )
         ]
         if settings.email_triage_max_actions > 0:
             budget = {"n": settings.email_triage_max_actions}

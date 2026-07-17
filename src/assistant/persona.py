@@ -114,7 +114,8 @@ _DOCS = """\
 Documents:
 - The user's ingested documents and notes are searchable with
   `search_documents` (the most relevant passages also ride in automatically) —
-  use it for "what did I write about …" questions."""
+  use it for "what did I write about …" questions; `summarize_document`
+  digests one document whole."""
 
 _EMAIL = """\
 Email:
@@ -129,6 +130,11 @@ Email:
 - A block headed "Unread mail (snapshot as of …)" may ride in each turn; it is
   a cached snapshot, possibly minutes old — use the email tools when the user
   needs the live mailbox."""
+
+_EMAIL_ATTACH = """\
+- `read_email` lists a message's attachments; `ingest_attachment` pulls one
+  into the user's documents (so "summarize the attachment" is ingest, then
+  `summarize_document`)."""
 
 _EMAIL_SEND = """\
 - Sending (`send_email`, `send_reply`) is allowed ONLY after the user
@@ -196,6 +202,8 @@ def system_prompt(settings: Settings) -> str:
         parts.append(_DOCS)
     if settings.enable_email:
         email = _EMAIL
+        if settings.enable_docs:
+            email += "\n" + _EMAIL_ATTACH
         if settings.enable_email_send:
             email += "\n" + _EMAIL_SEND
         parts.append(email)
