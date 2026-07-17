@@ -26,7 +26,8 @@ Telegram bot  /
   path (in the background), not as a graph node.
 - **`tools.py`** — the tool registry the model acts through: calendar
   (create/reschedule/cancel/skip/move), tasks (add/complete/update/remove), memory
-  (remember/forget/search), document search + whole-document summarize, and email
+  (remember/forget/search), document search + whole-document summarize, web
+  (`read_url`/`ingest_url` when `ENABLE_DOCS_URL_INGEST` is on), and email
   (list/read/draft, threaded replies, archive, mark read, label, attachment ingestion
   into documents; `send_email`/`send_reply` exist only when `ENABLE_EMAIL_SEND`
   is on). Each tool wraps a guarded write path, so ambiguity guards, conflict notes, and
