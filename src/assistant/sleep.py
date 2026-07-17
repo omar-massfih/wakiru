@@ -154,12 +154,23 @@ def run_sleep(
     if include_llm:
         _state_set(settings, "last_llm_pass_at", local_date)
 
+    # Reflection rides the same nightly pass: review how the day's proactive
+    # behavior landed. Best-effort — a failed review must not fail the sleep.
+    try:
+        from .reflect import run_reflection
+
+        reflection = run_reflection(settings, current)
+    except Exception:
+        logger.exception("sleep: the reflection pass failed")
+        reflection = {"ran": False, "reason": "failed"}
+
     result = {
         "ran": True,
         "date": local_date,
         "folded": folded,
         "llm": include_llm,
         "consolidation": consolidation,
+        "reflection": reflection,
     }
     logger.info("sleep pass: %s", result)
     return result

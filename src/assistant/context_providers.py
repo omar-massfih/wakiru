@@ -90,6 +90,35 @@ def _mail(ctx: TurnContext) -> str:
     return current(ctx.settings)
 
 
+def _goals(ctx: TurnContext) -> str:
+    """The standing goals the assistant carries — the same intentions the
+    heartbeat advances, so a chat turn about one picks up its working state
+    and the user can steer or drop it."""
+    from . import goals
+    from .calendar.context import format_when
+
+    open_items = goals.list_open(ctx.settings)
+    if not open_items:
+        return ""
+    lines = [
+        "## Your standing goals",
+        "Ongoing projects you are advancing in the background. If the "
+        "conversation touches one, use its state; record progress or changes "
+        "of direction with update_goal, and close_goal when it is finished "
+        "or the user drops it.",
+    ]
+    for goal in open_items:
+        when = (
+            f" — next step {format_when(ctx.settings, goal.next_action_at)}"
+            if goal.next_action_at
+            else " — parked"
+        )
+        lines.append(f"- {goal.title}{when} (id {goal.id})")
+        if goal.state:
+            lines.append(f"  state: {goal.state}")
+    return "\n".join(lines)
+
+
 def default_providers() -> list[ContextProvider]:
     """The standard registry, in prompt order."""
     return [
@@ -97,6 +126,7 @@ def default_providers() -> list[ContextProvider]:
         ContextProvider("profile", lambda s: s.enable_profile, _profile),
         ContextProvider("agenda", lambda s: s.enable_calendar, _agenda),
         ContextProvider("tasks", lambda s: s.enable_tasks, _tasks),
+        ContextProvider("goals", lambda s: s.enable_heartbeat, _goals),
         ContextProvider(
             "mail", lambda s: s.enable_email and s.email_snapshot_minutes > 0, _mail
         ),

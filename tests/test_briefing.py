@@ -37,7 +37,7 @@ def _compose_fallback(monkeypatch) -> None:
 def delivered(monkeypatch) -> list[dict]:
     sent: list[dict] = []
     monkeypatch.setattr(
-        briefing, "deliver_reminder", lambda s, reminder: sent.append(reminder) or True
+        briefing, "deliver_reminder", lambda s, reminder, **kw: sent.append(reminder) or True
     )
     return sent
 

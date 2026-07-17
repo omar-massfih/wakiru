@@ -210,7 +210,7 @@ def test_message_is_delivered_and_looped_in(settings, monkeypatch) -> None:
     delivered: list[dict] = []
     recorded: list[str] = []
     monkeypatch.setattr(
-        "assistant.notify.deliver_reminder", lambda s, r: delivered.append(r) or True
+        "assistant.notify.deliver_reminder", lambda s, r, **kw: delivered.append(r) or True
     )
     monkeypatch.setattr(
         "assistant.proactive.record_push", lambda agent, s, text: recorded.append(text)
@@ -241,7 +241,7 @@ def test_ambient_push_delivers_once_the_gap_has_passed(settings, monkeypatch) ->
     _wire_model(monkeypatch, [AIMessage(content="Tenkte på deg!")])
     delivered: list[dict] = []
     monkeypatch.setattr(
-        "assistant.notify.deliver_reminder", lambda s, r: delivered.append(r) or True
+        "assistant.notify.deliver_reminder", lambda s, r, **kw: delivered.append(r) or True
     )
     old = now(settings) - timedelta(minutes=settings.heartbeat_min_gap_minutes + 1)
     heartbeat._state_set(settings, "last_push_at", old.isoformat(timespec="seconds"))
@@ -254,7 +254,7 @@ def test_scheduled_intent_delivers_regardless_of_gap(settings, monkeypatch) -> N
     _wire_model(monkeypatch, [AIMessage(content="Hvordan gikk intervjuet?")])
     delivered: list[dict] = []
     monkeypatch.setattr(
-        "assistant.notify.deliver_reminder", lambda s, r: delivered.append(r) or True
+        "assistant.notify.deliver_reminder", lambda s, r, **kw: delivered.append(r) or True
     )
     heartbeat._state_set(
         settings, "last_push_at", now(settings).isoformat(timespec="seconds")
@@ -267,7 +267,7 @@ def test_force_bypasses_the_ambient_throttle(settings, monkeypatch) -> None:
     _wire_model(monkeypatch, [AIMessage(content="Tenkte på deg!")])
     delivered: list[dict] = []
     monkeypatch.setattr(
-        "assistant.notify.deliver_reminder", lambda s, r: delivered.append(r) or True
+        "assistant.notify.deliver_reminder", lambda s, r, **kw: delivered.append(r) or True
     )
     heartbeat._state_set(
         settings, "last_push_at", now(settings).isoformat(timespec="seconds")
@@ -498,7 +498,7 @@ def test_briefing_ledger_is_shared_with_template_path(settings, monkeypatch) -> 
     with_briefing = settings.model_copy(
         update={"enable_briefing": True, "enable_heartbeat": False}
     )
-    monkeypatch.setattr(briefing, "deliver_reminder", lambda s, r: True)
+    monkeypatch.setattr(briefing, "deliver_reminder", lambda s, r, **kw: True)
     monkeypatch.setattr(briefing, "now", lambda s: _at(with_briefing, "08:00"))
     monkeypatch.setattr(
         "assistant.compose.compose_push", lambda s, **kw: kw["fallback"]

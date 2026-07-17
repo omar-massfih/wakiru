@@ -44,7 +44,7 @@ from langchain_core.messages import (
     ToolMessage,
 )
 
-from . import followups, persona, threads
+from . import followups, goals, persona, threads, watches
 from .calendar.context import now
 from .calendar.store import parse_dt
 from .config import Settings, get_settings, postgres_backend
@@ -104,23 +104,41 @@ class Situation:
 
     triggers: list[str]
     followups: list[Followup] = field(default_factory=list)
+    goals: list = field(default_factory=list)  # ready Goals — raised, not claimed
+    watch_hits: list[str] = field(default_factory=list)  # fired watch trigger lines
     info: list[str] = field(default_factory=list)
 
     @property
     def scheduled(self) -> bool:
-        """Explicit intent (a due follow-up or the briefing) vs a purely
-        ambient wake — scheduled intent is exempt from the delivery throttle."""
-        return bool(self.followups) or _BRIEFING_TRIGGER in self.triggers
+        """Explicit intent (a due follow-up, a goal's due next step, a fired
+        watch, or the briefing) vs a purely ambient wake — scheduled intent is
+        exempt from the delivery throttle: a set due time, ``next_action_at``,
+        or watch condition is deliberate."""
+        return (
+            bool(self.followups)
+            or bool(self.goals)
+            or bool(self.watch_hits)
+            or _BRIEFING_TRIGGER in self.triggers
+        )
 
     def report(self) -> str:
         lines = ["## Situation report (background wake)"]
         lines += [f"- {trigger}" for trigger in self.triggers]
+        lines += [f"- {hit}" for hit in self.watch_hits]
         for item in self.followups:
             lines.append(
                 f"- Due follow-up: {item.topic}"
                 + (f" — context: {item.context}" if item.context else "")
             )
-        if not self.triggers and not self.followups:
+        for goal in self.goals:
+            lines.append(
+                f"- Goal ready for its next step: {goal.title} (id {goal.id})"
+                + (f" — state: {goal.state}" if goal.state else "")
+                + " — advance it now with your tools, then update_goal with the"
+                " new state and next_action (or park it); working on a goal and"
+                " still answering SILENT is fine."
+            )
+        if not self.triggers and not self.followups and not self.goals and not self.watch_hits:
             lines.append(
                 "- Nothing specific happened since your last wake. Review your "
                 "context and decide; most such wakes should stay SILENT."
@@ -231,6 +249,18 @@ def next_wake_at(settings: Settings, current: datetime) -> datetime:
     # A soon-due open follow-up pulls the wake earlier — but never before the
     # floor, so a follow-up due "now" still can't busy-loop the model.
     due = [d for f in followups.list_open(settings) if (d := parse_dt(f.due)) is not None]
+    # A goal's next_action_at is the same kind of deliberate intent as a
+    # followup's due time, so it pulls the wake the same way — and so do a
+    # calendar-window watch's opening and a silence watch's deadline.
+    due += [
+        d
+        for g in goals.list_open(settings)
+        if (d := parse_dt(g.next_action_at)) is not None
+    ]
+    try:
+        due += watches.wake_times(settings, current)
+    except Exception:
+        logger.exception("computing watch wake times failed")
     if due:
         target = min(target, max(min(due), floor))
     return target
@@ -275,6 +305,21 @@ def gather_situation(
     if _briefing_due(settings, current, force=force_briefing):
         triggers.append(_BRIEFING_TRIGGER)
 
+    # Ready goals are raised, never claimed: the model moves next_action_at
+    # forward itself (update_goal). The raise-stamp KV keeps a goal the model
+    # ignored from re-raising on every short self-paced wake — it comes back
+    # once per base-cadence window, or immediately once the model touches it.
+    ready_goals = _raisable_goals(settings, current)
+
+    # Model-registered perception: evaluate every active watch (deterministic,
+    # token-free); a firing consumes the watch (one-shots) and hands the model
+    # back its own note-to-self.
+    try:
+        watch_hits = [line for _watch, line in watches.evaluate(settings, current)]
+    except Exception:
+        logger.exception("heartbeat: evaluating watches failed")
+        watch_hits = []
+
     # Ambient observations — information for the model's judgment, not gates.
     mail_line = _mail_changed(settings)
     if mail_line:
@@ -307,6 +352,28 @@ def gather_situation(
             line = f"  - {item.topic} @ {format_when(settings, item.due)} (id {item.id})"
             info.append(line + (f" — {item.context}" if item.context else ""))
 
+    # Active watches, so the model remembers what it is looking for and can
+    # prune ones overtaken by events (unwatch).
+    active_watches = watches.list_active(settings, current)
+    if active_watches:
+        info.append("Watches you have set (drop stale ones with unwatch):")
+        info += [
+            f"  - [{w.kind}] {w.pattern or 'user silence'}"
+            + (f" — {w.note}" if w.note else "")
+            + f" (id {w.id})"
+            for w in active_watches[:8]
+        ]
+
+    # Open goals already ride along via the goals context block; the report
+    # only nudges about ones the model has left untouched too long —
+    # surfaced for judgment, never auto-closed.
+    for goal in goals.stale(settings, current):
+        info.append(
+            f"Stale goal: {goal.title} (id {goal.id}) has not moved in "
+            f"{settings.goal_stale_days}+ days — advance it, reschedule its "
+            "next step, or close it as abandoned."
+        )
+
     # Triage accountability: what you already did to the mailbox, so a wake
     # never re-archives, re-labels, or re-drafts what an earlier one handled.
     if settings.enable_email and settings.email_triage_max_actions > 0:
@@ -321,7 +388,46 @@ def gather_situation(
             info.append("Mailbox actions you took on recent wakes (do not redo them):")
             info += [f"  - {row['detail']}" for row in actions]
 
-    return Situation(triggers=triggers, followups=due, info=info)
+    return Situation(
+        triggers=triggers,
+        followups=due,
+        goals=ready_goals,
+        watch_hits=watch_hits,
+        info=info,
+    )
+
+
+def _raisable_goals(settings: Settings, current: datetime) -> list:
+    """Ready goals worth raising this wake, with a per-goal raise stamp.
+
+    A goal the model advanced (``updated_at`` newer than the stamp) raises
+    immediately; one it ignored comes back only after a full base-cadence
+    window, so short self-paced wakes don't nag the same stuck goal.
+    """
+    window = timedelta(
+        minutes=settings.heartbeat_wake_max_minutes or max(settings.heartbeat_minutes, 1)
+    )
+    raisable = []
+    for goal in goals.ready(settings, current):
+        # The stamp remembers when the goal was last raised and the
+        # updated_at it had then: a different updated_at means the model
+        # touched it since, so it raises again right away.
+        raised_at_raw, _, seen_updated = _state_get(
+            settings, f"goal_raise:{goal.id}"
+        ).partition("|")
+        raised_at = parse_dt(raised_at_raw) if raised_at_raw else None
+        if (
+            raised_at is None
+            or goal.updated_at != seen_updated
+            or current - raised_at >= window
+        ):
+            _state_set(
+                settings,
+                f"goal_raise:{goal.id}",
+                f"{current.isoformat(timespec='seconds')}|{goal.updated_at}",
+            )
+            raisable.append(goal)
+    return raisable
 
 
 def _briefing_due(settings: Settings, current: datetime, force: bool = False) -> bool:
@@ -414,7 +520,10 @@ def _compose(settings: Settings, situation: Situation, agent) -> str:
     bound = model.bind_tools([spec.to_openai_tool() for spec in specs]) if specs else model
 
     query = " ".join(
-        [item.topic for item in situation.followups] + situation.triggers
+        [item.topic for item in situation.followups]
+        + [goal.title for goal in situation.goals]
+        + situation.triggers
+        + situation.watch_hits
     ) or "check in with the user"
     prefix: list[BaseMessage] = [persona.system_message(settings)]
     for _name, block in build_context(settings, query, "").items():
@@ -424,6 +533,22 @@ def _compose(settings: Settings, situation: Situation, agent) -> str:
     if summary:
         prefix.append(SystemMessage(content="Latest conversation so far:\n" + summary))
     prefix.append(SystemMessage(content=_INSTRUCTION))
+    # The freshest lessons the nightly reflection distilled about how this
+    # assistant's own proactivity lands — a guaranteed slot, not left to recall.
+    try:
+        from .reflect import self_notes
+
+        lessons = self_notes(settings, k=5)
+    except Exception:
+        logger.exception("heartbeat: reading reflection self-notes failed")
+        lessons = []
+    if lessons:
+        prefix.append(
+            SystemMessage(
+                content="What you have learned about your own proactivity:\n"
+                + "\n".join(f"- {note.body}" for note in lessons)
+            )
+        )
     if settings.enable_email and settings.email_triage_max_actions > 0:
         prefix.append(
             SystemMessage(
@@ -486,9 +611,12 @@ def run_heartbeat(
         situation.info.append(f"You scheduled this wake yourself: {reason}")
 
     _state_set(settings, "last_wake_at", current.isoformat(timespec="seconds"))
-    triggers = situation.triggers + [
-        f"followup: {item.topic}" for item in situation.followups
-    ]
+    triggers = (
+        situation.triggers
+        + situation.watch_hits
+        + [f"followup: {item.topic}" for item in situation.followups]
+        + [f"goal: {goal.title}" for goal in situation.goals]
+    )
     try:
         text = _compose(settings, situation, agent).strip()
     except Exception:
@@ -514,7 +642,9 @@ def run_heartbeat(
     from .notify import deliver_reminder
     from .proactive import record_push
 
-    delivered = deliver_reminder(settings, {"title": "Wakiru", "message": text})
+    delivered = deliver_reminder(
+        settings, {"title": "Wakiru", "message": text}, kind="heartbeat"
+    )
     if delivered:
         _state_set(settings, "last_push_at", current.isoformat(timespec="seconds"))
         record_push(agent, settings, text)

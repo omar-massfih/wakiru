@@ -81,6 +81,21 @@ def test_calendar_shape_lists_events(client) -> None:
     assert {"id", "title", "start", "end", "location", "notes"} <= event.keys()
 
 
+def test_goals_shape_lists_open_goals(client) -> None:
+    import assistant.api as api
+    from assistant import goals
+
+    c = client(None)
+    app_settings = api.get_settings()
+    goals.open_goal(app_settings, "Plan the Oslo trip", "step 1: dates")
+
+    body = c.get("/goals").json()
+    assert body["total"] == 1
+    goal = body["goals"][0]
+    assert goal["title"] == "Plan the Oslo trip"
+    assert {"id", "title", "state", "next_action_at", "created_at", "updated_at"} <= goal.keys()
+
+
 def test_tasks_shape_lists_open_and_all(client) -> None:
     import assistant.api as api
     from assistant.tasks import store as tstore

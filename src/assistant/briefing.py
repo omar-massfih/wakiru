@@ -135,7 +135,7 @@ def run_briefing(
         fallback=digest,
     )
     delivered = deliver_reminder(
-        settings, {"title": "Daily briefing", "message": message}
+        settings, {"title": "Daily briefing", "message": message}, kind="briefing"
     )
     if not delivered:
         # Claim stands even if no channel is configured — retrying every tick

@@ -111,12 +111,22 @@ def deliver_slack(settings: Settings, reminder: dict, channel: str | None = None
         return False
 
 
-def deliver_reminder(settings: Settings, reminder: dict) -> bool:
-    """Fan a reminder out to every configured channel; True if any delivered."""
+def deliver_reminder(settings: Settings, reminder: dict, kind: str = "reminder") -> bool:
+    """Fan a reminder out to every configured channel; True if any delivered.
+
+    ``kind`` labels the push (reminder / briefing / heartbeat) in the push log
+    the nightly reflection pass reads — it never affects delivery.
+    """
     sent_webhook = deliver_webhook(settings, reminder)
     sent_telegram = deliver_telegram(settings, reminder)
     sent_slack = deliver_slack(settings, reminder)
-    return sent_webhook or sent_telegram or sent_slack
+    delivered = sent_webhook or sent_telegram or sent_slack
+    if delivered:
+        # Imported here, not at module level: see deliver_telegram's note on the cycle.
+        from .reflect import log_push
+
+        log_push(settings, kind, str(reminder.get("message", "")))
+    return delivered
 
 
 def deliver_write_confirmation(settings: Settings, thread_id: str, message: str) -> bool:

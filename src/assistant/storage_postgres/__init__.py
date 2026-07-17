@@ -49,6 +49,13 @@ from .followups import (
     list_open_followups,
     update_followup,
 )
+from .goals import (
+    add_goal,
+    close_goal,
+    ensure_goals_schema,
+    list_open_goals,
+    update_goal,
+)
 from .kv import ensure_kv_schema, kv_clear, kv_get, kv_set
 from .ledgers import (
     calendar_write_rows,
@@ -88,6 +95,7 @@ from .memory import (
     write_note,
 )
 from .mutes import clear_mute, ensure_mutes_schema, list_mutes, set_mute
+from .pushlog import ensure_push_log_schema, recent_push_log, record_push_log
 from .tasks import (
     complete_task,
     create_task,
@@ -100,10 +108,19 @@ from .tasks import (
 )
 from .telegram import ensure_telegram_schema, pair_telegram_chat, paired_telegram_chats
 from .threads import ensure_threads_schema, known_threads, touch_thread
+from .watches import (
+    add_watch,
+    cancel_watch,
+    claim_watch,
+    ensure_watches_schema,
+    list_active_watches,
+)
 
 __all__ = [
     "add_document",
     "add_followup",
+    "add_goal",
+    "add_watch",
     "bump_recall",
     "bump_turn_counter",
     "caldav_outbox_clear",
@@ -111,11 +128,14 @@ __all__ = [
     "caldav_outbox_pending",
     "calendar_write_rows",
     "cancel_followup",
+    "cancel_watch",
     "claim_calendar_reminders",
     "claim_due_followups",
     "claim_fired",
     "claim_task_reminders",
+    "claim_watch",
     "clear_mute",
+    "close_goal",
     "complete_task",
     "connect",
     "create_event",
@@ -131,13 +151,16 @@ __all__ = [
     "ensure_docs_schema",
     "ensure_fired_schema",
     "ensure_followups_schema",
+    "ensure_goals_schema",
     "ensure_kv_schema",
     "ensure_mail_schema",
     "ensure_memory_schema",
     "ensure_mutes_schema",
+    "ensure_push_log_schema",
     "ensure_tasks_schema",
     "ensure_telegram_schema",
     "ensure_threads_schema",
+    "ensure_watches_schema",
     "find_by_href",
     "find_note",
     "get_document",
@@ -148,12 +171,14 @@ __all__ = [
     "kv_clear",
     "kv_get",
     "kv_set",
+    "list_active_watches",
     "list_documents",
     "list_events",
     "list_memory_entries",
     "list_mutes",
     "list_notes",
     "list_open_followups",
+    "list_open_goals",
     "list_tasks",
     "mail_audit_rows",
     "mark_calendar_writes_undone",
@@ -165,8 +190,10 @@ __all__ = [
     "prune_trash",
     "purge_stale_files",
     "read_index",
+    "recent_push_log",
     "record_calendar_write",
     "record_mail_audit",
+    "record_push_log",
     "record_task_write",
     "regenerate_index",
     "reindex_docs",
@@ -186,6 +213,7 @@ __all__ = [
     "unique_name",
     "update_event",
     "update_followup",
+    "update_goal",
     "update_task",
     "upsert_memory_index",
     "vector_literal",

@@ -416,6 +416,38 @@ class Settings(BaseSettings):
     heartbeat_wake_min_minutes: int = 5
     heartbeat_wake_max_minutes: int = 0
 
+    # --- Goals (standing multi-step intentions) ---
+    # With the heartbeat on, the model can carry ongoing projects ("plan the
+    # trip") in a goals store and advance them across wakes: the open_goal /
+    # update_goal / close_goal tools, a per-turn context block, and a heartbeat
+    # trigger when a goal's next_action_at comes due. The cap bounds how many
+    # projects it may carry at once — every open goal rides along in every
+    # prompt, so this is a token dial as much as a focus dial.
+    goals_max_open: int = 5
+    # Days without a goal update before the heartbeat starts nudging the model
+    # to advance, reschedule, or abandon it (never auto-closed). 0 disables.
+    goal_stale_days: int = 7
+
+    # --- Watches (model-registered perception) ---
+    # With the heartbeat on, the model can register its own observations
+    # (watch/unwatch tools): "tell me when this sender writes", "wake me
+    # before that event", "flag it if the user stays silent past a deadline".
+    # Evaluation is deterministic and token-free on every wake; these bound
+    # how many watches may be active at once and how long one may live
+    # without an explicit expiry.
+    watches_max_active: int = 10
+    watch_default_expiry_days: int = 14
+
+    # --- Reflection (nightly outcome review) ---
+    # Once per night (riding the sleep pass) review how the day's proactive
+    # behavior landed — pushes answered or ignored, writes undone, mutes with
+    # their stated reasons — and distill at most a few "self" procedural notes
+    # the model reads back on every wake. One LLM call per night at most; a day
+    # with no proactive activity skips the call entirely.
+    enable_reflection: bool = True
+    # Cap on memory operations one reflection pass may apply.
+    reflection_max_ops: int = 3
+
     # --- Telegram channel ---
     # Bot token from @BotFather. Set => the server long-polls Telegram and each
     # chat becomes a persistent conversation (thread "telegram:<chat_id>").

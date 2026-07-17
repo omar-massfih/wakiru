@@ -278,7 +278,7 @@ def test_batch_composes_one_push_covering_all_due(settings, monkeypatch) -> None
 
     monkeypatch.setattr("assistant.compose.compose_push", fake_compose)
     pushes: list[dict] = []
-    monkeypatch.setattr(reminders, "deliver_reminder", lambda s, r: pushes.append(r) or True)
+    monkeypatch.setattr(reminders, "deliver_reminder", lambda s, r, **kw: pushes.append(r) or True)
 
     fired = reminders.run_reminders(settings)
     assert {r["title"] for r in fired} == {"First", "Second"}
@@ -460,7 +460,7 @@ class _RecordingAgent:
 def test_delivered_reminder_is_recorded_on_threads(settings, monkeypatch) -> None:
     settings.telegram_bot_token = "tok"
     settings.telegram_allowed_chat_ids = [7]
-    monkeypatch.setattr(reminders, "deliver_reminder", lambda s, r: True)
+    monkeypatch.setattr(reminders, "deliver_reminder", lambda s, r, **kw: True)
     _event_in(settings, "Dentist", minutes=30)
     agent = _RecordingAgent()
     fired = reminders.run_reminders(settings, agent)
@@ -484,7 +484,7 @@ def test_delivered_reminder_also_records_on_slack_threads(settings, monkeypatch)
     # A Slack conversation in the notify channel has spoken to the assistant.
     threads.touch(settings, "slack:C9:U1")
 
-    monkeypatch.setattr(reminders, "deliver_reminder", lambda s, r: True)
+    monkeypatch.setattr(reminders, "deliver_reminder", lambda s, r, **kw: True)
     _event_in(settings, "Dentist", minutes=30)
     agent = _RecordingAgent()
     fired = reminders.run_reminders(settings, agent)

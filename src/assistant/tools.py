@@ -796,6 +796,302 @@ def _followup_tools() -> list[ToolSpec]:
 
 
 # --------------------------------------------------------------------------- #
+# Goals — standing multi-step intentions the assistant advances across wakes
+# --------------------------------------------------------------------------- #
+
+def _format_goal(ctx: ToolContext, goal) -> str:
+    from .calendar.context import format_when
+
+    when = (
+        f" — next step {format_when(ctx.settings, goal.next_action_at)}"
+        if goal.next_action_at
+        else " — parked (no next step scheduled)"
+    )
+    return f"{goal.title}{when} (id {goal.id})"
+
+
+def _open_goal(ctx: ToolContext, title: str, state: str = "", next_action: str = "") -> str:
+    from . import goals
+    from .calendar.store import parse_dt
+
+    due = None
+    if next_action:
+        due = parse_dt(str(next_action))
+        if due is None:
+            return f"Tool failed: next_action must be {_ISO}."
+    saved = goals.open_goal(
+        ctx.settings, str(title), str(state), due, thread_id=ctx.thread_id
+    )
+    if saved is None:
+        return (
+            f"Tool failed: you already carry {ctx.settings.goals_max_open} open "
+            "goals. Close or abandon one before opening another."
+        )
+    return f"Goal opened: {_format_goal(ctx, saved)}"
+
+
+def _update_goal(
+    ctx: ToolContext,
+    target: str,
+    state: str = "",
+    next_action: str = "",
+    title: str = "",
+    park: bool = False,
+) -> str:
+    from . import goals
+    from .calendar.store import parse_dt
+
+    due = None
+    if next_action:
+        due = parse_dt(str(next_action))
+        if due is None:
+            return f"Tool failed: next_action must be {_ISO}."
+    if not state and due is None and not title and not park:
+        return "Tool failed: give at least one of state, next_action, title, or park."
+    revised = goals.update(
+        ctx.settings,
+        str(target),
+        state=state or None,
+        next_action_at=due,
+        title=title or None,
+        clear_next_action=bool(park),
+    )
+    if revised is None:
+        return _NO_MATCH
+    return f"Goal updated: {_format_goal(ctx, revised)}"
+
+
+def _close_goal(ctx: ToolContext, target: str, outcome: str = "", abandoned: bool = False) -> str:
+    from . import goals
+
+    closed = goals.close(ctx.settings, str(target), str(outcome), bool(abandoned))
+    if closed is None:
+        return _NO_MATCH
+    return f"Goal {closed.status}: {closed.title}"
+
+
+def _list_goals(ctx: ToolContext) -> str:
+    from . import goals
+
+    open_items = goals.list_open(ctx.settings)
+    if not open_items:
+        return "No open goals."
+    lines = []
+    for goal in open_items:
+        lines.append(f"- {_format_goal(ctx, goal)}")
+        if goal.state:
+            lines.append(f"  state: {goal.state}")
+    return "\n".join(lines)
+
+
+def _goal_tools() -> list[ToolSpec]:
+    return [
+        ToolSpec(
+            "open_goal",
+            "Open a standing goal: an ongoing multi-step project you will "
+            "advance across future wakes (research, plan, prepare — not a "
+            "one-off check-in; schedule_followup is for those). The state "
+            "field is your working document — plan, progress, open questions "
+            "— that every future wake and conversation reads. Set "
+            "next_action when you (not the user) should attempt the next "
+            "step.",
+            _params(
+                {
+                    "title": ("string", "Short goal title, e.g. 'Plan the Oslo trip'"),
+                    "state": (
+                        "string",
+                        "Your plan and current progress — what future-you needs "
+                        "to pick this up cold",
+                    ),
+                    "next_action": (
+                        "string",
+                        f"When to attempt the next step, {_ISO} (omit to park)",
+                    ),
+                },
+                ["title", "state"],
+            ),
+            _open_goal,
+        ),
+        ToolSpec(
+            "update_goal",
+            "Advance a goal you carry: rewrite its state with what you just "
+            "did or learned, and ALWAYS set next_action to when the next step "
+            "is worth attempting (or park=true while waiting on the world) — "
+            "otherwise the same goal is raised to you again next wake. Target "
+            "by id or an unambiguous title reference.",
+            _params(
+                {
+                    "target": ("string", "Goal id or title"),
+                    "state": ("string", "Rewritten working state (replaces the old)"),
+                    "next_action": ("string", f"Next step time, {_ISO}"),
+                    "title": ("string", "New title"),
+                    "park": (
+                        "boolean",
+                        "True to clear the next step — waiting, don't raise me",
+                    ),
+                },
+                ["target"],
+            ),
+            _update_goal,
+        ),
+        ToolSpec(
+            "close_goal",
+            "Close a goal as done — or abandoned=true when it is no longer "
+            "worth pursuing — with a one-line outcome. The outcome is "
+            "remembered, so say what worked or why it died.",
+            _params(
+                {
+                    "target": ("string", "Goal id or title"),
+                    "outcome": ("string", "One line: the result, or why abandoned"),
+                    "abandoned": ("boolean", "True to abandon instead of complete"),
+                },
+                ["target"],
+            ),
+            _close_goal,
+        ),
+        ToolSpec(
+            "list_goals",
+            "List your open goals with their working state.",
+            _params({}, []),
+            _list_goals,
+        ),
+    ]
+
+
+# --------------------------------------------------------------------------- #
+# Watches — the model registers what its background wakes should look for
+# --------------------------------------------------------------------------- #
+
+def _watch(
+    ctx: ToolContext,
+    kind: str,
+    pattern: str = "",
+    note: str = "",
+    until: str = "",
+    repeat: bool = False,
+    lead_minutes: str = "",
+) -> str:
+    from . import watches
+    from .calendar.context import format_when, now
+    from .calendar.store import parse_dt
+
+    if kind not in watches.KINDS:
+        return f"Tool failed: kind must be one of {', '.join(watches.KINDS)}."
+    if kind != "silence" and not str(pattern).strip():
+        return "Tool failed: pattern is required for this kind."
+    expiry = None
+    if until:
+        expiry = parse_dt(str(until))
+        if expiry is None:
+            return f"Tool failed: until must be {_ISO}."
+        if expiry <= now(ctx.settings):
+            return "Tool failed: until is already in the past."
+    elif kind == "silence":
+        return f"Tool failed: a silence watch needs until (its deadline, {_ISO})."
+    lead = watches.DEFAULT_LEAD_MINUTES
+    if lead_minutes:
+        try:
+            lead = max(int(str(lead_minutes)), 0)
+        except ValueError:
+            return "Tool failed: lead_minutes must be a whole number of minutes."
+    saved = watches.add(
+        ctx.settings,
+        kind,
+        str(pattern),
+        str(note),
+        until=expiry,
+        repeat=bool(repeat),
+        lead_minutes=lead,
+    )
+    if saved is None:
+        return (
+            f"Tool failed: you already have {ctx.settings.watches_max_active} "
+            "active watches. Drop one with unwatch first."
+        )
+    return (
+        f"Watching ({saved.kind}): {saved.pattern or 'user silence'}"
+        f" until {format_when(ctx.settings, saved.expires_at)} (id {saved.id})"
+    )
+
+
+def _unwatch(ctx: ToolContext, target: str) -> str:
+    from . import watches
+
+    cancelled = watches.cancel(ctx.settings, str(target))
+    if cancelled is None:
+        return _NO_MATCH
+    return f"Stopped watching: {cancelled.pattern or cancelled.kind}"
+
+
+def _list_watches(ctx: ToolContext) -> str:
+    from . import watches
+    from .calendar.context import format_when
+
+    active = watches.list_active(ctx.settings)
+    if not active:
+        return "No active watches."
+    return "\n".join(
+        f"- [{w.kind}] {w.pattern or 'user silence'}"
+        + (f" — {w.note}" if w.note else "")
+        + f" (until {format_when(ctx.settings, w.expires_at)}, id {w.id})"
+        for w in active
+    )
+
+
+def _watch_tools() -> list[ToolSpec]:
+    return [
+        ToolSpec(
+            "watch",
+            "Register something your background wakes should look for, so you "
+            "notice it without being asked: kind=mail_from fires when unread "
+            "mail matches the pattern (sender or subject substring), "
+            "kind=calendar_window fires when an event matching the pattern is "
+            "about to start (and wakes you for it), kind=silence fires if the "
+            "user has not written by the until deadline. When it fires you get "
+            "your note back, so write the note to your future self.",
+            _params(
+                {
+                    "kind": ("string", '"mail_from", "calendar_window", or "silence"'),
+                    "pattern": (
+                        "string",
+                        "Substring to match (sender/subject or event title); "
+                        "not used for silence",
+                    ),
+                    "note": ("string", "What future-you should do when this fires"),
+                    "until": (
+                        "string",
+                        f"Expiry — or the deadline for silence — {_ISO} "
+                        "(default: 2 weeks out)",
+                    ),
+                    "repeat": (
+                        "boolean",
+                        "mail_from only: keep firing on new matches instead of once",
+                    ),
+                    "lead_minutes": (
+                        "string",
+                        "calendar_window only: minutes before the event (default 30)",
+                    ),
+                },
+                ["kind"],
+            ),
+            _watch,
+        ),
+        ToolSpec(
+            "unwatch",
+            "Drop an active watch by id or an unambiguous pattern/note reference.",
+            _params({"target": ("string", "Watch id, pattern, or note")}, ["target"]),
+            _unwatch,
+        ),
+        ToolSpec(
+            "list_watches",
+            "List your active watches.",
+            _params({}, []),
+            _list_watches,
+        ),
+    ]
+
+
+# --------------------------------------------------------------------------- #
 # Self-pacing — the background wake schedules its own next wake
 # --------------------------------------------------------------------------- #
 
@@ -939,6 +1235,8 @@ def available_tools(settings: Settings, mode: str = "chat") -> list[ToolSpec]:
         tools += _email_tools(settings)
     if settings.enable_heartbeat:
         tools += _followup_tools()
+        tools += _goal_tools()
+        tools += _watch_tools()
     if mode == "heartbeat":
         # set_next_wake is background-only: in chat, "wake me before X" is a
         # follow-up. The send exclusion is untouched below it.

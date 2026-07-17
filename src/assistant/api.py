@@ -721,6 +721,29 @@ def tasks(include_done: bool = False) -> dict:
     }
 
 
+@app.get("/goals", dependencies=[Depends(require_token)])
+def goals_list() -> dict:
+    """List the assistant's open standing goals (see assistant.goals)."""
+    from . import goals as goals_store
+
+    settings = get_settings()
+    items = goals_store.list_open(settings)
+    return {
+        "total": len(items),
+        "goals": [
+            {
+                "id": g.id,
+                "title": g.title,
+                "state": g.state,
+                "next_action_at": g.next_action_at,
+                "created_at": g.created_at,
+                "updated_at": g.updated_at,
+            }
+            for g in items
+        ],
+    }
+
+
 @app.get("/calendar", dependencies=[Depends(require_token)])
 def calendar() -> dict:
     """List upcoming events (within the configured horizon) and the current time."""
