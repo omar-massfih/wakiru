@@ -14,6 +14,7 @@ later pull recognizes them and upserts in place instead of duplicating.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import urllib.error
@@ -32,6 +33,7 @@ _TIMEOUT_SECONDS = 30
 _MAX_BODY_BYTES = 20_000_000
 _MAX_REDIRECTS = 5
 _PAGE_SIZE = 2500
+_EVENT_COLOR_IDS = tuple(str(value) for value in range(1, 12))
 
 
 class GoogleCalError(RuntimeError):
@@ -139,6 +141,12 @@ def _iso_to_gtime(value: str) -> dict:
     return {"dateTime": dt.isoformat(timespec="seconds")} if dt else {"dateTime": value}
 
 
+def _color_id(event_id: str) -> str:
+    """A random-looking Google palette color that stays stable for this event."""
+    digest = hashlib.sha256(event_id.encode()).digest()
+    return _EVENT_COLOR_IDS[int.from_bytes(digest[:8], "big") % len(_EVENT_COLOR_IDS)]
+
+
 def _utc_basic(value: str) -> str:
     dt = store.parse_dt(value)
     if dt is None:
@@ -150,7 +158,7 @@ def _utc_basic(value: str) -> str:
 
 
 def _to_body(settings: Settings, event: store.Event) -> dict:
-    body: dict = {"summary": event.title}
+    body: dict = {"summary": event.title, "colorId": _color_id(event.id)}
     body["start"] = _iso_to_gtime(event.start)
     end = event.end
     if not end:

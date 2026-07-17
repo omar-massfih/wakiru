@@ -122,11 +122,13 @@ def test_create_posts_with_our_id(settings, gserver) -> None:
     assert payload["summary"] == "Lunch"
     event = store.find_event(settings, "Lunch")
     assert payload["id"] == event.id            # our id becomes the Google id
+    assert payload["colorId"] in {str(value) for value in range(1, 12)}
     assert event.caldav_href == event.id and event.caldav_etag == '"g-1"'
 
 
 def test_reschedule_puts_with_if_match(settings, gserver) -> None:
     ops.apply_op(settings, {"op": "create", "title": "Lunch", "start": "2026-12-05T12:00:00+01:00"})
+    original_color = json.loads(gserver.of("POST")[0]["body"])["colorId"]
     gserver.calls.clear()
     ops.apply_op(
         settings, {"op": "reschedule", "query": "Lunch", "start": "2026-12-05T13:00:00+01:00"}
@@ -135,6 +137,15 @@ def test_reschedule_puts_with_if_match(settings, gserver) -> None:
     assert len(puts) == 1
     assert puts[0]["headers"].get("If-Match") == '"g-1"'
     assert "2026-12-05T13:00:00+01:00" in puts[0]["body"]
+    assert json.loads(puts[0]["body"])["colorId"] == original_color
+
+
+def test_event_colors_vary_but_are_stable() -> None:
+    colors = [google_calendar._color_id(f"event-{index}") for index in range(30)]
+
+    assert len(set(colors)) > 1
+    assert colors == [google_calendar._color_id(f"event-{index}") for index in range(30)]
+    assert set(colors) <= {str(value) for value in range(1, 12)}
 
 
 def test_cancel_deletes(settings, gserver) -> None:
