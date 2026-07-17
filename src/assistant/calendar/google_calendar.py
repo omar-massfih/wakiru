@@ -141,6 +141,12 @@ def _iso_to_gtime(value: str) -> dict:
     return {"dateTime": dt.isoformat(timespec="seconds")} if dt else {"dateTime": value}
 
 
+def _timezone_name(settings: Settings) -> str:
+    """Google's IANA timezone name for recurring event expansion."""
+    tz = _resolve_tz(settings)
+    return str(getattr(tz, "key", "") or settings.timezone or "UTC")
+
+
 def _color_id(event_id: str) -> str:
     """A random-looking Google palette color that stays stable for this event."""
     digest = hashlib.sha256(event_id.encode()).digest()
@@ -176,6 +182,12 @@ def _to_body(settings: Settings, event: store.Event) -> dict:
     if exdates:
         recurrence.append("EXDATE:" + ",".join(exdates))
     if recurrence:
+        # Google requires an explicit IANA timezone for recurring events even when
+        # dateTime already carries a numeric UTC offset.  The timezone also tells
+        # Google how to preserve the local wall time across DST transitions.
+        timezone = _timezone_name(settings)
+        body["start"]["timeZone"] = timezone
+        body["end"]["timeZone"] = timezone
         body["recurrence"] = recurrence
     return body
 

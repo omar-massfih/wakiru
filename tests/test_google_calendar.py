@@ -126,6 +126,31 @@ def test_create_posts_with_our_id(settings, gserver) -> None:
     assert event.caldav_href == event.id and event.caldav_etag == '"g-1"'
 
 
+def test_create_recurring_event_includes_google_timezone(settings, gserver) -> None:
+    summary = ops.apply_op(
+        settings,
+        {
+            "op": "create",
+            "title": "Sleep",
+            "start": "2026-07-16T23:00:00+02:00",
+            "end": "2026-07-17T07:00:00+02:00",
+            "rrule": "FREQ=DAILY",
+        },
+    )
+
+    assert summary and "not yet synced" not in summary
+    payload = json.loads(gserver.of("POST")[0]["body"])
+    assert payload["start"] == {
+        "dateTime": "2026-07-16T23:00:00+02:00",
+        "timeZone": "Europe/Oslo",
+    }
+    assert payload["end"] == {
+        "dateTime": "2026-07-17T07:00:00+02:00",
+        "timeZone": "Europe/Oslo",
+    }
+    assert payload["recurrence"] == ["RRULE:FREQ=DAILY"]
+
+
 def test_reschedule_puts_with_if_match(settings, gserver) -> None:
     ops.apply_op(settings, {"op": "create", "title": "Lunch", "start": "2026-12-05T12:00:00+01:00"})
     original_color = json.loads(gserver.of("POST")[0]["body"])["colorId"]
