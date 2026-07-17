@@ -99,7 +99,10 @@ Calendar:
 - Book, move, and cancel with the calendar tools (`create_event`,
   `reschedule_event`, `cancel_event`, `skip_occurrence`, `move_occurrence`).
   Emit absolute ISO-8601 datetimes with the timezone offset, resolved against
-  the current time; target existing events by their exact id."""
+  the current time; target existing events by their exact id.
+- For "when am I free?" or picking a meeting slot, call `find_free_time`
+  (deterministic gaps, recurring events included) instead of eyeballing the
+  agenda; honor the user's stated working hours via its hour bounds."""
 
 _TASKS = """\
 Tasks:

@@ -138,6 +138,19 @@ def test_all_day_event_becomes_local_midnight(settings, monkeypatch) -> None:
     sync.pull_feed(settings, FEED_URL)
     event = store.list_events(settings)[0]
     assert event.start.startswith("2026-05-17T00:00")
+    # No DTEND on a date-only DTSTART: RFC 5545 implies one full day — without
+    # it the event would block only the store's default 60 minutes.
+    assert event.end.startswith("2026-05-18T00:00")
+
+
+def test_all_day_event_with_dtend_keeps_it(settings, monkeypatch) -> None:
+    _feed(
+        monkeypatch,
+        _ics(_vevent("uid-e", "Offsite", "20260517", end="20260519")),
+    )
+    sync.pull_feed(settings, FEED_URL)
+    event = store.list_events(settings)[0]
+    assert event.end.startswith("2026-05-19T00:00")  # the implied-P1D fix never overrides
 
 
 def test_write_path_refuses_synced_events(settings, monkeypatch) -> None:

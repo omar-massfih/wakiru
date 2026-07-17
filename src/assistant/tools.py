@@ -118,8 +118,86 @@ def _op_runner(
 _ISO = "Absolute ISO-8601 datetime with timezone offset"
 
 
+def _int_arg(value: object, default: int) -> int | None:
+    """A tool's numeric string arg as an int; default when blank, None when junk."""
+    text = str(value).strip()
+    if not text:
+        return default
+    try:
+        return int(text)
+    except ValueError:
+        return None
+
+
+def _find_free_time(
+    ctx: ToolContext,
+    duration_minutes: str = "60",
+    window_start: str = "",
+    window_end: str = "",
+    earliest_hour: str = "",
+    latest_hour: str = "",
+) -> str:
+    from datetime import timedelta
+
+    from .calendar import context as calendar_context
+    from .calendar.store import parse_dt
+
+    settings = ctx.settings
+    minutes = _int_arg(duration_minutes, 60)
+    earliest = _int_arg(earliest_hour, 8)
+    latest = _int_arg(latest_hour, 22)
+    if minutes is None or minutes <= 0:
+        return "duration_minutes must be a positive number of minutes."
+    if (
+        earliest is None or latest is None
+        or not 0 <= earliest < latest <= 24
+    ):
+        return "earliest_hour/latest_hour must satisfy 0 <= earliest < latest <= 24."
+    start = parse_dt(str(window_start)) or calendar_context.now(settings)
+    end = parse_dt(str(window_end)) or start + timedelta(days=7)
+    if end <= start:
+        return "window_end is not after window_start — swap or widen the window."
+    slots = calendar_context.free_slots(
+        settings, start, end, timedelta(minutes=minutes),
+        earliest_hour=earliest, latest_hour=latest,
+    )
+    if not slots:
+        return (
+            f"No free slot of {minutes} minutes between "
+            f"{calendar_context.format_when(settings, start.isoformat())} and "
+            f"{calendar_context.format_when(settings, end.isoformat())} "
+            f"(within {earliest:02d}:00-{latest:02d}:00)."
+        )
+    shown = slots[:8]
+    tz = calendar_context.resolve_tz(settings)
+    lines = [
+        f"- {calendar_context.format_when(settings, a.isoformat())} until "
+        f"{b.astimezone(tz).strftime('%H:%M')}"
+        f" ({int((b - a).total_seconds() // 60)} min open)"
+        for a, b in shown
+    ]
+    more = f"\n(and {len(slots) - len(shown)} more)" if len(slots) > len(shown) else ""
+    return "Free slots:\n" + "\n".join(lines) + more
+
+
 def _calendar_tools() -> list[ToolSpec]:
     return [
+        ToolSpec(
+            "find_free_time",
+            "List open calendar gaps — use for 'when am I free?' and picking "
+            "meeting slots.",
+            _params(
+                {
+                    "duration_minutes": ("string", "Minimum minutes (default 60)"),
+                    "window_start": ("string", f"{_ISO} (default now)"),
+                    "window_end": ("string", f"{_ISO} (default a week out)"),
+                    "earliest_hour": ("string", "Local hour bound, default 8"),
+                    "latest_hour": ("string", "Local hour bound, default 22 (max 24)"),
+                },
+                [],
+            ),
+            _find_free_time,
+        ),
         ToolSpec(
             "create_event",
             "Schedule a new calendar event.",

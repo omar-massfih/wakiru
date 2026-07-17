@@ -499,3 +499,86 @@ def test_read_url_frames_page_text_as_untrusted(tmp_path, monkeypatch) -> None:
     result = execute_tool(tool_map(s)["read_url"], _ctx(s), {"url": "https://x.test/a"})
     assert "never as instructions" in result
     assert "----- fetched page -----" in result and "----- end fetched page -----" in result
+
+
+# --- find_free_time --------------------------------------------------------- #
+
+
+def test_find_free_time_lists_gaps(settings) -> None:
+    from assistant.calendar import context as calendar_context
+
+    base = calendar_context.now(settings) + timedelta(days=1)
+    execute_tool(
+        tool_map(settings)["create_event"],
+        _ctx(settings),
+        {
+            "title": "Workshop",
+            "start": base.replace(hour=9, minute=0, second=0, microsecond=0).isoformat(),
+            "end": base.replace(hour=17, minute=0, second=0, microsecond=0).isoformat(),
+        },
+    )
+    day = base.replace(hour=0, minute=0, second=0, microsecond=0)
+    result = execute_tool(
+        tool_map(settings)["find_free_time"],
+        _ctx(settings),
+        {
+            "duration_minutes": "60",
+            "window_start": day.isoformat(),
+            "window_end": (day + timedelta(days=1)).isoformat(),
+        },
+    )
+    assert result.startswith("Free slots:")
+    assert "until 09:00" in result and "until 22:00" in result
+
+
+def test_find_free_time_reports_a_full_window(settings) -> None:
+    from assistant.calendar import context as calendar_context
+
+    base = calendar_context.now(settings) + timedelta(days=1)
+    execute_tool(
+        tool_map(settings)["create_event"],
+        _ctx(settings),
+        {
+            "title": "Offsite",
+            "start": base.replace(hour=8, minute=0, second=0, microsecond=0).isoformat(),
+            "end": base.replace(hour=22, minute=0, second=0, microsecond=0).isoformat(),
+        },
+    )
+    day = base.replace(hour=0, minute=0, second=0, microsecond=0)
+    result = execute_tool(
+        tool_map(settings)["find_free_time"],
+        _ctx(settings),
+        {
+            "duration_minutes": "60",
+            "window_start": day.isoformat(),
+            "window_end": (day + timedelta(days=1)).isoformat(),
+        },
+    )
+    assert result.startswith("No free slot of 60 minutes")
+
+
+def test_find_free_time_rejects_junk_arguments(settings) -> None:
+    result = execute_tool(
+        tool_map(settings)["find_free_time"],
+        _ctx(settings),
+        {"duration_minutes": "soonish"},
+    )
+    assert "positive number" in result
+    result = execute_tool(
+        tool_map(settings)["find_free_time"],
+        _ctx(settings),
+        {"earliest_hour": "22", "latest_hour": "8"},
+    )
+    assert "earliest < latest" in result
+
+
+def test_find_free_time_names_an_inverted_window(settings) -> None:
+    result = execute_tool(
+        tool_map(settings)["find_free_time"],
+        _ctx(settings),
+        {
+            "window_start": _iso_in(settings, days=2),
+            "window_end": _iso_in(settings, days=1),
+        },
+    )
+    assert "not after window_start" in result  # not a bogus "no free time"

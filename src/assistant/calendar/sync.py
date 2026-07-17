@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from .. import netguard
 from ..config import Settings, get_settings
@@ -147,10 +147,24 @@ def parse_vevents(text: str, settings: Settings) -> dict[str, store.Event]:
         start = _iso(component.get("dtstart"), settings)
         if not uid or not start:
             continue
+        end = _iso(component.get("dtend"), settings)
+        if not end:
+            dtstart = getattr(component.get("dtstart"), "dt", None)
+            if isinstance(dtstart, date) and not isinstance(dtstart, datetime):
+                # RFC 5545: DTEND is optional; a date-only DTSTART implies a
+                # one-day event. Without this the store's 60-minute default
+                # would leave 23 hours of an all-day event looking free.
+                end = (
+                    datetime(
+                        dtstart.year, dtstart.month, dtstart.day,
+                        tzinfo=resolve_tz(settings),
+                    )
+                    + timedelta(days=1)
+                ).isoformat()
         fields = {
             "title": _text(component, "summary") or "(untitled)",
             "start": start,
-            "end": _iso(component.get("dtend"), settings),
+            "end": end,
             "location": _text(component, "location"),
             "notes": _text(component, "description"),
         }

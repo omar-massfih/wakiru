@@ -510,3 +510,71 @@ def test_create_op_no_warning_when_free(settings) -> None:
     store.create_event(settings, title="Standup", start=start)
     summary = ops.apply_op(settings, {"op": "create", "title": "Solo", "start": later})
     assert summary is not None and "conflicts" not in summary
+
+
+# --- free slots (the deterministic complement of busy_events) ---------------- #
+
+
+def _tomorrow_at(settings: Settings, hour: int, minute: int = 0):
+    base = context.now(settings) + timedelta(days=1)
+    return base.replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+
+def test_free_slots_subtracts_busy_and_merges_overlaps(settings) -> None:
+    day = _tomorrow_at(settings, 0)
+    store.create_event(
+        settings, "A", start=_tomorrow_at(settings, 10).isoformat(),
+        end=_tomorrow_at(settings, 11).isoformat(),
+    )
+    # Overlapping second event extends the busy block to 12:00.
+    store.create_event(
+        settings, "B", start=_tomorrow_at(settings, 10, 30).isoformat(),
+        end=_tomorrow_at(settings, 12).isoformat(),
+    )
+    slots = context.free_slots(
+        settings, day, day + timedelta(days=1), timedelta(minutes=60),
+        earliest_hour=9, latest_hour=13,
+    )
+    assert [(a.hour, b.hour) for a, b in slots] == [(9, 10), (12, 13)]
+
+
+def test_free_slots_respects_minimum_duration(settings) -> None:
+    day = _tomorrow_at(settings, 0)
+    store.create_event(
+        settings, "A", start=_tomorrow_at(settings, 9, 30).isoformat(),
+        end=_tomorrow_at(settings, 12).isoformat(),
+    )
+    # Only a 30-minute gap before the event: too short for 60 minutes.
+    slots = context.free_slots(
+        settings, day, day + timedelta(days=1), timedelta(minutes=60),
+        earliest_hour=9, latest_hour=12,
+    )
+    assert slots == []
+
+
+def test_free_slots_expands_recurring_series(settings) -> None:
+    daily = _tomorrow_at(settings, 9)
+    store.create_event(
+        settings, "Standup", start=daily.isoformat(),
+        end=(daily + timedelta(minutes=60)).isoformat(),
+        rrule="FREQ=DAILY",
+    )
+    two_days_out = daily + timedelta(days=1)
+    slots = context.free_slots(
+        settings,
+        two_days_out.replace(hour=0), two_days_out.replace(hour=23),
+        timedelta(minutes=60), earliest_hour=9, latest_hour=11,
+    )
+    # The next day's occurrence still blocks 9-10.
+    assert [(a.hour, b.hour) for a, b in slots] == [(10, 11)]
+
+
+def test_free_slots_never_offers_the_past(settings) -> None:
+    current = context.now(settings)
+    slots = context.free_slots(
+        settings,
+        current - timedelta(days=2),
+        current - timedelta(days=1),
+        timedelta(minutes=30),
+    )
+    assert slots == []

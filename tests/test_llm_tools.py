@@ -114,12 +114,13 @@ def test_render_prompt_replays_tool_history() -> None:
 def test_tool_schemas_stay_small() -> None:
     # Every enabled tool, email included: the prompt overhead must stay bounded.
     # (Raised from 9k when the mailbox-management tools landed — reply/archive/
-    # mark-read/label plus the gated send_reply.)
+    # mark-read/label plus the gated send_reply — and from 12k for
+    # find_free_time, task recurrence, and attachment ingestion.)
     schemas = [
         s.to_openai_tool()
         for s in available_tools(Settings(enable_email=True, enable_email_send=True))
     ]
-    assert len(json.dumps(schemas)) < 12_000
+    assert len(json.dumps(schemas)) < 13_000
 
 
 # --- streaming hold-and-flush -------------------------------------------------- #

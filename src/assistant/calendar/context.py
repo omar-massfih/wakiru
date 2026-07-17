@@ -10,7 +10,7 @@ already booked.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, tzinfo
+from datetime import datetime, time, timedelta, tzinfo
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from ..config import Settings, get_settings
@@ -132,6 +132,62 @@ def busy_events(settings: Settings, start: datetime, end: datetime) -> list[Even
         if e_start < end and start < e_end:  # half-open overlap
             busy.append(event)
     return busy
+
+
+def free_slots(
+    settings: Settings,
+    window_start: datetime,
+    window_end: datetime,
+    duration: timedelta,
+    earliest_hour: int = 8,
+    latest_hour: int = 22,
+) -> list[tuple[datetime, datetime]]:
+    """Open gaps of at least ``duration`` within ``[window_start, window_end)``.
+
+    Deterministic complement of :func:`busy_events`: the merged busy intervals
+    are subtracted from each day's ``[earliest_hour, latest_hour)`` (assistant's
+    timezone), and gaps long enough survive. The past never counts as free —
+    the window is clipped to now. Soonest first.
+    """
+    tz = resolve_tz(settings)
+    window_start = max(window_start, now(settings))
+    if window_end <= window_start or duration <= timedelta(0):
+        return []
+
+    merged: list[tuple[datetime, datetime]] = []
+    intervals = sorted(
+        i for e in busy_events(settings, window_start, window_end)
+        if (i := event_interval(settings, e)) is not None
+    )
+    for b_start, b_end in intervals:
+        if merged and b_start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], b_end))
+        else:
+            merged.append((b_start, b_end))
+
+    slots: list[tuple[datetime, datetime]] = []
+    # Iterate calendar dates (not +24h steps) so day windows keep their
+    # wall-clock hours across a DST change.
+    current = window_start.astimezone(tz).date()
+    last = window_end.astimezone(tz).date()
+    while current <= last:
+        cursor = max(datetime.combine(current, time(earliest_hour), tzinfo=tz), window_start)
+        close = (
+            datetime.combine(current + timedelta(days=1), time(0), tzinfo=tz)
+            if latest_hour >= 24  # "until midnight": time(24) doesn't exist
+            else datetime.combine(current, time(latest_hour), tzinfo=tz)
+        )
+        day_close = min(close, window_end)
+        for b_start, b_end in merged:
+            if b_end <= cursor or b_start >= day_close:
+                continue
+            if b_start - cursor >= duration:
+                slots.append((cursor, b_start))
+            cursor = max(cursor, b_end)
+        if day_close - cursor >= duration:
+            slots.append((cursor, day_close))
+        current += timedelta(days=1)
+    return slots
 
 
 def overlapping_events(
