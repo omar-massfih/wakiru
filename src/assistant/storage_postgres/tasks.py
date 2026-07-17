@@ -23,11 +23,17 @@ def ensure_tasks_schema(settings: Settings) -> None:
               done BOOLEAN NOT NULL DEFAULT FALSE,
               due TEXT NOT NULL DEFAULT '',
               notes TEXT NOT NULL DEFAULT '',
+              rrule TEXT NOT NULL DEFAULT '',
               created TEXT NOT NULL DEFAULT '',
               updated TEXT NOT NULL DEFAULT '',
               done_at TEXT NOT NULL DEFAULT ''
             )
             """
+        )
+        # Tables created before the column existed need it added in place.
+        conn.execute(
+            "ALTER TABLE assistant_tasks"
+            " ADD COLUMN IF NOT EXISTS rrule TEXT NOT NULL DEFAULT ''"
         )
         conn.execute(
             """
@@ -67,13 +73,16 @@ def _task_from_row(row: dict):
         done=bool(row.get("done")),
         due=str(row.get("due") or ""),
         notes=str(row.get("notes") or ""),
+        rrule=str(row.get("rrule") or ""),
         created=str(row.get("created") or ""),
         updated=str(row.get("updated") or ""),
         done_at=str(row.get("done_at") or ""),
     )
 
 
-def create_task(settings: Settings, title: str, due: str = "", notes: str = ""):
+def create_task(
+    settings: Settings, title: str, due: str = "", notes: str = "", rrule: str = ""
+):
     import uuid
 
     from ..tasks import store as task_store
@@ -86,14 +95,15 @@ def create_task(settings: Settings, title: str, due: str = "", notes: str = ""):
         done=False,
         due=task_store._normalize_due(settings, due),
         notes=notes.strip(),
+        rrule=rrule.strip(),
         created=now,
         updated=now,
     )
     with connect(settings) as conn:
         conn.execute(
-            "INSERT INTO assistant_tasks (id, title, done, due, notes, created, updated, done_at) "
-            "VALUES (%s, %s, FALSE, %s, %s, %s, %s, '')",
-            (task.id, task.title, task.due, task.notes, task.created, task.updated),
+            "INSERT INTO assistant_tasks (id, title, done, due, notes, rrule, created, updated, done_at) "
+            "VALUES (%s, %s, FALSE, %s, %s, %s, %s, %s, '')",
+            (task.id, task.title, task.due, task.notes, task.rrule, task.created, task.updated),
         )
     return task
 
@@ -101,14 +111,14 @@ def create_task(settings: Settings, title: str, due: str = "", notes: str = ""):
 def get_task(settings: Settings, task_id: str):
     ensure_tasks_schema(settings)
     with connect(settings) as conn:
-        rows = _rows(conn.execute("SELECT id, title, done, due, notes, created, updated, done_at FROM assistant_tasks WHERE id = %s", (task_id,)))
+        rows = _rows(conn.execute("SELECT id, title, done, due, notes, rrule, created, updated, done_at FROM assistant_tasks WHERE id = %s", (task_id,)))
     return _task_from_row(rows[0]) if rows else None
 
 
 def list_tasks(settings: Settings):
     ensure_tasks_schema(settings)
     with connect(settings) as conn:
-        rows = _rows(conn.execute("SELECT id, title, done, due, notes, created, updated, done_at FROM assistant_tasks"))
+        rows = _rows(conn.execute("SELECT id, title, done, due, notes, rrule, created, updated, done_at FROM assistant_tasks"))
     return [_task_from_row(r) for r in rows]
 
 
@@ -138,8 +148,13 @@ def complete_task(settings: Settings, task_id: str):
     if existing is None or existing.done:
         return existing
     now = task_store._stamp_now(settings)
+    upcoming = task_store.next_due(settings, existing)
     with connect(settings) as conn:
-        conn.execute("UPDATE assistant_tasks SET done = TRUE, done_at = %s, updated = %s WHERE id = %s", (now, now, task_id))
+        if upcoming:
+            # Recurring: roll the due forward instead of closing (see tasks.store).
+            conn.execute("UPDATE assistant_tasks SET due = %s, updated = %s WHERE id = %s", (upcoming, now, task_id))
+        else:
+            conn.execute("UPDATE assistant_tasks SET done = TRUE, done_at = %s, updated = %s WHERE id = %s", (now, now, task_id))
     return get_task(settings, task_id)
 
 
@@ -148,18 +163,19 @@ def restore_task(settings: Settings, task) -> object:
     with connect(settings) as conn:
         conn.execute(
             """
-            INSERT INTO assistant_tasks (id, title, done, due, notes, created, updated, done_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO assistant_tasks (id, title, done, due, notes, rrule, created, updated, done_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT(id) DO UPDATE SET
               title = excluded.title,
               done = excluded.done,
               due = excluded.due,
               notes = excluded.notes,
+              rrule = excluded.rrule,
               created = excluded.created,
               updated = excluded.updated,
               done_at = excluded.done_at
             """,
-            (task.id, task.title, bool(task.done), task.due, task.notes, task.created, task.updated, task.done_at),
+            (task.id, task.title, bool(task.done), task.due, task.notes, task.rrule, task.created, task.updated, task.done_at),
         )
     return task
 

@@ -9,6 +9,7 @@ can target existing tasks by id.
 
 from __future__ import annotations
 
+from ..calendar import recurrence
 from ..calendar.context import format_when, now
 from ..calendar.store import parse_dt
 from ..config import Settings, get_settings
@@ -21,6 +22,8 @@ def _render_task(task: Task, settings: Settings, with_id: bool, current) -> str:
     due = parse_dt(task.due)
     if due is not None:
         line += f" (due {format_when(settings, task.due)}"
+        if task.rrule:
+            line += f", repeats {recurrence.humanize_rrule(task.rrule)}"
         line += ", OVERDUE)" if due < current else ")"
     if with_id:
         line += f"  [id: {task.id}]"

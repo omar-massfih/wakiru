@@ -164,6 +164,156 @@ def test_context_flags_overdue(settings) -> None:
     assert "OVERDUE" in tasks_context(settings)
 
 
+# --- recurring tasks (rrule roll-forward) ----------------------------------- #
+
+
+def test_complete_recurring_rolls_due_forward(settings) -> None:
+    t = store.create_task(
+        settings, "water plants", due=_iso_in(settings, days=-1), rrule="FREQ=DAILY"
+    )
+    rolled = store.complete_task(settings, t.id)
+    assert rolled.done is False and rolled.done_at == ""  # still open
+    due = store.parse_dt(rolled.due)
+    assert due is not None and due > context.now(settings)  # next occurrence
+    assert rolled.rrule == "FREQ=DAILY"  # rule survives the roll
+
+
+def test_complete_recurring_keeps_wall_clock_time(settings) -> None:
+    anchor = (context.now(settings) - timedelta(days=3)).replace(
+        hour=9, minute=0, second=0, microsecond=0
+    )
+    t = store.create_task(
+        settings, "standup notes", due=anchor.isoformat(), rrule="FREQ=DAILY"
+    )
+    rolled = store.complete_task(settings, t.id)
+    due = store.parse_dt(rolled.due)
+    assert (due.hour, due.minute) == (9, 0)
+
+
+def test_complete_exhausted_rule_closes_normally(settings) -> None:
+    t = store.create_task(
+        settings, "one-off", due=_iso_in(settings, days=-1), rrule="FREQ=DAILY;COUNT=1"
+    )
+    done = store.complete_task(settings, t.id)
+    assert done.done is True and done.done_at  # no next occurrence: closed
+
+
+def test_add_op_drops_rule_without_due_anchor(settings) -> None:
+    applied = _apply(settings, [{"op": "add", "title": "floating chore", "rrule": "FREQ=DAILY"}])
+    assert store.list_tasks(settings)[0].rrule == ""
+    assert "recurrence ignored" in applied[0]  # the model is told, not misled
+
+
+def test_add_op_drops_rule_on_unparseable_due(settings) -> None:
+    applied = _apply(settings, [{
+        "op": "add", "title": "trash", "due": "next Friday", "rrule": "FREQ=WEEKLY",
+    }])
+    assert store.list_tasks(settings)[0].rrule == ""  # a rule that could never roll
+    assert "recurrence ignored" in applied[0]
+
+
+def test_add_op_drops_unparseable_rule(settings) -> None:
+    applied = _apply(settings, [{
+        "op": "add", "title": "vague chore",
+        "due": _iso_in(settings, days=1), "rrule": "sometimes",
+    }])
+    assert store.list_tasks(settings)[0].rrule == ""
+    assert "recurrence ignored" in applied[0]
+
+
+def test_add_op_humanizes_recurring_summary(settings) -> None:
+    applied = _apply(settings, [{
+        "op": "add", "title": "take out trash",
+        "due": _iso_in(settings, days=1), "rrule": "FREQ=WEEKLY",
+    }])
+    assert applied == ["added task: take out trash (weekly)"]
+
+
+def test_complete_op_reports_next_due(settings) -> None:
+    t = store.create_task(
+        settings, "water plants", due=_iso_in(settings, days=-1), rrule="FREQ=WEEKLY"
+    )
+    applied = _apply(settings, [{"op": "complete", "id": t.id}])
+    assert applied and applied[0].startswith("completed: water plants (recurs — next due")
+
+
+def test_update_op_ignores_unparseable_rule(settings) -> None:
+    t = store.create_task(
+        settings, "water plants", due=_iso_in(settings, days=1), rrule="FREQ=WEEKLY"
+    )
+    applied = _apply(settings, [{"op": "update", "id": t.id, "rrule": "whenever"}])
+    assert store.get_task(settings, t.id).rrule == "FREQ=WEEKLY"  # untouched
+    assert "recurrence ignored" in applied[0]
+
+
+def test_update_op_ignores_rule_on_undated_task(settings) -> None:
+    t = store.create_task(settings, "floating chore")
+    _apply(settings, [{"op": "update", "id": t.id, "rrule": "FREQ=DAILY"}])
+    assert store.get_task(settings, t.id).rrule == ""  # no due to anchor
+
+
+def test_update_op_accepts_rule_with_new_due_in_same_op(settings) -> None:
+    t = store.create_task(settings, "floating chore")
+    _apply(settings, [{
+        "op": "update", "id": t.id,
+        "due": _iso_in(settings, days=1), "rrule": "FREQ=DAILY",
+    }])
+    assert store.get_task(settings, t.id).rrule == "FREQ=DAILY"
+
+
+def test_doubled_complete_in_one_turn_rolls_once(settings) -> None:
+    t = store.create_task(
+        settings, "water plants", due=_iso_in(settings, days=-1), rrule="FREQ=DAILY"
+    )
+    applied = _apply(settings, [
+        {"op": "complete", "id": t.id},
+        {"op": "complete", "id": t.id},  # duplicate tool call in the same turn
+    ])
+    assert applied[1] == "already completed this turn: water plants"
+    first_roll = store.get_task(settings, t.id).due
+    # A later turn (fresh batch) may complete again — and rolls again.
+    _apply(settings, [{"op": "complete", "id": t.id}])
+    assert store.get_task(settings, t.id).due != first_roll
+
+
+def test_undo_restores_rolled_due(settings) -> None:
+    original_due = _iso_in(settings, days=-1)
+    t = store.create_task(settings, "water plants", due=original_due, rrule="FREQ=DAILY")
+    stored_due = store.get_task(settings, t.id).due
+    _apply(settings, [{"op": "complete", "id": t.id}])
+    assert store.get_task(settings, t.id).due != stored_due  # rolled
+    result = undo_latest(settings, THREAD, 15)
+    assert result.startswith("Undone: restored:")
+    assert store.get_task(settings, t.id).due == stored_due  # back on the old due
+
+
+def test_context_shows_recurrence(settings) -> None:
+    store.create_task(
+        settings, "water plants", due=_iso_in(settings, days=1), rrule="FREQ=WEEKLY"
+    )
+    assert "repeats weekly" in tasks_context(settings)
+
+
+def test_store_migrates_pre_rrule_db(settings, tmp_path) -> None:
+    # A DB created before the rrule column existed gains it in place.
+    import sqlite3 as sqlite3_mod
+    from pathlib import Path
+
+    Path(settings.tasks_db_path).parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3_mod.connect(settings.tasks_db_path)
+    conn.execute(
+        "CREATE TABLE tasks (id TEXT PRIMARY KEY, title TEXT NOT NULL,"
+        " done INTEGER DEFAULT 0, due TEXT DEFAULT '', notes TEXT DEFAULT '',"
+        " created TEXT DEFAULT '', updated TEXT DEFAULT '', done_at TEXT DEFAULT '')"
+    )
+    conn.execute("INSERT INTO tasks (id, title) VALUES ('old1', 'legacy task')")
+    conn.commit()
+    conn.close()
+    tasks = store.list_tasks(settings)
+    assert [t.title for t in tasks] == ["legacy task"]
+    assert tasks[0].rrule == ""
+
+
 # --- undo (via the cross-ledger arbiter) ------------------------------------ #
 
 

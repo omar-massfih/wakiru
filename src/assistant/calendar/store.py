@@ -22,13 +22,13 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from ..config import Settings, postgres_backend
-from ..sqlite_util import open_db, transaction
+from ..sqlite_util import ensure_columns, open_db, transaction
 
 # Columns a caller may set on create/update (id + timestamps are managed here).
 _FIELDS = ("title", "start", "end", "location", "notes", "rrule", "exdates", "overrides")
 
 # Columns added after the table's first release, migrated in on connect (see
-# :func:`_ensure_columns`). All are TEXT DEFAULT ''.
+# :func:`assistant.sqlite_util.ensure_columns`). All are TEXT DEFAULT ''.
 _ADDED_COLUMNS = ("rrule", "exdates", "overrides", "caldav_href", "caldav_etag")
 
 
@@ -77,7 +77,7 @@ def _open(settings: Settings) -> sqlite3.Connection:
         " caldav_href TEXT DEFAULT '', caldav_etag TEXT DEFAULT '',"
         " created TEXT DEFAULT '', updated TEXT DEFAULT '')"
     )
-    _ensure_columns(conn)
+    ensure_columns(conn, "events", _ADDED_COLUMNS)
     return conn
 
 
@@ -86,18 +86,6 @@ def _connect(settings: Settings) -> Iterator[sqlite3.Connection]:
     """One transaction on a fresh connection, closed on exit."""
     with transaction(_open(settings)) as conn:
         yield conn
-
-
-def _ensure_columns(conn: sqlite3.Connection) -> None:
-    """Add columns introduced after the table's first creation (cheap migration).
-
-    ``CREATE TABLE IF NOT EXISTS`` never alters an existing table, so a DB created
-    before these columns existed would lack them. Add any that are missing in place.
-    """
-    have = {row["name"] for row in conn.execute("PRAGMA table_info(events)")}
-    for column in _ADDED_COLUMNS:
-        if column not in have:
-            conn.execute(f"ALTER TABLE events ADD COLUMN {column} TEXT DEFAULT ''")
 
 
 def _row_to_event(row: sqlite3.Row) -> Event:

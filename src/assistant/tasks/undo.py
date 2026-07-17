@@ -54,6 +54,17 @@ def record_write(
     )
 
 
+def completed_in_batch(
+    settings: Settings, thread_id: str, batch_id: str, task_id: str
+) -> bool:
+    """True when this turn's batch already completed ``task_id`` (see
+    write_ledger.batch_has; keeps a recurring task's roll-forward idempotent
+    within a turn)."""
+    return write_ledger.batch_has(
+        _SPEC, settings, thread_id, batch_id, task_id, "complete"
+    )
+
+
 def latest_applied_at(
     settings: Settings, thread_id: str, window_minutes: int
 ) -> datetime | None:

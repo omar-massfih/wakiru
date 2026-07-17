@@ -32,6 +32,21 @@ def open_db(path: str | Path, *, row_factory: bool = True) -> sqlite3.Connection
     return conn
 
 
+def ensure_columns(
+    conn: sqlite3.Connection, table: str, columns: tuple[str, ...]
+) -> None:
+    """Add ``TEXT DEFAULT ''`` columns missing from ``table`` (cheap migration).
+
+    ``CREATE TABLE IF NOT EXISTS`` never alters an existing table, so a DB
+    created before a column existed would lack it. Reads the name positionally
+    (``row[1]``) so it works with or without a row factory.
+    """
+    have = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+    for column in columns:
+        if column not in have:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} TEXT DEFAULT ''")
+
+
 @contextmanager
 def transaction(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
     """One transaction on ``conn``, committed on clean exit and always closed.

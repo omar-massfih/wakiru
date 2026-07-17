@@ -22,10 +22,13 @@ from datetime import datetime
 
 from ..calendar.store import parse_dt  # shared tz-aware ISO parsing
 from ..config import Settings, postgres_backend
-from ..sqlite_util import open_db, transaction
+from ..sqlite_util import ensure_columns, open_db, transaction
 
 # Columns a caller may set on create/update (id + timestamps + done_at managed here).
-_FIELDS = ("title", "due", "notes")
+_FIELDS = ("title", "due", "notes", "rrule")
+
+# Columns added after the table's first creation (see _open's cheap migration).
+_ADDED_COLUMNS = ("rrule",)
 
 
 @dataclass
@@ -34,7 +37,10 @@ class Task:
 
     ``due`` is an optional tz-aware ISO-8601 string (empty for an undated task).
     ``done`` is the completion state; ``done_at`` is the ISO stamp when it was
-    completed (empty while open).
+    completed (empty while open). ``rrule`` is an optional RFC 5545 recurrence
+    rule (e.g. ``FREQ=WEEKLY;BYDAY=SU``) anchored at ``due``: completing a
+    recurring task rolls its ``due`` forward to the next occurrence instead of
+    closing it (see :func:`complete_task`).
     """
 
     id: str
@@ -42,6 +48,7 @@ class Task:
     done: bool = False
     due: str = ""
     notes: str = ""
+    rrule: str = ""
     created: str = ""
     updated: str = ""
     done_at: str = ""
@@ -52,9 +59,10 @@ def _open(settings: Settings) -> sqlite3.Connection:
     conn.execute(
         "CREATE TABLE IF NOT EXISTS tasks ("
         " id TEXT PRIMARY KEY, title TEXT NOT NULL, done INTEGER DEFAULT 0,"
-        " due TEXT DEFAULT '', notes TEXT DEFAULT '', created TEXT DEFAULT '',"
-        " updated TEXT DEFAULT '', done_at TEXT DEFAULT '')"
+        " due TEXT DEFAULT '', notes TEXT DEFAULT '', rrule TEXT DEFAULT '',"
+        " created TEXT DEFAULT '', updated TEXT DEFAULT '', done_at TEXT DEFAULT '')"
     )
+    ensure_columns(conn, "tasks", _ADDED_COLUMNS)
     return conn
 
 
@@ -72,6 +80,7 @@ def _row_to_task(row: sqlite3.Row) -> Task:
         done=bool(row["done"]),
         due=row["due"] or "",
         notes=row["notes"] or "",
+        rrule=row["rrule"] or "",
         created=row["created"] or "",
         updated=row["updated"] or "",
         done_at=row["done_at"] or "",
@@ -113,11 +122,11 @@ def _sort_key(task: Task) -> tuple[int, float, str]:
 
 
 def create_task(
-    settings: Settings, title: str, due: str = "", notes: str = ""
+    settings: Settings, title: str, due: str = "", notes: str = "", rrule: str = ""
 ) -> Task:
     """Insert a new open task and return it (with a generated id and timestamps)."""
     if storage_postgres := postgres_backend(settings):
-        return storage_postgres.create_task(settings, title, due, notes)
+        return storage_postgres.create_task(settings, title, due, notes, rrule)
     now = _stamp_now(settings)
     task = Task(
         id=uuid.uuid4().hex[:12],
@@ -125,14 +134,16 @@ def create_task(
         done=False,
         due=_normalize_due(settings, due),
         notes=notes.strip(),
+        rrule=rrule.strip(),
         created=now,
         updated=now,
     )
     with _connect(settings) as conn:
         conn.execute(
-            "INSERT INTO tasks (id, title, done, due, notes, created, updated, done_at)"
-            " VALUES (?, ?, 0, ?, ?, ?, ?, '')",
-            (task.id, task.title, task.due, task.notes, task.created, task.updated),
+            "INSERT INTO tasks (id, title, done, due, notes, rrule, created, updated, done_at)"
+            " VALUES (?, ?, 0, ?, ?, ?, ?, ?, '')",
+            (task.id, task.title, task.due, task.notes, task.rrule,
+             task.created, task.updated),
         )
     return task
 
@@ -163,7 +174,7 @@ def list_tasks(settings: Settings, include_done: bool = False) -> list[Task]:
     return open_tasks + done_tasks
 
 
-def update_task(settings: Settings, task_id: str, **fields: str) -> Task | None:
+def update_task(settings: Settings, task_id: str, **fields: str | None) -> Task | None:
     """Update the given columns on a task; return it, or ``None`` if absent."""
     if storage_postgres := postgres_backend(settings):
         updates = {k: str(v).strip() for k, v in fields.items() if k in _FIELDS and v is not None}
@@ -190,8 +201,36 @@ def update_task(settings: Settings, task_id: str, **fields: str) -> Task | None:
     return get_task(settings, task_id)
 
 
+def next_due(settings: Settings, task: Task) -> str:
+    """The recurring task's next due after now (and after its current due), as a
+    tz-aware ISO string — ``""`` when the task doesn't recur, its rule is
+    exhausted (``UNTIL`` passed), or its rule/due is unusable.
+
+    The rule re-anchors at the current due on every roll, so ``COUNT`` counts
+    from the latest completion rather than the task's creation — bound a chore
+    with ``UNTIL`` instead.
+    """
+    from ..calendar.context import now, resolve_tz
+    from ..calendar.recurrence import build_rule
+
+    dtstart = parse_dt(task.due)
+    if not task.rrule or dtstart is None:
+        return ""
+    rule = build_rule(task.rrule, dtstart, resolve_tz(settings))
+    if rule is None:
+        return ""
+    upcoming = rule.after(max(now(settings), dtstart))
+    return upcoming.isoformat() if upcoming is not None else ""
+
+
 def complete_task(settings: Settings, task_id: str) -> Task | None:
-    """Mark a task done (idempotent); return it, or ``None`` if absent."""
+    """Mark a task done (idempotent); return it, or ``None`` if absent.
+
+    A recurring task (``rrule`` set, next occurrence available) is not closed:
+    its ``due`` rolls forward to that occurrence and it stays open — the fired
+    ledger keys on ``(task_id, due, lead)``, so reminders re-arm on the new due.
+    An exhausted or ruleless task completes normally.
+    """
     if storage_postgres := postgres_backend(settings):
         return storage_postgres.complete_task(settings, task_id)
     existing = get_task(settings, task_id)
@@ -200,11 +239,18 @@ def complete_task(settings: Settings, task_id: str) -> Task | None:
     if existing.done:
         return existing
     now = _stamp_now(settings)
+    upcoming = next_due(settings, existing)
     with _connect(settings) as conn:
-        conn.execute(
-            "UPDATE tasks SET done = 1, done_at = ?, updated = ? WHERE id = ?",
-            (now, now, task_id),
-        )
+        if upcoming:
+            conn.execute(
+                "UPDATE tasks SET due = ?, updated = ? WHERE id = ?",
+                (upcoming, now, task_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE tasks SET done = 1, done_at = ?, updated = ? WHERE id = ?",
+                (now, now, task_id),
+            )
     return get_task(settings, task_id)
 
 
@@ -216,11 +262,11 @@ def restore_task(settings: Settings, task: Task) -> Task:
     with _connect(settings) as conn:
         conn.execute(
             "INSERT OR REPLACE INTO tasks"
-            " (id, title, done, due, notes, created, updated, done_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            " (id, title, done, due, notes, rrule, created, updated, done_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 task.id, task.title, int(task.done), task.due, task.notes,
-                task.created, task.updated, task.done_at,
+                task.rrule, task.created, task.updated, task.done_at,
             ),
         )
     return task

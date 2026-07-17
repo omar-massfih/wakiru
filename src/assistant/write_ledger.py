@@ -123,6 +123,36 @@ def record_write(
         )
 
 
+def batch_has(
+    spec: LedgerSpec,
+    settings: Settings,
+    thread_id: str,
+    batch_id: str,
+    target_id: str,
+    op: str,
+) -> bool:
+    """True when this batch already logged ``op`` against ``target_id`` — lets a
+    write path treat a repeated op inside one turn as a duplicate (e.g. a doubled
+    ``complete`` on a recurring task would otherwise roll its due twice)."""
+    if not thread_id or not batch_id:
+        return False
+    if storage_postgres := postgres_backend(settings):
+        rows = getattr(storage_postgres, spec.pg_rows)(settings, thread_id)
+        return any(
+            row["batch_id"] == batch_id
+            and str(row[spec.target_column]) == target_id
+            and row["op"] == op
+            for row in rows
+        )
+    with connect(spec, settings) as conn:
+        row = conn.execute(
+            f"SELECT 1 FROM write_log WHERE thread_id = ? AND batch_id = ?"
+            f" AND {spec.target_column} = ? AND op = ? LIMIT 1",
+            (thread_id, batch_id, target_id, op),
+        ).fetchone()
+    return row is not None
+
+
 def latest_applied_at(
     spec: LedgerSpec, settings: Settings, thread_id: str, window_minutes: int
 ) -> datetime | None:

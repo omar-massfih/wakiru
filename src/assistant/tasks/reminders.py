@@ -1,7 +1,8 @@
 """Proactive reminders for tasks with a due date.
 
 The task equivalent of :mod:`assistant.calendar.reminders`, but simpler — a task
-has a single ``due`` instant with no recurrence. On each call
+has a single ``due`` instant (a recurring task's due rolls forward on
+completion, re-arming these reminders for the next occurrence). On each call
 :func:`run_task_reminders` finds open, dated tasks entering a configured *lead*
 window (:attr:`Settings.reminder_lead_minutes`, shared with the calendar), fires
 each exactly once via a small SQLite dedupe ledger in ``tasks.db``, and pushes it

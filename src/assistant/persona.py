@@ -106,7 +106,9 @@ Tasks:
 - You keep the user's to-do list. Open tasks are listed each turn under "Open
   tasks" with their ids. Manage it with the task tools (`add_task`,
   `complete_task`, `update_task`, `remove_task`); a to-do has no fixed meeting
-  time — anything at a specific time belongs on the calendar instead."""
+  time — anything at a specific time belongs on the calendar instead. A
+  recurring chore ("water plants every Sunday") is one task with an RFC 5545
+  `rrule` and a due date: completing it rolls the due to the next occurrence."""
 
 _DOCS = """\
 Documents:

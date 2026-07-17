@@ -81,26 +81,34 @@ def humanize_rrule(rule: str) -> str:
     return rule
 
 
-def _rule_for(event: Event, tz: tzinfo | None = None):
-    """The dateutil rule for a series master, or ``None`` if start/rule is unusable.
+def build_rule(rule: str, dtstart: datetime, tz: tzinfo | None = None):
+    """The dateutil rule for ``rule`` anchored at ``dtstart``, or ``None`` if
+    unusable. Shared by calendar events and recurring tasks.
 
     ``tz`` should be the assistant's timezone (a ZoneInfo when configured).
-    Stored starts round-trip through ISO strings, whose parsed tzinfo is a
+    Stored stamps round-trip through ISO strings, whose parsed tzinfo is a
     *fixed* UTC offset — expanding a rule from that would pin every occurrence
-    to the offset the master was created under, drifting an hour across a DST
+    to the offset the anchor was created under, drifting an hour across a DST
     change. Converting DTSTART to the zone first keeps occurrences on the same
     wall-clock time year-round.
     """
-    dtstart = parse_dt(event.start)
-    if dtstart is None:
-        return None
     if tz is not None:
         dtstart = dtstart.astimezone(tz)
     try:
-        return rrulestr(event.rrule, dtstart=dtstart)
+        return rrulestr(rule, dtstart=dtstart)
     except (ValueError, TypeError):
-        logger.warning("skipping event %s with invalid rrule %r", event.id, event.rrule)
         return None
+
+
+def _rule_for(event: Event, tz: tzinfo | None = None):
+    """The dateutil rule for a series master, or ``None`` if start/rule is unusable."""
+    dtstart = parse_dt(event.start)
+    if dtstart is None:
+        return None
+    rule = build_rule(event.rrule, dtstart, tz)
+    if rule is None:
+        logger.warning("skipping event %s with invalid rrule %r", event.id, event.rrule)
+    return rule
 
 
 def resolve_occurrence(
