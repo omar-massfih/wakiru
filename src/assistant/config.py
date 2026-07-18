@@ -12,14 +12,15 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     """Settings for the assistant.
 
-    Auth is handled by the Codex CLI itself (``codex login`` / ChatGPT sign-in),
-    so there is no API key here.
+    For the codex and chatgpt providers, auth is handled by the Codex CLI's
+    login (``codex login`` / ChatGPT sign-in), so there is no API key here.
     """
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     # --- LLM provider selection ---
-    # Which backend the agent's model uses. Wired: "codex", "openai", "anthropic".
+    # Which backend the agent's model uses.
+    # Wired: "codex", "chatgpt", "openai", "anthropic".
     llm_provider: str = "codex"
 
     # --- API-backed providers (openai / anthropic) ---
@@ -58,6 +59,22 @@ class Settings(BaseSettings):
     # per-call approval). Off by default — costs extra tokens/latency;
     # widen deliberately, matching codex_sandbox's conservative default.
     codex_web_search: bool = False
+
+    # --- ChatGPT backend (llm_provider="chatgpt") ---
+    # Talks to chatgpt.com's backend directly, reusing the OAuth tokens the
+    # Codex CLI keeps in $CODEX_HOME/auth.json (run `codex login` once).
+    # Usage and rate limits come from the ChatGPT plan, not API billing.
+    # The backend only accepts codex-supported model ids ("gpt-5.5" as of
+    # codex-cli 0.144.5); anything else gets an HTTP 400.
+    chatgpt_model: str = "gpt-5.5"
+    # Override the auth file location. None => $CODEX_HOME/auth.json,
+    # falling back to ~/.codex/auth.json.
+    chatgpt_auth_file: str | None = None
+    # Socket timeout (seconds) for a single request/stream read.
+    chatgpt_timeout: int = 300
+    # Max concurrent requests; excess calls queue for a slot (bursts would
+    # otherwise eat into the ChatGPT plan's rate limits all at once).
+    chatgpt_max_concurrency: int = 4
 
     # --- Persona ---
     # Voice register for the assistant's replies: "warm" (default), "neutral",

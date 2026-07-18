@@ -10,7 +10,7 @@ from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage
 from assistant.api import app
 from assistant.codex_runner import build_command
 from assistant.config import Settings
-from assistant.llm import CodexChatModel, build_model
+from assistant.llm import ChatGptChatModel, CodexChatModel, build_model
 
 
 def test_health() -> None:
@@ -184,9 +184,25 @@ def test_codex_chat_model_stream_emits_chunks(monkeypatch) -> None:
     assert chunks == ["a", "b"]
 
 
+def test_chatgpt_chat_model_stream_emits_chunks(monkeypatch) -> None:
+    from assistant import llm as llm_module
+
+    monkeypatch.setattr(
+        llm_module, "run_chatgpt_stream", lambda prompt, settings=None: iter(["a", "b"])
+    )
+    model = ChatGptChatModel(settings=Settings())
+    chunks = [c.content for c in model.stream([HumanMessage(content="hi")]) if c.content]
+    assert chunks == ["a", "b"]
+
+
 def test_build_model_defaults_to_codex() -> None:
     model = build_model(Settings())
     assert isinstance(model, CodexChatModel)
+
+
+def test_build_model_selects_chatgpt() -> None:
+    model = build_model(Settings(llm_provider="chatgpt"))
+    assert isinstance(model, ChatGptChatModel)
 
 
 def test_build_model_unknown_provider_raises() -> None:

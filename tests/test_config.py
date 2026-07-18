@@ -37,6 +37,14 @@ def test_defaults_keep_the_conservative_posture() -> None:
     assert settings.enable_email_send is False  # sending needs a second switch
 
 
+def test_chatgpt_backend_defaults() -> None:
+    settings = Settings()
+    assert settings.chatgpt_model == "gpt-5.5"
+    assert settings.chatgpt_auth_file is None  # => $CODEX_HOME/auth.json
+    assert settings.chatgpt_timeout == 300
+    assert settings.chatgpt_max_concurrency == 4
+
+
 def test_persona_and_quiet_defaults() -> None:
     assert Settings().persona_style == "warm"
     # conftest blanks QUIET_HOURS_DEFAULT in the test environment, so the

@@ -160,3 +160,23 @@ def test_error_reply_distinguishes_failure_kinds() -> None:
     # No internals leak into any of them.
     for text in (timeout, snag, unexpected):
         assert "Codex" not in text and "boom" not in text
+
+
+def test_error_reply_maps_chatgpt_failures_like_codex() -> None:
+    from assistant.chatgpt_backend import (
+        ChatGptAuthError,
+        ChatGptError,
+        ChatGptTimeoutError,
+    )
+    from assistant.codex_runner import CodexError, CodexTimeoutError
+
+    assert chat.error_reply(ChatGptTimeoutError("stalled")) == chat.error_reply(
+        CodexTimeoutError("slow")
+    )
+    assert chat.error_reply(ChatGptError("HTTP 500")) == chat.error_reply(
+        CodexError("code 1")
+    )
+    # Auth expiry is user-actionable, so it gets its own message.
+    auth = chat.error_reply(ChatGptAuthError("refresh failed"))
+    assert "codex login" in auth
+    assert "HTTP" not in auth and "refresh failed" not in auth

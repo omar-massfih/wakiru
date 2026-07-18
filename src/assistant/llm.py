@@ -6,12 +6,14 @@ graph, the API) is provider-agnostic. ``build_model`` selects one via
 
 Wired today:
   - ``codex``     — drives the Codex CLI (auth via ``codex login``; no API key).
+  - ``chatgpt``   — chatgpt.com's backend over HTTP, reusing the Codex CLI's
+                    OAuth tokens (``codex login``; no API key).
   - ``openai``    — hosted OpenAI / any OpenAI-compatible endpoint via ChatOpenAI.
   - ``anthropic`` — Claude via ChatAnthropic.
 
 The API-backed providers read their key/model/base-url from ``Settings``
-(``llm_api_key`` / ``llm_model`` / ``llm_base_url``); the codex provider ignores
-those and authenticates through the Codex CLI itself.
+(``llm_api_key`` / ``llm_model`` / ``llm_base_url``); the codex and chatgpt
+providers ignore those and authenticate through the Codex CLI's login.
 """
 
 from __future__ import annotations
@@ -37,13 +39,14 @@ from langchain_core.messages.tool import ToolCall, ToolCallChunk
 from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
 from pydantic import Field
 
+from .chatgpt_backend import run_chatgpt, run_chatgpt_stream
 from .codex_runner import run_codex, run_codex_stream
 from .config import Settings, get_settings
 
 logger = logging.getLogger(__name__)
 
 # --------------------------------------------------------------------------- #
-# Codex provider
+# Text-only providers (codex / chatgpt): emulated tool calling
 # --------------------------------------------------------------------------- #
 
 _ROLE_LABELS = {
@@ -196,23 +199,28 @@ def _render_prompt(messages: list[BaseMessage], tools: list[dict] | None = None)
     return "\n\n".join(lines)
 
 
-class CodexChatModel(BaseChatModel):
-    """A ``BaseChatModel`` that delegates generation to the Codex CLI.
+class _TextToolChatModel(BaseChatModel):
+    """A ``BaseChatModel`` over a backend that only speaks plain text.
 
-    ``bind_tools`` is emulated over plain text: schemas are injected into the
-    rendered prompt and tool calls are parsed back out of the reply (see
-    :func:`parse_tool_calls`), so the graph's tool loop drives codex exactly
-    like the native-function-calling API providers.
+    ``bind_tools`` is emulated: schemas are injected into the rendered prompt
+    and tool calls are parsed back out of the reply (see
+    :func:`parse_tool_calls`), so the graph's tool loop drives these backends
+    exactly like the native-function-calling API providers. Subclasses supply
+    the transport via :meth:`_run` / :meth:`_run_stream`; everything else —
+    including the fence-suppression streaming logic — is shared so the
+    protocol behaves identically across backends.
     """
 
     settings: Settings
     bound_tools: list[dict] = Field(default_factory=list)
 
-    @property
-    def _llm_type(self) -> str:
-        return "codex-cli"
+    def _run(self, prompt: str) -> str:
+        raise NotImplementedError
 
-    def bind_tools(self, tools: Sequence[Any], **kwargs: Any) -> CodexChatModel:
+    def _run_stream(self, prompt: str) -> Iterator[str]:
+        raise NotImplementedError
+
+    def bind_tools(self, tools: Sequence[Any], **kwargs: Any) -> _TextToolChatModel:
         from langchain_core.utils.function_calling import convert_to_openai_tool
 
         return self.model_copy(
@@ -227,7 +235,7 @@ class CodexChatModel(BaseChatModel):
         **kwargs: Any,
     ) -> ChatResult:
         prompt = _render_prompt(messages, tools=self.bound_tools)
-        text = run_codex(prompt, settings=self.settings)
+        text = self._run(prompt)
         if self.bound_tools:
             content, calls = parse_tool_calls(text)
             message = AIMessage(content=content, tool_calls=calls)
@@ -242,7 +250,7 @@ class CodexChatModel(BaseChatModel):
         run_manager: AsyncCallbackManagerForLLMRun | None = None,
         **kwargs: Any,
     ) -> ChatResult:
-        # The subprocess call blocks; without this override, ainvoke would run
+        # The backend call blocks; without this override, ainvoke would run
         # it on the event loop's default executor with no clear ownership.
         return await asyncio.to_thread(self._generate, messages, stop, None, **kwargs)
 
@@ -259,7 +267,7 @@ class CodexChatModel(BaseChatModel):
         # needs no override — astream falls back to running this in an executor.
         prompt = _render_prompt(messages, tools=self.bound_tools)
         if not self.bound_tools:
-            for delta in run_codex_stream(prompt, settings=self.settings):
+            for delta in self._run_stream(prompt):
                 chunk = ChatGenerationChunk(message=AIMessageChunk(content=delta))
                 if run_manager:
                     run_manager.on_llm_new_token(delta, chunk=chunk)
@@ -273,7 +281,7 @@ class CodexChatModel(BaseChatModel):
         buffer = ""
         flushed = 0
         fence_at: int | None = None  # confirmed fence start — never emit past it
-        for delta in run_codex_stream(prompt, settings=self.settings):
+        for delta in self._run_stream(prompt):
             buffer += delta
             if fence_at is None:
                 found = buffer.find(_STREAM_FENCE_HINT, max(flushed - 8, 0))
@@ -318,8 +326,40 @@ class CodexChatModel(BaseChatModel):
             yield chunk
 
 
+class CodexChatModel(_TextToolChatModel):
+    """Delegates generation to the Codex CLI (see :mod:`assistant.codex_runner`)."""
+
+    @property
+    def _llm_type(self) -> str:
+        return "codex-cli"
+
+    def _run(self, prompt: str) -> str:
+        return run_codex(prompt, settings=self.settings)
+
+    def _run_stream(self, prompt: str) -> Iterator[str]:
+        return run_codex_stream(prompt, settings=self.settings)
+
+
+class ChatGptChatModel(_TextToolChatModel):
+    """Delegates generation to chatgpt.com's backend (see :mod:`assistant.chatgpt_backend`)."""
+
+    @property
+    def _llm_type(self) -> str:
+        return "chatgpt-backend"
+
+    def _run(self, prompt: str) -> str:
+        return run_chatgpt(prompt, settings=self.settings)
+
+    def _run_stream(self, prompt: str) -> Iterator[str]:
+        return run_chatgpt_stream(prompt, settings=self.settings)
+
+
 def _build_codex(settings: Settings) -> BaseChatModel:
     return CodexChatModel(settings=settings)
+
+
+def _build_chatgpt(settings: Settings) -> BaseChatModel:
+    return ChatGptChatModel(settings=settings)
 
 
 # --------------------------------------------------------------------------- #
@@ -376,6 +416,7 @@ ProviderBuilder = Callable[[Settings], BaseChatModel]
 
 PROVIDERS: dict[str, ProviderBuilder] = {
     "codex": _build_codex,
+    "chatgpt": _build_chatgpt,
     "openai": _build_openai,
     "anthropic": _build_anthropic,
 }
