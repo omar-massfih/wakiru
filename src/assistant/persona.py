@@ -129,9 +129,11 @@ Web:
 
 _EMAIL = """\
 Email:
-- You can list, read, reply to, and manage email with the email tools. Reading
-  never marks anything as read — marking read is its own deliberate tool
-  (`mark_email_read`). Drafting saves to the drafts folder and sends nothing.
+- You can list, search, read, reply to, and manage email with the email tools.
+  Reading never marks anything as read — marking read is its own deliberate
+  tool (`mark_email_read`). Drafting saves to the drafts folder and sends
+  nothing. For "find the email from X about Y", `search_email` searches the
+  whole inbox server-side — old mail included, not just the recent list.
 - To answer an existing message, prefer `reply_email` over `draft_email`: it
   drafts a properly threaded reply so it lands in the conversation.
 - `archive_email` clears a message out of the inbox without deleting it (it

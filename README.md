@@ -28,8 +28,8 @@ Telegram bot  /
   (create/reschedule/cancel/skip/move), tasks (add/complete/update/remove), memory
   (remember/forget/search), document search + whole-document summarize, web
   (`read_url`/`ingest_url` when `ENABLE_DOCS_URL_INGEST` is on), and email
-  (list/read/draft, threaded replies, archive, mark read, label, attachment ingestion
-  into documents; `send_email`/`send_reply` exist only when `ENABLE_EMAIL_SEND`
+  (list/search/read/draft, threaded replies, archive, mark read, label, attachment
+  ingestion into documents; `send_email`/`send_reply` exist only when `ENABLE_EMAIL_SEND`
   is on). Each tool wraps a guarded write path, so ambiguity guards, conflict notes, and
   the undo ledger all apply.
 - **`chat.py`** — the channel-agnostic core: one turn of conversation plus its

@@ -809,3 +809,91 @@ def test_snapshot_disabled_is_inert(tmp_path, monkeypatch) -> None:
                     email_snapshot_minutes=0)
     assert snapshot.refresh(zero) is None
     assert snapshot.current(zero) == ""
+
+
+# --- server-side search ------------------------------------------------------ #
+
+
+def _search_command(fake: _FakeIMAP) -> tuple:
+    return next(c for c in fake.commands if c[1] == "SEARCH")
+
+
+def test_search_messages_builds_imap_criteria(settings, monkeypatch) -> None:
+    fake = _FakeIMAP(uids=(b"3",), raw={"3": _raw("Kari <k@x.no>", "Invoice", "D")})
+    monkeypatch.setattr(client, "imap_connect", lambda s: fake)
+    messages = client.search_messages(
+        settings, sender="kari", subject="invoice", since_days=30
+    )
+    assert [m.subject for m in messages] == ["Invoice"]
+    command = _search_command(fake)
+    query = command[-1]
+    assert 'FROM "kari"' in query and 'SUBJECT "invoice"' in query and "SINCE" in query
+    # Read-only select + header PEEK, exactly like list_recent.
+    assert ("select", "INBOX", True) in fake.commands
+    assert any("BODY.PEEK" in str(c) for c in fake.commands)
+
+
+def test_search_messages_quotes_embedded_quotes(settings, monkeypatch) -> None:
+    fake = _FakeIMAP(uids=(), raw={})
+    monkeypatch.setattr(client, "imap_connect", lambda s: fake)
+    client.search_messages(settings, subject='say "hi"')
+    assert '"say \\"hi\\""' in _search_command(fake)[-1]
+
+
+def test_search_messages_non_ascii_uses_utf8_charset_as_bytes(settings, monkeypatch) -> None:
+    fake = _FakeIMAP(uids=(), raw={})
+    monkeypatch.setattr(client, "imap_connect", lambda s: fake)
+    client.search_messages(settings, subject="møte")
+    command = _search_command(fake)
+    assert command[2] == "CHARSET" and command[3] == "UTF-8"
+    # imaplib encodes str args as ASCII (and would raise); bytes pass through.
+    assert isinstance(command[-1], bytes) and "møte".encode() in command[-1]
+
+
+def test_search_messages_strips_crlf_from_terms(settings, monkeypatch) -> None:
+    fake = _FakeIMAP(uids=(), raw={})
+    monkeypatch.setattr(client, "imap_connect", lambda s: fake)
+    client.search_messages(settings, text="x\r\nA999 EXPUNGE")
+    query = _search_command(fake)[-1]
+    # A newline in a term must never reach the wire — it would inject a
+    # second IMAP command.
+    assert "\r" not in query and "\n" not in query
+    assert '"x  A999 EXPUNGE"' in query
+
+
+def test_search_messages_since_date_ignores_locale(settings, monkeypatch) -> None:
+    import re as re_mod
+
+    fake = _FakeIMAP(uids=(), raw={})
+    monkeypatch.setattr(client, "imap_connect", lambda s: fake)
+    client.search_messages(settings, sender="a", since_days=30)
+    query = _search_command(fake)[-1]
+    # IMAP dates need English month abbreviations regardless of LC_TIME.
+    assert re_mod.search(
+        r"SINCE \d{2}-(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)-\d{4}", query
+    )
+
+
+def test_search_messages_without_criteria_is_empty(settings, monkeypatch) -> None:
+    fake = _FakeIMAP()
+    monkeypatch.setattr(client, "imap_connect", lambda s: fake)
+    assert client.search_messages(settings) == []
+    assert fake.commands == []  # no criteria: the mailbox is never touched
+
+
+def test_search_email_tool_lists_matches(settings, monkeypatch) -> None:
+    from assistant.tools import ToolContext, tool_map
+
+    fake = _FakeIMAP(uids=(b"3",), raw={"3": _raw("Kari <k@x.no>", "Invoice", "D")})
+    monkeypatch.setattr(client, "imap_connect", lambda s: fake)
+    result = tool_map(settings)["search_email"].run(
+        ToolContext(settings=settings), sender="kari"
+    )
+    assert "[3]" in result and "Invoice" in result
+
+
+def test_search_email_tool_requires_a_criterion(settings) -> None:
+    from assistant.tools import ToolContext, tool_map
+
+    result = tool_map(settings)["search_email"].run(ToolContext(settings=settings))
+    assert "at least one" in result

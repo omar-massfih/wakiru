@@ -655,6 +655,31 @@ def _list_email(ctx: ToolContext, unread_only: bool = True) -> str:
     )
 
 
+def _search_email(
+    ctx: ToolContext,
+    sender: str = "",
+    subject: str = "",
+    text: str = "",
+    since_days: str = "",
+) -> str:
+    from .mail import client as mail_client
+
+    days = _int_arg(since_days, 0)
+    if days is None or days < 0:
+        return "since_days must be a number of days."
+    if not (str(sender).strip() or str(subject).strip() or str(text).strip()):
+        return "Give at least one of sender, subject, or text."
+    messages = mail_client.search_messages(
+        ctx.settings, sender=str(sender), subject=str(subject),
+        text=str(text), since_days=days,
+    )
+    if not messages:
+        return "No matching messages."
+    return "\n".join(
+        f"- [{m.uid}] {m.sender} — {m.subject} ({m.date})" for m in messages
+    )
+
+
 def _read_email(ctx: ToolContext, uid: str) -> str:
     from .mail import client as mail_client
 
@@ -810,6 +835,20 @@ def _email_tools(settings: Settings) -> list[ToolSpec]:
                 [],
             ),
             _list_email,
+        ),
+        ToolSpec(
+            "search_email",
+            "Search the whole inbox server-side, old mail included.",
+            _params(
+                {
+                    "sender": ("string", "Match the From header"),
+                    "subject": ("string", "Match the Subject header"),
+                    "text": ("string", "Match anywhere in the message"),
+                    "since_days": ("string", "Only the last N days"),
+                },
+                [],
+            ),
+            _search_email,
         ),
         ToolSpec(
             "read_email",

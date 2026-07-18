@@ -24,7 +24,7 @@ import logging
 import re
 import smtplib
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from email import message_from_bytes
 from email.header import decode_header, make_header
 from email.message import EmailMessage
@@ -108,6 +108,29 @@ def _smtp_connect(settings: Settings) -> smtplib.SMTP:
     return conn
 
 
+def _headers_for(conn, uids: list[bytes], limit: int, unread: bool) -> list[Message]:
+    """Header-only :class:`Message` rows for the newest ``limit`` uids —
+    ``BODY.PEEK`` keeps unread mail unread."""
+    messages: list[Message] = []
+    for uid in reversed(uids[-limit:]):  # newest first
+        _, fetched = conn.uid(
+            "FETCH", uid, "(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE)])"
+        )
+        if not fetched or not isinstance(fetched[0], tuple):
+            continue
+        headers = message_from_bytes(fetched[0][1])
+        messages.append(
+            Message(
+                uid=uid.decode(),
+                sender=_decode(headers.get("From")),
+                subject=_decode(headers.get("Subject")),
+                date=_decode(headers.get("Date")),
+                unread=unread,
+            )
+        )
+    return messages
+
+
 def list_recent(settings: Settings, unread_only: bool = True, limit: int | None = None) -> list[Message]:
     """Recent messages from INBOX, newest first. Headers only — ``BODY.PEEK`` keeps
     unread mail unread."""
@@ -118,24 +141,78 @@ def list_recent(settings: Settings, unread_only: bool = True, limit: int | None 
         criterion = "UNSEEN" if unread_only else "ALL"
         _, data = conn.uid("SEARCH", None, criterion)
         uids = (data[0] or b"").split()
-        messages: list[Message] = []
-        for uid in reversed(uids[-limit:]):  # newest first
-            _, fetched = conn.uid(
-                "FETCH", uid, "(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE)])"
-            )
-            if not fetched or not isinstance(fetched[0], tuple):
-                continue
-            headers = message_from_bytes(fetched[0][1])
-            messages.append(
-                Message(
-                    uid=uid.decode(),
-                    sender=_decode(headers.get("From")),
-                    subject=_decode(headers.get("Subject")),
-                    date=_decode(headers.get("Date")),
-                    unread=unread_only,
-                )
-            )
-        return messages
+        return _headers_for(conn, uids, limit, unread=unread_only)
+    finally:
+        _close(conn)
+
+
+# IMAP date syntax wants English month abbreviations; strftime's %b follows
+# LC_TIME and would emit e.g. "jul." under a Norwegian locale — invalid syntax.
+_IMAP_MONTHS = (
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+)
+
+
+def _quote_criterion(value: str) -> str:
+    """An IMAP SEARCH string argument, quoted.
+
+    Embedded quotes/backslashes are escaped; CR/LF/NUL are replaced with
+    spaces — imaplib transmits args verbatim, so a newline in a search term
+    would otherwise inject a second command into the IMAP stream.
+    """
+    value = re.sub(r"[\r\n\x00]", " ", value)
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def search_messages(
+    settings: Settings,
+    sender: str = "",
+    subject: str = "",
+    text: str = "",
+    since_days: int = 0,
+    limit: int | None = None,
+) -> list[Message]:
+    """INBOX messages matching every given criterion, newest first.
+
+    Maps straight onto IMAP ``SEARCH`` (server-side, so old mail is found
+    without paging the whole mailbox down): ``FROM``/``SUBJECT``/``TEXT`` plus
+    an optional ``SINCE`` cutoff. Read-only like :func:`list_recent` — the
+    select is readonly and only headers are peeked. Non-ASCII terms go as
+    ``CHARSET UTF-8`` with the query passed as *bytes* (imaplib would raise
+    encoding a str); RFC 3501 strictly wants literals there, so acceptance of
+    inline UTF-8 is server-dependent (Gmail and Dovecot take it) and a refusal
+    surfaces as the server's error.
+    """
+    criteria: list[str] = []
+    if sender.strip():
+        criteria += ["FROM", _quote_criterion(sender.strip())]
+    if subject.strip():
+        criteria += ["SUBJECT", _quote_criterion(subject.strip())]
+    if text.strip():
+        criteria += ["TEXT", _quote_criterion(text.strip())]
+    if since_days > 0:
+        cutoff = datetime.now(UTC) - timedelta(days=since_days)
+        criteria += [
+            "SINCE",
+            f"{cutoff.day:02d}-{_IMAP_MONTHS[cutoff.month - 1]}-{cutoff.year}",
+        ]
+    if not criteria:
+        return []
+    query = "(" + " ".join(criteria) + ")"
+    limit = limit or settings.email_max_messages
+    conn = imap_connect(settings)
+    try:
+        conn.select("INBOX", readonly=True)
+        if query.isascii():
+            _, data = conn.uid("SEARCH", query)
+        else:
+            # typeshed wants str, but imaplib ASCII-encodes str args (raising
+            # on these) while transmitting bytes untouched — bytes is the point.
+            _, data = conn.uid("SEARCH", "CHARSET", "UTF-8", query.encode("utf-8"))  # type: ignore[arg-type]
+        uids = (data[0] or b"").split()
+        return _headers_for(conn, uids, limit, unread=False)
     finally:
         _close(conn)
 
