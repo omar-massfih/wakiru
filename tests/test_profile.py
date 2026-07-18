@@ -41,6 +41,16 @@ def test_profile_context_lists_only_profile_notes(settings) -> None:
     assert context.startswith("## User profile")
 
 
+def test_profile_context_surfaces_quiet_window(settings) -> None:
+    # The effective window is surfaced even with no profile notes, so the agent
+    # can reason about a reminder it's setting landing inside quiet hours.
+    settings.quiet_hours_default = "22:00-07:30"
+    context = profile.profile_context(settings)
+    assert context.startswith("## User profile")
+    assert "Quiet hours: 22:00–07:30" in context
+    assert "held during this window" in context
+
+
 def test_profile_disabled_is_empty(settings) -> None:
     settings.enable_profile = False
     _note(settings, "The user works 9-17 on weekdays", tags=["profile"])

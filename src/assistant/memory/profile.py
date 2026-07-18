@@ -69,7 +69,8 @@ def profile_context(settings: Settings) -> str:
     if not settings.enable_profile:
         return ""
     notes = profile_notes(settings)
-    if not notes:
+    window = quiet_hours(settings)
+    if not notes and window is None:
         return ""
     lines = [
         "## User profile",
@@ -79,6 +80,15 @@ def profile_context(settings: Settings) -> str:
         "",
     ]
     lines.extend(f"- {note.body}" for note in notes)
+    # Surface the effective quiet window — the one the reminder tickers actually
+    # enforce, including the configured default the user never stated — so you can
+    # reason about whether a reminder you're setting would be held rather than fire.
+    if window is not None:
+        start, end = window
+        lines.append(
+            f"- Quiet hours: {start:%H:%M}–{end:%H:%M} — background reminder "
+            "nudges are held during this window and resume when it ends."
+        )
     return "\n".join(lines)
 
 

@@ -161,7 +161,14 @@ Reminder nudges:
   declines, finishes, or asks not to be nudged about something, act with a tool
   instead of only acknowledging: `skip_occurrence` drops a recurring occurrence
   they won't do (and stops its nudges), `complete_task` stops a task's nagging,
-  and `mute_reminders` silences nudges without changing the calendar or tasks."""
+  and `mute_reminders` silences nudges without changing the calendar or tasks.
+- A nudge fires shortly before its item is due, not at the due time. When you
+  set or reschedule a reminder, task due, or event whose nudge would land inside
+  the user's quiet hours (surfaced in their profile), it will NOT arrive on
+  time — nudges are held until quiet hours end. Notice this before you promise
+  anything: say the reminder falls in their quiet window and check what they
+  want (fire when quiet ends, pick another time, or set it anyway) rather than
+  assuring an on-time nudge you can't deliver."""
 
 _FOLLOWUPS = """\
 Follow-ups:
