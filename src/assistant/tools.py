@@ -273,7 +273,10 @@ def _task_tools() -> list[ToolSpec]:
     return [
         ToolSpec(
             "add_task",
-            "Add a to-do (no fixed meeting time; use the calendar for those).",
+            "Add a to-do, optionally with a due time. Not a meeting with other "
+            "people (use the calendar for those) — but a plain \"remind me at "
+            "TIME that X\" IS this: add it with that due time, called "
+            "immediately, not schedule_followup.",
             _params(
                 {
                     "title": ("string", "Short task title"),
@@ -1068,8 +1071,10 @@ def _followup_tools() -> list[ToolSpec]:
         ToolSpec(
             "schedule_followup",
             "Schedule yourself to check in with the user about something "
-            "later. Use for 'remind me to ask …', promises you made, or "
-            "things you decide are worth following up on. When it comes due "
+            "later, where you need to compose new content when it comes due "
+            "(promises you made, an interview, a decision they postponed). "
+            "NOT for a plain 'remind me at TIME that X' — that's add_task "
+            "with a due time instead. When it comes due "
             "you will be woken to compose the check-in yourself. The context "
             "field is your note-to-self that every future wake reads, so keep "
             "your working state there (\"waiting for their reply\", \"step 2 "
