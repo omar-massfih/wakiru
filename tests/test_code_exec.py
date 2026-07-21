@@ -62,6 +62,18 @@ def test_environment_secrets_are_not_visible(settings, monkeypatch) -> None:
     assert "None" in out
 
 
+def test_numpy_and_pandas_are_available() -> None:
+    # A cold pandas import is heavy, so this one gets the realistic default
+    # timeout rather than the deliberately short fixture.
+    settings = Settings(enable_code_execution=True, code_exec_timeout=30)
+    out = run_python(
+        "import numpy as np, pandas as pd\n"
+        "print(int(np.array([1, 2, 3]).sum()), len(pd.DataFrame({'a': [1, 2]})))",
+        settings,
+    )
+    assert out.strip() == "6 2"
+
+
 def test_network_is_blocked(settings) -> None:
     out = run_python(
         "import socket\n"

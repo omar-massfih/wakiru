@@ -16,8 +16,9 @@ do close off is the highest-value leak and the obvious footguns:
   :mod:`assistant.netguard`, this is defense-in-depth, not a hard guarantee.
 * **Resource limits** — CPU, address space, and file-size rlimits (POSIX) plus a
   wall-clock timeout bound runaway scripts.
-* **Isolated interpreter** — ``python -I -S`` ignores ``PYTHONPATH`` / user site /
-  site customization, and the cwd is a throwaway temp dir.
+* **Isolated interpreter** — ``python -I`` ignores ``PYTHONPATH`` and user site,
+  and the cwd is a throwaway temp dir. (Standard site-packages stay available so
+  numpy/pandas import.)
 
 If stronger isolation is ever needed, move execution to a locked-down executor
 (namespaces / nsjail / a throwaway container) behind :func:`run_python`'s
@@ -164,7 +165,9 @@ def run_python(code: str, settings: Settings | None = None) -> str:
 
         try:
             result = subprocess.run(
-                [sys.executable, "-I", "-S", str(script)],
+                # -I (isolated): ignore PYTHONPATH and user site, but keep the
+                # standard site-packages so numpy/pandas import.
+                [sys.executable, "-I", str(script)],
                 cwd=tmp,
                 env=env,
                 capture_output=True,

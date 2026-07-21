@@ -1513,11 +1513,11 @@ def _code_tools() -> list[ToolSpec]:
         ToolSpec(
             "run_python",
             "Run a short Python 3 script to compute over data you already have "
-            "(from documents, attachments, email, or the calendar). Only the "
-            "standard library is available; there is no network and no access "
-            "to the user's files or stores — pull anything you need with the "
-            "other tools first and pass it inline in the code. Return results "
-            "by printing them.",
+            "(from documents, attachments, email, or the calendar). The "
+            "standard library plus numpy and pandas are available; there is no "
+            "network and no access to the user's files or stores — pull "
+            "anything you need with the other tools first and pass it inline in "
+            "the code. Return results by printing them.",
             _params(
                 {"code": ("string", "A complete Python 3 script; print the result")},
                 ["code"],
