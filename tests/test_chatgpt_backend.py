@@ -111,6 +111,17 @@ def test_build_payload_shape() -> None:
     assert item["content"] == [{"type": "input_text", "text": "hello there"}]
 
 
+def test_build_payload_instructions_default_and_override() -> None:
+    settings = Settings(chatgpt_model="gpt-5")
+    assert build_payload("hi", settings)["instructions"] == "You are a helpful assistant."
+    assert (
+        build_payload("hi", settings, "You are Wakiru.")["instructions"]
+        == "You are Wakiru."
+    )
+    # Empty system content falls back to the placeholder, never a blank slot.
+    assert build_payload("hi", settings, "")["instructions"] == "You are a helpful assistant."
+
+
 def test_build_headers_shape() -> None:
     headers = build_headers("tok", "acct", "sess")
     assert headers["Authorization"] == "Bearer tok"

@@ -199,6 +199,25 @@ def _render_prompt(messages: list[BaseMessage], tools: list[dict] | None = None)
     return "\n\n".join(lines)
 
 
+def _split_leading_system(messages: list[BaseMessage]) -> tuple[str, list[BaseMessage]]:
+    """Peel consecutive leading ``SystemMessage``s off ``messages``.
+
+    Returns ``(system_text, remaining)`` where ``system_text`` is their content
+    joined with blank lines (empty when there are none). Backends with a native
+    system slot (chatgpt.com's ``instructions``) route ``system_text`` there
+    instead of flattening it into the user turn.
+    """
+    parts: list[str] = []
+    index = 0
+    for message in messages:
+        if not isinstance(message, SystemMessage):
+            break
+        content = message.content
+        parts.append(content if isinstance(content, str) else str(content))
+        index += 1
+    return "\n\n".join(parts), messages[index:]
+
+
 class _TextToolChatModel(BaseChatModel):
     """A ``BaseChatModel`` over a backend that only speaks plain text.
 
@@ -214,11 +233,22 @@ class _TextToolChatModel(BaseChatModel):
     settings: Settings
     bound_tools: list[dict] = Field(default_factory=list)
 
-    def _run(self, prompt: str) -> str:
+    def _run(self, prompt: str, **kwargs: Any) -> str:
         raise NotImplementedError
 
-    def _run_stream(self, prompt: str) -> Iterator[str]:
+    def _run_stream(self, prompt: str, **kwargs: Any) -> Iterator[str]:
         raise NotImplementedError
+
+    def _prepare(
+        self, messages: list[BaseMessage], tools: list[dict] | None
+    ) -> tuple[str, dict]:
+        """Render ``messages`` into a prompt plus any transport-specific extras.
+
+        The default folds the whole message list (system content included) into
+        the single prompt string. Backends with a native system slot override
+        this to peel that content out and pass it via the returned extras.
+        """
+        return _render_prompt(messages, tools=tools), {}
 
     def bind_tools(self, tools: Sequence[Any], **kwargs: Any) -> _TextToolChatModel:
         from langchain_core.utils.function_calling import convert_to_openai_tool
@@ -234,8 +264,8 @@ class _TextToolChatModel(BaseChatModel):
         run_manager: CallbackManagerForLLMRun | None = None,
         **kwargs: Any,
     ) -> ChatResult:
-        prompt = _render_prompt(messages, tools=self.bound_tools)
-        text = self._run(prompt)
+        prompt, extra = self._prepare(messages, self.bound_tools)
+        text = self._run(prompt, **extra)
         if self.bound_tools:
             content, calls = parse_tool_calls(text)
             message = AIMessage(content=content, tool_calls=calls)
@@ -265,9 +295,9 @@ class _TextToolChatModel(BaseChatModel):
         # _should_stream routes through here whenever a streaming callback
         # handler (e.g. LangGraph's messages mode) is attached. The async side
         # needs no override — astream falls back to running this in an executor.
-        prompt = _render_prompt(messages, tools=self.bound_tools)
+        prompt, extra = self._prepare(messages, self.bound_tools)
         if not self.bound_tools:
-            for delta in self._run_stream(prompt):
+            for delta in self._run_stream(prompt, **extra):
                 chunk = ChatGenerationChunk(message=AIMessageChunk(content=delta))
                 if run_manager:
                     run_manager.on_llm_new_token(delta, chunk=chunk)
@@ -281,7 +311,7 @@ class _TextToolChatModel(BaseChatModel):
         buffer = ""
         flushed = 0
         fence_at: int | None = None  # confirmed fence start — never emit past it
-        for delta in self._run_stream(prompt):
+        for delta in self._run_stream(prompt, **extra):
             buffer += delta
             if fence_at is None:
                 found = buffer.find(_STREAM_FENCE_HINT, max(flushed - 8, 0))
@@ -333,10 +363,10 @@ class CodexChatModel(_TextToolChatModel):
     def _llm_type(self) -> str:
         return "codex-cli"
 
-    def _run(self, prompt: str) -> str:
+    def _run(self, prompt: str, **kwargs: Any) -> str:
         return run_codex(prompt, settings=self.settings)
 
-    def _run_stream(self, prompt: str) -> Iterator[str]:
+    def _run_stream(self, prompt: str, **kwargs: Any) -> Iterator[str]:
         return run_codex_stream(prompt, settings=self.settings)
 
 
@@ -347,11 +377,24 @@ class ChatGptChatModel(_TextToolChatModel):
     def _llm_type(self) -> str:
         return "chatgpt-backend"
 
-    def _run(self, prompt: str) -> str:
-        return run_chatgpt(prompt, settings=self.settings)
+    def _prepare(
+        self, messages: list[BaseMessage], tools: list[dict] | None
+    ) -> tuple[str, dict]:
+        # The Responses endpoint has a real system slot: route the persona +
+        # context blocks there via `instructions` instead of flattening them
+        # into the user turn. Empty → None → backend's placeholder fallback.
+        system, rest = _split_leading_system(messages)
+        return _render_prompt(rest, tools=tools), {"instructions": system or None}
 
-    def _run_stream(self, prompt: str) -> Iterator[str]:
-        return run_chatgpt_stream(prompt, settings=self.settings)
+    def _run(self, prompt: str, instructions: str | None = None, **kwargs: Any) -> str:
+        return run_chatgpt(prompt, settings=self.settings, instructions=instructions)
+
+    def _run_stream(
+        self, prompt: str, instructions: str | None = None, **kwargs: Any
+    ) -> Iterator[str]:
+        return run_chatgpt_stream(
+            prompt, settings=self.settings, instructions=instructions
+        )
 
 
 def _build_codex(settings: Settings) -> BaseChatModel:

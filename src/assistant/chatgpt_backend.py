@@ -37,8 +37,10 @@ _RESPONSES_URL = "https://chatgpt.com/backend-api/codex/responses"
 # The HTTP-SSE contract. Newer codex builds have moved to a websocket variant
 # (responses_websockets=...); if chatgpt.com ever drops SSE, this is the knob.
 _OPENAI_BETA = "responses=experimental"
-# The endpoint requires an instructions field; the real system content rides in
-# the rendered prompt (llm._render_prompt), so this stays minimal and stable.
+# The endpoint requires an instructions field — the Responses API's system slot.
+# Callers pass the real system content (llm.ChatGptChatModel peels the persona +
+# context off the message list); this placeholder is only the fallback for turns
+# that carry no system content of their own.
 _INSTRUCTIONS = "You are a helpful assistant."
 _REFRESH_TIMEOUT_SECONDS = 30
 # Refresh a little early so a token can't expire mid-request.
@@ -221,11 +223,18 @@ def access_token(
 # --------------------------------------------------------------------------- #
 
 
-def build_payload(prompt: str, settings: Settings) -> dict:
-    """The Responses-API-shaped request body. Streaming is mandatory here."""
+def build_payload(
+    prompt: str, settings: Settings, instructions: str | None = None
+) -> dict:
+    """The Responses-API-shaped request body. Streaming is mandatory here.
+
+    ``instructions`` fills the API's system slot; callers that carry no system
+    content of their own leave it ``None`` and get the :data:`_INSTRUCTIONS`
+    placeholder.
+    """
     return {
         "model": settings.chatgpt_model,
-        "instructions": _INSTRUCTIONS,
+        "instructions": instructions or _INSTRUCTIONS,
         "input": [
             {
                 "type": "message",
@@ -331,13 +340,13 @@ def _http_error_detail(exc: urllib.error.HTTPError) -> str:
     return f"HTTP {exc.code}: {body or exc.reason}"
 
 
-def _open_stream(prompt: str, settings: Settings):
+def _open_stream(prompt: str, settings: Settings, instructions: str | None = None):
     """POST the prompt and return the live SSE response (caller closes it).
 
     A 401 gets one forced token refresh and retry — the JWT can be revoked
     server-side before its ``exp``.
     """
-    payload = json.dumps(build_payload(prompt, settings)).encode()
+    payload = json.dumps(build_payload(prompt, settings, instructions)).encode()
     for attempt in (0, 1):
         token, account = access_token(settings, force_refresh=attempt > 0)
         request = urllib.request.Request(
@@ -368,18 +377,24 @@ def _open_stream(prompt: str, settings: Settings):
     raise AssertionError("unreachable")
 
 
-def run_chatgpt(prompt: str, settings: Settings | None = None) -> str:
+def run_chatgpt(
+    prompt: str, settings: Settings | None = None, instructions: str | None = None
+) -> str:
     """Run one turn against the chatgpt.com backend and return the reply text.
 
     Concurrency is bounded by ``chatgpt_max_concurrency``: one chat turn fans
     out into several calls (reply, then memory/calendar/summary upkeep), and
     rate limits here are the ChatGPT plan's. Excess calls queue for a slot.
+
+    ``instructions`` fills the API's system slot (see :func:`build_payload`).
     """
     settings = settings or get_settings()
-    return "".join(_stream_deltas(prompt, settings)).strip()
+    return "".join(_stream_deltas(prompt, settings, instructions)).strip()
 
 
-def run_chatgpt_stream(prompt: str, settings: Settings | None = None) -> Iterator[str]:
+def run_chatgpt_stream(
+    prompt: str, settings: Settings | None = None, instructions: str | None = None
+) -> Iterator[str]:
     """Run one turn and yield the reply text incrementally.
 
     Error semantics match :func:`run_chatgpt`: any failure raises
@@ -387,12 +402,14 @@ def run_chatgpt_stream(prompt: str, settings: Settings | None = None) -> Iterato
     the generator early closes the HTTP response.
     """
     settings = settings or get_settings()
-    yield from _stream_deltas(prompt, settings)
+    yield from _stream_deltas(prompt, settings, instructions)
 
 
-def _stream_deltas(prompt: str, settings: Settings) -> Iterator[str]:
+def _stream_deltas(
+    prompt: str, settings: Settings, instructions: str | None = None
+) -> Iterator[str]:
     with _chatgpt_slot(settings):
-        response = _open_stream(prompt, settings)
+        response = _open_stream(prompt, settings, instructions)
         parser = ChatGptStreamParser()
         try:
             for event_type, data in iter_sse(response):

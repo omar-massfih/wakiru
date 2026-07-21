@@ -188,7 +188,9 @@ def test_chatgpt_chat_model_stream_emits_chunks(monkeypatch) -> None:
     from assistant import llm as llm_module
 
     monkeypatch.setattr(
-        llm_module, "run_chatgpt_stream", lambda prompt, settings=None: iter(["a", "b"])
+        llm_module,
+        "run_chatgpt_stream",
+        lambda prompt, settings=None, instructions=None: iter(["a", "b"]),
     )
     model = ChatGptChatModel(settings=Settings())
     chunks = [c.content for c in model.stream([HumanMessage(content="hi")]) if c.content]

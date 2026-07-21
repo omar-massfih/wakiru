@@ -11,9 +11,11 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 
 from assistant.config import Settings
 from assistant.llm import (
+    ChatGptChatModel,
     CodexChatModel,
     _render_prompt,
     _soft_boundary,
+    _split_leading_system,
     parse_tool_calls,
 )
 from assistant.tools import available_tools
@@ -109,6 +111,54 @@ def test_render_prompt_replays_tool_history() -> None:
     prompt = _render_prompt(messages)
     assert "```tool_call" in prompt  # the historical call is replayed verbatim
     assert "Tool result (add_task): added task: milk" in prompt
+
+
+def test_split_leading_system_peels_consecutive_system_messages() -> None:
+    messages = [
+        SystemMessage(content="persona"),
+        SystemMessage(content="context"),
+        HumanMessage(content="hi"),
+        SystemMessage(content="not leading"),
+    ]
+    system, rest = _split_leading_system(messages)
+    assert system == "persona\n\ncontext"
+    # Only the leading run is peeled; a later system message stays in the body.
+    assert rest == messages[2:]
+
+
+def test_split_leading_system_handles_no_system_messages() -> None:
+    messages = [HumanMessage(content="hi")]
+    system, rest = _split_leading_system(messages)
+    assert system == "" and rest == messages
+
+
+def test_chatgpt_prepare_routes_system_into_instructions() -> None:
+    model = ChatGptChatModel(settings=Settings())
+    messages = [
+        SystemMessage(content="persona"),
+        SystemMessage(content="context"),
+        HumanMessage(content="hi there"),
+    ]
+    prompt, extra = model._prepare(messages, tools=None)
+    assert extra == {"instructions": "persona\n\ncontext"}
+    # The persona no longer rides in the user-turn text; the human turn does.
+    assert "persona" not in prompt
+    assert "User: hi there" in prompt
+
+
+def test_chatgpt_prepare_no_system_falls_back_to_none() -> None:
+    model = ChatGptChatModel(settings=Settings())
+    _, extra = model._prepare([HumanMessage(content="hi")], tools=None)
+    assert extra == {"instructions": None}
+
+
+def test_codex_prepare_keeps_system_in_the_prompt() -> None:
+    model = CodexChatModel(settings=Settings())
+    messages = [SystemMessage(content="persona"), HumanMessage(content="hi")]
+    prompt, extra = model._prepare(messages, tools=None)
+    # Codex has no system slot: everything stays folded into the one prompt.
+    assert extra == {}
+    assert "System: persona" in prompt
 
 
 def test_tool_schemas_stay_small() -> None:
