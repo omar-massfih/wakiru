@@ -133,8 +133,46 @@ def test_ambiguous_target_is_skipped(settings) -> None:
     store.create_task(settings, "buy milk")
     store.create_task(settings, "buy bread")
     applied = _apply(settings, [{"op": "remove", "title": "buy"}])
-    assert applied == []  # ambiguous — reverting nothing beats removing the wrong one
+    # ambiguous — reverting nothing beats removing the wrong one, but the
+    # model needs to know *which* candidates collided so it can retry by id.
+    assert len(applied) == 1
+    assert "Ambiguous" in applied[0]
+    assert "buy milk" in applied[0] and "buy bread" in applied[0]
     assert len(store.list_tasks(settings)) == 2
+
+
+def test_complete_op_ambiguous_returns_candidates(settings) -> None:
+    a = store.create_task(settings, "water plants")
+    b = store.create_task(settings, "water plants", due=_iso_in(settings, days=1))
+    applied = _apply(settings, [{"op": "complete", "title": "water plants"}])
+    assert len(applied) == 1
+    assert "Ambiguous" in applied[0]
+    assert a.id in applied[0] and b.id in applied[0]
+    assert len(store.list_tasks(settings)) == 2
+
+
+def test_add_op_refuses_exact_title_duplicate(settings) -> None:
+    original = store.create_task(settings, "buy milk")
+    applied = _apply(settings, [{"op": "add", "title": "  Buy Milk  "}])
+    assert len(applied) == 1
+    assert applied[0].startswith("Not added")
+    assert original.id in applied[0]
+    assert [t.title for t in store.list_tasks(settings)] == ["buy milk"]
+
+
+def test_add_op_allows_distinct_title(settings) -> None:
+    store.create_task(settings, "Buy milk")
+    applied = _apply(settings, [{"op": "add", "title": "Buy milk and eggs"}])
+    assert applied == ["added task: Buy milk and eggs"]
+    assert {t.title for t in store.list_tasks(settings)} == {"Buy milk", "Buy milk and eggs"}
+
+
+def test_add_op_dedupe_ignores_completed_tasks(settings) -> None:
+    t = store.create_task(settings, "buy milk")
+    store.complete_task(settings, t.id)
+    applied = _apply(settings, [{"op": "add", "title": "buy milk"}])
+    assert applied == ["added task: buy milk"]
+    assert [t.title for t in store.list_tasks(settings)] == ["buy milk"]
 
 
 def test_update_op_never_targets_by_its_new_title(settings) -> None:

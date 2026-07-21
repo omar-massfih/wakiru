@@ -417,14 +417,24 @@ def test_weekly_series_keeps_wall_clock_across_dst(settings) -> None:
 
 def test_destructive_op_skips_ambiguous_title(settings) -> None:
     # Two upcoming events share the title: a fuzzy cancel/reschedule must not
-    # guess (cancelling nothing beats cancelling the wrong appointment).
+    # guess (cancelling nothing beats cancelling the wrong appointment), but
+    # the model needs the candidate ids back so it can retry unambiguously.
     soon = store.create_event(settings, title="Standup", start=_iso_in(settings, days=1))
     later = store.create_event(settings, title="Standup", start=_iso_in(settings, days=2))
 
-    assert ops.apply_op(settings, {"op": "cancel", "title": "standup"}) is None
+    cancel_result = ops.apply_op(settings, {"op": "cancel", "title": "standup"})
+    assert cancel_result is not None
+    assert "Ambiguous" in cancel_result
+    assert soon.id in cancel_result and later.id in cancel_result
+
+    # For "reschedule" the schema's `title` is the REPLACEMENT value, not an
+    # identifier (see test_reschedule_never_targets_by_its_new_title), so with
+    # no id/query given there's no target to resolve at all — a plain
+    # not-found, not an ambiguous match.
     assert ops.apply_op(
         settings, {"op": "reschedule", "title": "standup", "start": _iso_in(settings, days=3)}
     ) is None
+
     assert store.get_event(settings, soon.id) is not None
     assert store.get_event(settings, later.id) is not None
 
@@ -433,6 +443,22 @@ def test_destructive_op_skips_ambiguous_title(settings) -> None:
     # With a single match left, fuzzy targeting works again.
     assert ops.apply_op(settings, {"op": "cancel", "title": "standup"}) is not None
     assert store.list_events(settings) == []
+
+
+def test_skip_occurrence_ambiguous_title_returns_candidates(settings) -> None:
+    a = store.create_event(
+        settings, title="Standup", start="2026-01-05T09:00:00+01:00", rrule="FREQ=WEEKLY;BYDAY=MO",
+    )
+    b = store.create_event(
+        settings, title="Standup", start="2026-01-06T09:00:00+01:00", rrule="FREQ=WEEKLY;BYDAY=TU",
+    )
+    result = ops.apply_op(
+        settings,
+        {"op": "skip", "title": "standup", "occurrence": "2026-01-05T09:00:00+01:00"},
+    )
+    assert result is not None
+    assert "Ambiguous" in result
+    assert a.id in result and b.id in result
 
 
 def test_reschedule_never_targets_by_its_new_title(settings) -> None:

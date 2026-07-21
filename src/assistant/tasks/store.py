@@ -307,3 +307,17 @@ def find_task(settings: Settings, query: str) -> Task | None:
     """Resolve ``query`` to a single task: by exact id, else the best title match."""
     matches = find_tasks(settings, query)
     return matches[0] if matches else None
+
+
+def find_exact_open_title(settings: Settings, title: str) -> Task | None:
+    """The open task whose title exactly matches ``title`` (case-insensitive,
+    stripped), or None. Unlike find_tasks's substring fuzz, this is strict —
+    used solely to dedupe add_task ("Buy milk" must not collide with "Buy
+    milk and eggs"). Backend-dispatches via list_tasks like its neighbors."""
+    needle = title.strip().lower()
+    if not needle:
+        return None
+    for t in list_tasks(settings, include_done=False):
+        if t.title.strip().lower() == needle:
+            return t
+    return None

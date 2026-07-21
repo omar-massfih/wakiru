@@ -55,8 +55,19 @@ _SPEC: write_ops.WriteOpsSpec[store.Event] = write_ops.WriteOpsSpec(
 )
 
 
-def _target_id(settings: Settings, op: dict) -> str | None:
+def _target_id(settings: Settings, op: dict) -> str | list[store.Event] | None:
     return write_ops.resolve_target(_SPEC, settings, op)
+
+
+def _ambiguous_message(settings: Settings, matches: list[store.Event]) -> str:
+    shown = ", ".join(
+        f'{e.id} ("{e.title}" @ {format_when(settings, e.start)})' for e in matches[:5]
+    )
+    more = f", +{len(matches) - 5} more" if len(matches) > 5 else ""
+    return (
+        f"Ambiguous — {len(matches)} events match: {shown}{more}. "
+        "Retry with one exact id from Upcoming events."
+    )
 
 
 # Appended to a write-confirmation when the local write landed but the CalDAV push
@@ -150,7 +161,9 @@ def _log_write(
 def apply_op(
     settings: Settings, op: dict, thread_id: str = "", batch_id: str = ""
 ) -> str | None:
-    """Apply a single parsed operation; return a short log line, or ``None``."""
+    """Apply a single parsed operation; return a short log line, an
+    ambiguous-match message for the model to act on, or ``None`` (nothing
+    found/nothing to do)."""
     kind = op["op"]
     if kind == "create" and op.get("title") and op.get("start"):
         rrule = str(op.get("rrule", "") or "")
@@ -175,6 +188,8 @@ def apply_op(
 
     if kind == "reschedule":
         target = _target_id(settings, op)
+        if isinstance(target, list):
+            return _ambiguous_message(settings, target)
         if target is None:
             return None
         before = store.get_event(settings, target)
@@ -197,6 +212,8 @@ def apply_op(
 
     if kind == "cancel":
         target = _target_id(settings, op)
+        if isinstance(target, list):
+            return _ambiguous_message(settings, target)
         if target is None:
             return None
         deleted = store.delete_event(settings, target)
@@ -219,6 +236,8 @@ def _apply_occurrence_op(
 ) -> str | None:
     """Apply a single-occurrence exception (``skip``/``move``) on a series master."""
     target = _target_id(settings, op)
+    if isinstance(target, list):
+        return _ambiguous_message(settings, target)
     when = store.parse_dt(str(op.get("occurrence", "")))
     if target is None or when is None:
         return None

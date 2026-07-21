@@ -33,8 +33,10 @@ from .config import Settings
 
 logger = logging.getLogger(__name__)
 
-# What the model sees when a mutating op couldn't resolve its target (the
-# underlying apply_op returns None for both "not found" and "ambiguous").
+# What the model sees when a mutating op couldn't resolve its target at all
+# (no match, or the single match was vetoed, e.g. an ICS-mirrored calendar
+# row). A resolvable-but-ambiguous match now returns its own descriptive
+# message from apply_op instead of falling through to this generic one.
 _NO_MATCH = (
     "No matching item, or the reference was ambiguous. Check the exact id "
     "against the list you were shown and try again."

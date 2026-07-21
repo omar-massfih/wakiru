@@ -52,13 +52,17 @@ class WriteOpsSpec[RowT: SupportsIdTitle]:
 
 def resolve_target[RowT: SupportsIdTitle](
     spec: WriteOpsSpec[RowT], settings: Settings, op: dict
-) -> str | None:
+) -> str | list[RowT] | None:
     """Resolve the row an op refers to, by id or a fuzzy title/query fallback.
 
     Every op that lands here mutates or deletes, so a fuzzy reference matching
-    more than one row is skipped rather than guessed at — cancelling nothing
-    beats cancelling the wrong appointment (the same rule memory's fuzzy forget
-    applies). An exact id always resolves unambiguously.
+    more than one row is never guessed at — cancelling nothing beats cancelling
+    the wrong appointment (the same rule memory's fuzzy forget applies).
+    Returns the resolved id on a single unambiguous match; the list of
+    candidate rows when the fuzzy reference matches more than one (the caller
+    builds the model-facing "which one?" message — this layer only detects the
+    collision, it never guesses); or None when nothing matches, or the single
+    match was vetoed by refuse_match. An exact id always resolves unambiguously.
     """
     ident = op.get("id") or op.get("query")
     if not ident and op["op"] not in spec.title_is_new_value:
@@ -68,11 +72,11 @@ def resolve_target[RowT: SupportsIdTitle](
     matches = spec.find(settings, str(ident))
     if len(matches) > 1:
         logger.warning(
-            "%s %s target %r is ambiguous between %d %s (%s); skipping",
+            "%s %s target %r is ambiguous between %d %s (%s); returning candidates",
             spec.kind, op.get("op"), ident, len(matches), spec.noun,
             ", ".join(m.title for m in matches[:5]),
         )
-        return None
+        return matches
     if matches and spec.refuse_match is not None and spec.refuse_match(settings, op, matches[0]):
         return None
     return matches[0].id if matches else None

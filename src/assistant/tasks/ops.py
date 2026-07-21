@@ -31,8 +31,33 @@ _SPEC: write_ops.WriteOpsSpec[store.Task] = write_ops.WriteOpsSpec(
 )
 
 
-def _target_id(settings: Settings, op: dict) -> str | None:
+def _target_id(settings: Settings, op: dict) -> str | list[store.Task] | None:
     return write_ops.resolve_target(_SPEC, settings, op)
+
+
+def _describe_task(settings: Settings, t: store.Task) -> str:
+    from ..calendar.context import format_when
+
+    due = f"due {format_when(settings, t.due)}" if t.due else "no due date"
+    return f'{t.id} ("{t.title}", {due})'
+
+
+def _dedupe_message(settings: Settings, existing: store.Task) -> str:
+    return (
+        f"Not added — an open task already has this exact title: "
+        f"{_describe_task(settings, existing)}. Use update_task with id "
+        f"{existing.id} to change it, or add_task again with a more "
+        "distinguishing title if this is genuinely a separate item."
+    )
+
+
+def _ambiguous_message(settings: Settings, matches: list[store.Task]) -> str:
+    shown = ", ".join(_describe_task(settings, m) for m in matches[:5])
+    more = f", +{len(matches) - 5} more" if len(matches) > 5 else ""
+    return (
+        f"Ambiguous — {len(matches)} tasks match: {shown}{more}. "
+        "Retry with one exact id from Open tasks."
+    )
 
 
 _RULE_NOTE = " (recurrence ignored: needs a valid RRULE and a parseable due date)"
@@ -62,9 +87,14 @@ def _log_write(
 def apply_op(
     settings: Settings, op: dict, thread_id: str = "", batch_id: str = ""
 ) -> str | None:
-    """Apply a single parsed operation; return a short log line, or ``None``."""
+    """Apply a single parsed operation; return a short log line, a
+    dedupe/ambiguous-match message for the model to act on, or ``None``
+    (nothing found/nothing to do)."""
     kind = op["op"]
     if kind == "add" and op.get("title"):
+        dupe = store.find_exact_open_title(settings, str(op["title"]))
+        if dupe is not None:
+            return _dedupe_message(settings, dupe)
         rrule = str(op.get("rrule", "") or "")
         note = ""
         if rrule and not _usable_rrule(settings, rrule, str(op.get("due", "") or "")):
@@ -83,6 +113,8 @@ def apply_op(
 
     if kind == "complete":
         target = _target_id(settings, op)
+        if isinstance(target, list):
+            return _ambiguous_message(settings, target)
         if target is None:
             return None
         before = store.get_task(settings, target)
@@ -108,6 +140,8 @@ def apply_op(
 
     if kind == "update":
         target = _target_id(settings, op)
+        if isinstance(target, list):
+            return _ambiguous_message(settings, target)
         if target is None:
             return None
         before = store.get_task(settings, target)
@@ -130,6 +164,8 @@ def apply_op(
 
     if kind == "remove":
         target = _target_id(settings, op)
+        if isinstance(target, list):
+            return _ambiguous_message(settings, target)
         if target is None:
             return None
         deleted = store.delete_task(settings, target)

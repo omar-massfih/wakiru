@@ -224,6 +224,34 @@ def test_task_roundtrip_and_ambiguous_target(settings) -> None:
     assert tasks_store.list_tasks(settings) == []  # open tasks only
 
 
+def test_complete_task_tool_ambiguous_by_title(settings) -> None:
+    ctx = _ctx(settings)
+    tools = tool_map(settings)
+    # Bypass the store directly to set up the pre-existing duplicate (the
+    # add_task *tool* now refuses this — see test_add_task_tool_refuses_
+    # duplicate_title — but the incident's tasks were already duplicated
+    # before that fix existed, so this reproduces the state as found).
+    a = tasks_store.create_task(settings, "Water plants")
+    b = tasks_store.create_task(settings, "Water plants")
+
+    # Mirrors the incident: the model passes a title string as "id" instead
+    # of the real opaque id, and it matches more than one open task.
+    result = execute_tool(tools["complete_task"], ctx, {"id": "Water plants"})
+    assert "Ambiguous" in result
+    assert a.id in result and b.id in result
+    assert len(tasks_store.list_tasks(settings)) == 2  # neither touched
+
+
+def test_add_task_tool_refuses_duplicate_title(settings) -> None:
+    ctx = _ctx(settings)
+    tools = tool_map(settings)
+    first = execute_tool(tools["add_task"], ctx, {"title": "Buy milk"})
+    assert first.startswith("added")
+    second = execute_tool(tools["add_task"], ctx, {"title": "Buy milk"})
+    assert second.startswith("Not added")
+    assert [t.title for t in tasks_store.list_tasks(settings)] == ["Buy milk"]
+
+
 # --- reminder mutes ----------------------------------------------------------- #
 
 
