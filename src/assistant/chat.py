@@ -13,6 +13,7 @@ import logging
 from collections.abc import AsyncIterator
 
 from langchain_core.messages import AIMessageChunk, HumanMessage
+from langchain_core.runnables import RunnableConfig
 from langgraph.graph.state import CompiledStateGraph
 
 from . import threads
@@ -66,7 +67,7 @@ def run_chat(
     apology).
     """
     settings = settings or get_settings()
-    config = {"configurable": {"thread_id": thread_id}}
+    config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
     result = agent.invoke({"messages": [HumanMessage(content=message)]}, config=config)
     reply = result["messages"][-1].content
     return reply if isinstance(reply, str) else str(reply)
@@ -91,7 +92,7 @@ async def run_chat_stream(
     Raises :class:`assistant.codex_runner.CodexError` when the model fails.
     """
     settings = settings or get_settings()
-    config = {"configurable": {"thread_id": thread_id}}
+    config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
     async for chunk, _meta in agent.astream(
         {"messages": [HumanMessage(content=message)]},
         config=config,

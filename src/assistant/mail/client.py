@@ -77,6 +77,8 @@ def _decode(raw: str | None) -> str:
 def imap_connect(settings: Settings) -> imaplib.IMAP4_SSL:
     """Open and authenticate an IMAP connection. The seam tests monkeypatch."""
     _require_enabled(settings)
+    if not settings.email_address:
+        raise MailAuthError("email requires EMAIL_ADDRESS.")
     conn = imaplib.IMAP4_SSL(
         settings.email_imap_host, settings.email_imap_port, timeout=_TIMEOUT_SECONDS
     )
@@ -93,6 +95,8 @@ def imap_connect(settings: Settings) -> imaplib.IMAP4_SSL:
 
 def _smtp_connect(settings: Settings) -> smtplib.SMTP:
     _require_enabled(settings)
+    if not settings.email_address:
+        raise MailAuthError("email requires EMAIL_ADDRESS.")
     conn = smtplib.SMTP(
         settings.email_smtp_host, settings.email_smtp_port, timeout=_TIMEOUT_SECONDS
     )
@@ -139,7 +143,9 @@ def list_recent(settings: Settings, unread_only: bool = True, limit: int | None 
     try:
         conn.select("INBOX", readonly=True)
         criterion = "UNSEEN" if unread_only else "ALL"
-        _, data = conn.uid("SEARCH", None, criterion)
+        # None is the CHARSET arg (valid for SEARCH); typeshed types uid's
+        # varargs as str-only, so it can't see that.
+        _, data = conn.uid("SEARCH", None, criterion)  # type: ignore[arg-type]
         uids = (data[0] or b"").split()
         return _headers_for(conn, uids, limit, unread=unread_only)
     finally:

@@ -39,6 +39,7 @@ import atexit
 import logging
 import sqlite3
 import uuid
+from collections.abc import Sequence
 
 from langchain_core.messages import (
     AIMessage,
@@ -74,7 +75,7 @@ class BrainState(MessagesState):
     tools_exhausted: bool
 
 
-def _latest_human_text(messages: list[BaseMessage]) -> str:
+def _latest_human_text(messages: Sequence[BaseMessage]) -> str:
     for message in reversed(messages):
         if isinstance(message, HumanMessage):
             content = message.content
@@ -83,7 +84,7 @@ def _latest_human_text(messages: list[BaseMessage]) -> str:
 
 
 def expanded_recall_query(
-    messages: list[BaseMessage], summary: str, settings: Settings
+    messages: Sequence[BaseMessage], summary: str, settings: Settings
 ) -> str:
     """The embedding query for recall: the latest message plus recent context.
 
@@ -192,7 +193,7 @@ def maybe_summarize(
     fold does, the removals still target the older messages by their stable ids
     and the summary simply lags one turn — harmless for a single user.
     """
-    config = {"configurable": {"thread_id": thread_id}}
+    config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
     try:
         snapshot = agent.get_state(config)
         update = summarize_fold(
@@ -233,7 +234,10 @@ def _checkpointer(settings: Settings):
             kwargs={"autocommit": True, "prepare_threshold": 0, "row_factory": dict_row},
         )
         atexit.register(pool.close)  # its worker threads outlive shutdown otherwise
-        saver = PostgresSaver(pool)
+        # row_factory=dict_row makes this a dict-row pool at runtime, but the
+        # ConnectionPool generic can't infer that from kwargs, so it's typed as
+        # tuple-rows; PostgresSaver wants dict-rows.
+        saver = PostgresSaver(pool)  # type: ignore[arg-type]
         saver.setup()
         return saver
 

@@ -194,9 +194,12 @@ def _chunks(text: str) -> list[str]:
     return pieces
 
 
-def _safe_href(href: str | None) -> str | None:
+def _safe_href(href: str | int | float | None) -> str | None:
+    # markdown-it's attrGet is typed str|int|float|None; an href is always a
+    # string in practice, but coerce so the type checker and urlparse agree.
     if not href:
         return None
+    href = str(href)
     scheme = urlparse(href).scheme.lower()
     if scheme not in _SAFE_LINK_SCHEMES:
         return None
@@ -488,8 +491,9 @@ def set_commands(token: str) -> None:
 def _reset_thread(agent: CompiledStateGraph, thread_id: str) -> None:
     """Clear one thread's checkpointed conversation history and rolling summary."""
     from langchain_core.messages import RemoveMessage
+    from langchain_core.runnables import RunnableConfig
 
-    config = {"configurable": {"thread_id": thread_id}}
+    config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
     snapshot = agent.get_state(config)
     messages = snapshot.values.get("messages", [])
     removals = [RemoveMessage(id=m.id) for m in messages if m.id is not None]

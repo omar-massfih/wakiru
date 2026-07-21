@@ -63,6 +63,10 @@ src = ["src", "tests"]
 select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
 ignore = [
     "E501",  # long lines predate the lint config; line-length=100 stays the format target
+    # The codebase deliberately uses typographic Unicode (en dashes, curly
+    # quotes) in user-facing strings; some is functional (a curly apostrophe in
+    # heartbeat's trailing-punctuation regex). Allow ambiguous chars in strings.
+    "RUF001",
 ]
 
 [tool.mypy]

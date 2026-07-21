@@ -34,7 +34,7 @@ _PROFILE_TAG = "profile"
 
 # "22-07", "22:00-07:00", "10 pm to 7 am" — first time wins as start, second as end.
 _TIME_RANGE_RE = re.compile(
-    r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s*(?:-|–|—|to|until)\s*"  # noqa: RUF001 - the en/em dashes are deliberate range separators
+    r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s*(?:-|–|—|to|until)\s*"
     r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)?",
     re.IGNORECASE,
 )

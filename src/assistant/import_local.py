@@ -8,6 +8,7 @@ import sqlite3
 import sys
 
 import psycopg
+from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.checkpoint.sqlite import SqliteSaver
 
@@ -132,7 +133,8 @@ def import_turn_counter(local: Settings, pg: Settings) -> None:
 def import_checkpoints(local: Settings, pg: Settings) -> int:
     src = SqliteSaver(sqlite3.connect(local.checkpoints_db_path, check_same_thread=False))
     dst_conn = psycopg.connect(storage_postgres.require_url(pg), autocommit=True)
-    dst = PostgresSaver(dst_conn)
+    # tuple-row vs dict-row stub friction, same as _checkpointer in agent.py.
+    dst = PostgresSaver(dst_conn)  # type: ignore[arg-type]
     dst.setup()
 
     raw = sqlite3.connect(local.checkpoints_db_path)
@@ -143,7 +145,7 @@ def import_checkpoints(local: Settings, pg: Settings) -> int:
 
     copied = 0
     for thread_id in threads:
-        config = {"configurable": {"thread_id": thread_id}}
+        config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
         for tup in src.list(config):
             dst.put(
                 tup.config,

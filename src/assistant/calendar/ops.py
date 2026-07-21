@@ -240,7 +240,7 @@ def _apply_occurrence_op(
         _log_write(settings, thread_id, batch_id, target, "skip", summary, master)
         return summary
 
-    fields = {k: op.get(k) for k in ("start", "end", "title", "location") if op.get(k)}
+    fields = {k: str(op[k]) for k in ("start", "end", "title", "location") if op.get(k)}
     if not fields:
         return None
     updated = store.set_override(settings, target, key, fields)
