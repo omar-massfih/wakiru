@@ -60,6 +60,21 @@ class Settings(BaseSettings):
     # widen deliberately, matching codex_sandbox's conservative default.
     codex_web_search: bool = False
 
+    # --- Code execution (run_python tool) ---
+    # Lets the model run short Python scripts it writes, in a hardened
+    # in-container subprocess (stripped env, no network, rlimits). Off by
+    # default — powerful and dual-use; the code still runs in this container.
+    enable_code_execution: bool = False
+    # Hard wall-clock cap (seconds) on a single script.
+    code_exec_timeout: int = 20
+    # Max scripts running at once (each blocks a worker thread until done);
+    # excess calls queue for a slot.
+    code_exec_max_concurrency: int = 2
+    # How much of a script's output rides back into the conversation.
+    code_exec_max_output_chars: int = 8000
+    # Address-space limit (RLIMIT_AS) for a script, in MiB.
+    code_exec_max_memory_mb: int = 512
+
     # --- ChatGPT backend (llm_provider="chatgpt") ---
     # Talks to chatgpt.com's backend directly, reusing the OAuth tokens the
     # Codex CLI keeps in $CODEX_HOME/auth.json (run `codex login` once).

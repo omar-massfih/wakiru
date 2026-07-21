@@ -35,6 +35,15 @@ def test_defaults_keep_the_conservative_posture() -> None:
     assert settings.llm_provider == "codex"
     assert settings.enable_email is False  # the only external-service subsystem
     assert settings.enable_email_send is False  # sending needs a second switch
+    assert settings.enable_code_execution is False  # dual-use, off by default
+
+
+def test_code_execution_defaults() -> None:
+    settings = Settings()
+    assert settings.code_exec_timeout == 20
+    assert settings.code_exec_max_concurrency == 2
+    assert settings.code_exec_max_output_chars == 8000
+    assert settings.code_exec_max_memory_mb == 512
 
 
 def test_chatgpt_backend_defaults() -> None:

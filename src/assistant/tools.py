@@ -1499,6 +1499,35 @@ def _undo_tools() -> list[ToolSpec]:
 
 
 # --------------------------------------------------------------------------- #
+# Code execution — run a short Python script over data already in hand
+# --------------------------------------------------------------------------- #
+
+def _run_python(ctx: ToolContext, code: str) -> str:
+    from . import code_exec
+
+    return code_exec.run_python(str(code), ctx.settings)
+
+
+def _code_tools() -> list[ToolSpec]:
+    return [
+        ToolSpec(
+            "run_python",
+            "Run a short Python 3 script to compute over data you already have "
+            "(from documents, attachments, email, or the calendar). Only the "
+            "standard library is available; there is no network and no access "
+            "to the user's files or stores — pull anything you need with the "
+            "other tools first and pass it inline in the code. Return results "
+            "by printing them.",
+            _params(
+                {"code": ("string", "A complete Python 3 script; print the result")},
+                ["code"],
+            ),
+            _run_python,
+        )
+    ]
+
+
+# --------------------------------------------------------------------------- #
 # Registry + dispatch
 # --------------------------------------------------------------------------- #
 
@@ -1566,6 +1595,11 @@ def available_tools(settings: Settings, mode: str = "chat") -> list[ToolSpec]:
             tools += _web_ingest_tools()
     if settings.enable_email:
         tools += _email_tools(settings)
+    if settings.enable_code_execution:
+        # Offered in both chat and heartbeat: the sandbox has no access to the
+        # user's data or secrets, so an unattended wake computing on its own
+        # initiative is no more dangerous than a chat call.
+        tools += _code_tools()
     if settings.enable_heartbeat:
         tools += _followup_tools()
         tools += _goal_tools()

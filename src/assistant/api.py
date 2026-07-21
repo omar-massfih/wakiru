@@ -223,6 +223,16 @@ async def lifespan(app: FastAPI):
             "Codex write to the filesystem.",
             settings.codex_sandbox,
         )
+    if settings.enable_code_execution and (
+        settings.telegram_bot_token
+        or settings.slack_bot_token
+        or not _is_loopback_host(settings.host)
+    ):
+        logger.warning(
+            "ENABLE_CODE_EXECUTION=1 while a remote channel is reachable "
+            "(telegram/slack/non-loopback bind) — anyone who can message the "
+            "assistant can run Python in this container.",
+        )
     tasks: list[asyncio.Task] = []
     if settings.enable_reminders and settings.reminder_tick_seconds > 0:
         tasks.append(asyncio.create_task(_reminder_tick_loop(), name="reminder-ticker"))

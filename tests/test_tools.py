@@ -363,6 +363,14 @@ def test_undo_tool_gated_on_write_confirmation_and_a_writable_subsystem() -> Non
     }
 
 
+def test_run_python_gated_on_enable_code_execution() -> None:
+    assert "run_python" not in {s.name for s in available_tools(Settings())}
+    on = Settings(enable_code_execution=True)
+    # Offered in both chat and, unlike send/undo, the background wake too.
+    assert "run_python" in {s.name for s in available_tools(on)}
+    assert "run_python" in {s.name for s in available_tools(on, mode="heartbeat")}
+
+
 def test_undo_tool_reverts_the_latest_write_on_the_thread(settings) -> None:
     execute_tool(
         tool_map(settings)["create_event"],
