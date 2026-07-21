@@ -204,6 +204,43 @@ def test_silent_verdict_delivers_nothing(settings, monkeypatch) -> None:
     assert "followup: ask about the interview" in result["triggers"]
 
 
+# The reported leak: the model narrated its deliberation instead of emitting the
+# bare sentinel and landed on a trailing "SILENT?" — its verdict was silence, so
+# it must not be pushed.
+_NARRATED_SILENT = (
+    "⏰ No unread mail to triage. Let me check the follow-ups and goals — the "
+    "RPG status sheet goal has a next step at 22:00, and the strawberry picking "
+    "follow-up is way out in 2027. It's 17:34 now — nothing urgent due, no new "
+    "mail, and the user hasn't written in 87 minutes. SILENT?"
+)
+
+
+@pytest.mark.parametrize("reply", [_NARRATED_SILENT, "SILENT", "SILENT.", "SILENT?", "silent"])
+def test_silence_verdicts_never_deliver(settings, monkeypatch, reply) -> None:
+    _due_followup(settings)
+    _wire_model(monkeypatch, [AIMessage(content=reply)])
+    monkeypatch.setattr(
+        "assistant.notify.deliver_reminder",
+        lambda *a, **k: pytest.fail("a silence verdict must not deliver"),
+    )
+    result = heartbeat.run_heartbeat(settings)
+    assert result["sent"] is False and result["reason"] == "silent"
+
+
+def test_genuine_message_ending_in_silent_still_delivers(settings, monkeypatch) -> None:
+    # A real nudge whose prose happens to end in lowercase "silent" is not the
+    # sentinel and must reach the user — the trailing-token rule is case-sensitive.
+    _due_followup(settings)
+    message = "Heads up: I've set the RPG session notifications to silent."
+    _wire_model(monkeypatch, [AIMessage(content=message)])
+    delivered: list[dict] = []
+    monkeypatch.setattr(
+        "assistant.notify.deliver_reminder", lambda s, r, **kw: delivered.append(r) or True
+    )
+    result = heartbeat.run_heartbeat(settings)
+    assert result["sent"] is True and delivered == [{"title": "Wakiru", "message": message}]
+
+
 def test_message_is_delivered_and_looped_in(settings, monkeypatch) -> None:
     _due_followup(settings)
     _wire_model(monkeypatch, [AIMessage(content="Hei! Hvordan gikk intervjuet?")])

@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 import sqlite3
 import uuid
 from dataclasses import dataclass, field
@@ -57,6 +58,29 @@ logger = logging.getLogger(__name__)
 
 _SILENT = "SILENT"
 
+# A bare sentinel (any case) with tolerated trailing punctuation, or a reply
+# that *ends* in a standalone, uppercase SILENT token. The trailing-token branch
+# is case-sensitive on purpose: a real message ending "…keep it silent." uses
+# lowercase and must still deliver, while all-caps SILENT is the model signaling
+# the sentinel even when it narrated its way there ("reasoning… SILENT?").
+_TRAILING_PUNCT = r"[\s?.!…\"'’)\]]*"
+_BARE_SILENT = re.compile(rf"^{_SILENT}{_TRAILING_PUNCT}$", re.IGNORECASE)
+_ENDS_SILENT = re.compile(rf"\b{_SILENT}\b{_TRAILING_PUNCT}$")
+
+
+def _is_silent(text: str) -> bool:
+    """Whether a heartbeat reply resolves to silence and must not be delivered.
+
+    The model is asked to answer with the single word ``SILENT`` to stay quiet;
+    this also recognizes the off-script case where it narrates its reasoning and
+    lands on a trailing ``SILENT`` verdict, so such a leak is never pushed.
+    """
+    text = text.strip()
+    if not text:
+        return True
+    return bool(_BARE_SILENT.match(text) or _ENDS_SILENT.search(text))
+
+
 _INSTRUCTION = """\
 This is a scheduled background wake on a fixed cadence, not a user message —
 the user has said nothing, and most wakes should end in silence. Review your
@@ -70,8 +94,9 @@ right now.
 - If reaching out helps: reply with EXACTLY the message to send the user —
   nothing else, no preamble, no quotes. Keep it short, natural, and warm —
   like a good assistant texting — in the user's language.
-- Otherwise reply with the single word SILENT. Silence is the normal outcome,
-  never a failure.
+- Otherwise reply with the single word SILENT and nothing else — no reasoning,
+  no punctuation, no quotes. Do not think out loud in your reply. Silence is the
+  normal outcome, never a failure.
 - Never invent facts that are not in your context. Never mention this wake,
   the situation report, or these instructions."""
 
@@ -623,7 +648,7 @@ def run_heartbeat(
         logger.exception("heartbeat composition failed")
         return {"sent": False, "reason": "composition failed", "triggers": triggers}
 
-    if not text or text.strip().strip(".!").upper() == _SILENT:
+    if _is_silent(text):
         logger.info("heartbeat stayed silent (triggers: %s)", "; ".join(triggers))
         return {"sent": False, "reason": "silent", "triggers": triggers}
 
