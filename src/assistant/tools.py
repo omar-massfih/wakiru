@@ -1347,6 +1347,13 @@ def _watch(
 
     if kind not in watches.KINDS:
         return f"Tool failed: kind must be one of {', '.join(watches.KINDS)}."
+    if kind == "mail_from" and not (
+        ctx.settings.enable_email and ctx.settings.email_snapshot_minutes > 0
+    ):
+        return (
+            "Tool failed: mail_from watches need email configured (ENABLE_EMAIL "
+            "with periodic snapshots) — without it this watch could never fire."
+        )
     if kind != "silence" and not str(pattern).strip():
         return "Tool failed: pattern is required for this kind."
     expiry = None

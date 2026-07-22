@@ -691,6 +691,35 @@ def test_unwatch_tool_ambiguous_returns_candidates(heartbeat_settings) -> None:
     assert a.id in result and b.id in result
 
 
+def test_watch_tool_refuses_mail_from_without_email_configured(heartbeat_settings) -> None:
+    from assistant import watches
+
+    result = execute_tool(
+        tool_map(heartbeat_settings)["watch"],
+        _ctx(heartbeat_settings),
+        {"kind": "mail_from", "pattern": "Skatteetaten"},
+    )
+    assert result.startswith("Tool failed")
+    assert "email" in result.lower()
+    assert watches.list_active(heartbeat_settings) == []
+
+
+def test_watch_tool_allows_mail_from_with_email_configured(tmp_path) -> None:
+    mail_settings = Settings(
+        memory_dir=str(tmp_path / "memory"),
+        timezone="Europe/Oslo",
+        enable_write_confirmation=True,
+        enable_heartbeat=True,
+        enable_email=True,
+    )
+    result = execute_tool(
+        tool_map(mail_settings)["watch"],
+        _ctx(mail_settings),
+        {"kind": "mail_from", "pattern": "Skatteetaten"},
+    )
+    assert result.startswith("Watching")
+
+
 def test_forget_tool_ambiguous_returns_candidates(settings) -> None:
     from assistant.memory import learn
 

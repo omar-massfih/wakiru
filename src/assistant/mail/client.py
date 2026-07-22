@@ -583,7 +583,11 @@ def _move(conn: imaplib.IMAP4_SSL, uid: str, folder: str) -> None:
         typ, _ = conn.uid("COPY", uid, _quote(folder))
         if typ != "OK":
             raise RuntimeError(f"could not copy message {uid} to folder {folder!r}")
-    conn.uid("STORE", uid, "+FLAGS", r"(\Deleted)")
+    typ, _ = conn.uid("STORE", uid, "+FLAGS", r"(\Deleted)")
+    if typ != "OK":
+        raise RuntimeError(
+            f"could not mark message {uid} deleted after copying to {folder!r}"
+        )
     if _supports_uidplus(conn):
         conn.uid("EXPUNGE", uid)
     else:
@@ -598,8 +602,10 @@ def mark_read(settings: Settings, uid: str, unread: bool = False) -> str:
         named = _summary_headers(conn, uid)
         if named is None:
             return f"No message with uid {uid}."
-        conn.uid("STORE", uid, "-FLAGS" if unread else "+FLAGS", r"(\Seen)")
+        typ, _ = conn.uid("STORE", uid, "-FLAGS" if unread else "+FLAGS", r"(\Seen)")
         state = "unread" if unread else "read"
+        if typ != "OK":
+            raise RuntimeError(f"could not mark message {uid} as {state}")
         return f"marked {state}: {_describe(*named)}"
     finally:
         _close(conn)
@@ -619,7 +625,9 @@ def archive_message(settings: Settings, uid: str) -> str:
         if named is None:
             return f"No message with uid {uid}."
         if _gmail(settings, conn):
-            conn.uid("STORE", uid, "-X-GM-LABELS", r"(\Inbox)")
+            typ, _ = conn.uid("STORE", uid, "-X-GM-LABELS", r"(\Inbox)")
+            if typ != "OK":
+                raise RuntimeError(f"could not drop the Inbox label on message {uid}")
             return f"archived: {_describe(*named)} (still in All Mail)"
         folder = settings.email_archive_folder
         _move(conn, uid, folder)
@@ -639,8 +647,10 @@ def set_label(settings: Settings, uid: str, label: str, remove: bool = False) ->
             return f"No message with uid {uid}."
         if _gmail(settings, conn):
             op = "-X-GM-LABELS" if remove else "+X-GM-LABELS"
-            conn.uid("STORE", uid, op, f"({_quote(label)})")
+            typ, _ = conn.uid("STORE", uid, op, f"({_quote(label)})")
             verb = "unlabeled" if remove else "labeled"
+            if typ != "OK":
+                raise RuntimeError(f"could not {verb.rstrip('ed')} message {uid} {label!r}")
             return f"{verb} {label!r}: {_describe(*named)}"
         if remove:
             return (

@@ -52,11 +52,13 @@ class _FakeIMAP:
         raw=None,
         capabilities=b"IMAP4REV1 UIDPLUS X-GM-EXT-1",
         copy_fail=0,
+        store_fail=0,
     ):
         self.uids = list(uids)
         self.raw = raw or {}
         self.capabilities = capabilities
         self.copy_fail = copy_fail
+        self.store_fail = store_fail
         self.commands: list[tuple] = []
         self.appended: list[tuple] = []
         self.created: list[str] = []
@@ -80,6 +82,9 @@ class _FakeIMAP:
                 return "OK", [b""]
             return "OK", [(b"header", self.raw[key])]
         if command == "STORE":
+            if self.store_fail > 0:
+                self.store_fail -= 1
+                return "NO", [b"[LIMIT] quota exceeded"]
             return "OK", [b""]
         if command == "COPY":
             if self.copy_fail > 0:
@@ -608,6 +613,27 @@ def test_archive_never_deletes_when_copy_keeps_failing(settings, monkeypatch) ->
     assert ("uid", "STORE", "5", "+FLAGS", r"(\Deleted)") not in fake.commands
 
 
+def test_archive_raises_when_final_store_fails(settings, monkeypatch) -> None:
+    # COPY succeeds but the \Deleted STORE is rejected — must not report
+    # "archived" (the message would be duplicated in both folders) and must
+    # never reach EXPUNGE.
+    fake = _FakeIMAP(
+        raw={"5": _raw_original()}, capabilities=b"IMAP4REV1 UIDPLUS", store_fail=1
+    )
+    monkeypatch.setattr(client, "imap_connect", lambda s: fake)
+    with pytest.raises(RuntimeError):
+        client.archive_message(settings, "5")
+    assert not any(c[1] == "EXPUNGE" for c in fake.commands if c[0] == "uid")
+    assert not fake.expunged
+
+
+def test_archive_raises_when_gmail_label_store_fails(settings, monkeypatch) -> None:
+    fake = _FakeIMAP(raw={"5": _raw_original()}, store_fail=1)  # Gmail caps by default
+    monkeypatch.setattr(client, "imap_connect", lambda s: fake)
+    with pytest.raises(RuntimeError):
+        client.archive_message(settings, "5")
+
+
 def test_archive_missing_uid_is_a_friendly_string(settings, monkeypatch) -> None:
     fake = _FakeIMAP(raw={})
     monkeypatch.setattr(client, "imap_connect", lambda s: fake)
@@ -641,6 +667,13 @@ def test_mark_read_sets_and_clears_seen(settings, monkeypatch) -> None:
     assert ("uid", "STORE", "5", "-FLAGS", r"(\Seen)") in fake.commands
 
 
+def test_mark_read_raises_when_store_fails(settings, monkeypatch) -> None:
+    fake = _FakeIMAP(raw={"5": _raw_original()}, store_fail=1)
+    monkeypatch.setattr(client, "imap_connect", lambda s: fake)
+    with pytest.raises(RuntimeError):
+        client.mark_read(settings, "5")
+
+
 def test_label_on_gmail_quotes_and_removes(settings, monkeypatch) -> None:
     fake = _FakeIMAP(raw={"5": _raw_original()})
     monkeypatch.setattr(client, "imap_connect", lambda s: fake)
@@ -652,6 +685,13 @@ def test_label_on_gmail_quotes_and_removes(settings, monkeypatch) -> None:
     summary = client.set_label(settings, "5", "Receipts 2026", remove=True)
     assert "unlabeled" in summary
     assert ("uid", "STORE", "5", "-X-GM-LABELS", '("Receipts 2026")') in fake.commands
+
+
+def test_label_raises_when_store_fails(settings, monkeypatch) -> None:
+    fake = _FakeIMAP(raw={"5": _raw_original()}, store_fail=1)  # Gmail caps by default
+    monkeypatch.setattr(client, "imap_connect", lambda s: fake)
+    with pytest.raises(RuntimeError):
+        client.set_label(settings, "5", "Receipts 2026")
 
 
 def test_label_on_generic_imap_moves_to_folder(settings, monkeypatch) -> None:

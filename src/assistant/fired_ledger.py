@@ -222,6 +222,13 @@ def fire_due(
         # Recorded with the same ⏰ prefix the chat channels show, so the
         # thread's history matches what the user actually saw.
         record_push(agent, settings, f"⏰ {text}")
-
-    logger.info("fired %d %s(s): %s", len(sent), log_label, text)
+        logger.info("fired %d %s(s): %s", len(sent), log_label, text)
+    else:
+        # Claim stands even if no channel is configured — retrying every tick
+        # would rebuild a push that can never land (the same tradeoff
+        # briefing.py/heartbeat.py make on their equivalent branch).
+        logger.warning(
+            "%s claimed %d but no delivery channel accepted it: %s",
+            log_label, len(sent), text,
+        )
     return sent

@@ -264,6 +264,21 @@ def test_delivery_crash_keeps_claim(settings, monkeypatch) -> None:
     assert reminders.run_reminders(settings) == []  # and are not re-fired
 
 
+def test_undelivered_reminder_logs_warning_and_keeps_claim(settings, monkeypatch, caplog) -> None:
+    # No channel configured (or an expired token, etc.) makes deliver_reminder
+    # return False without raising — that must not be a silent no-op: it needs
+    # a log trace, and the claim must still stand (no infinite re-fire).
+    _event_in(settings, "Dentist", minutes=30)
+    monkeypatch.setattr(reminders, "deliver_reminder", lambda settings_, reminder: False)
+
+    with caplog.at_level("WARNING", logger="assistant.fired_ledger"):
+        fired = reminders.run_reminders(settings)
+    assert len(fired) == 1
+    assert any("no delivery channel accepted it" in r.message for r in caplog.records)
+    assert len(_ledger_rows(settings)) == 1  # claim survived
+    assert reminders.run_reminders(settings) == []  # not re-fired
+
+
 def test_batch_composes_one_push_covering_all_due(settings, monkeypatch) -> None:
     # Several due reminders become ONE composed push; the model gets the
     # template lines as facts and the joined templates as fallback.
