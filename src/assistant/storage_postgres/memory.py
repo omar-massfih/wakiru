@@ -37,9 +37,15 @@ def ensure_memory_schema(settings: Settings) -> None:
               created TEXT NOT NULL DEFAULT '',
               updated TEXT NOT NULL DEFAULT '',
               last_recalled TEXT NOT NULL DEFAULT '',
-              recall_count INTEGER NOT NULL DEFAULT 0
+              recall_count INTEGER NOT NULL DEFAULT 0,
+              relations JSONB NOT NULL DEFAULT '[]'::jsonb
             )
             """
+        )
+        # Add the relations column to a table created before it existed.
+        conn.execute(
+            "ALTER TABLE assistant_memory_notes "
+            "ADD COLUMN IF NOT EXISTS relations JSONB NOT NULL DEFAULT '[]'::jsonb"
         )
         conn.execute(
             """
@@ -99,6 +105,7 @@ def _note_from_row(row: dict) -> Note:
         updated=str(row.get("updated") or ""),
         last_recalled=str(row.get("last_recalled") or ""),
         recall_count=int(row.get("recall_count") or 0),
+        relations=list(row.get("relations") or []),
     )
 
 
@@ -109,9 +116,9 @@ def write_note(settings: Settings, note: Note) -> Path:
             """
             INSERT INTO assistant_memory_notes
               (name, description, body, kind, salience, confidence, tags, source,
-               created, updated, last_recalled, recall_count)
+               created, updated, last_recalled, recall_count, relations)
             VALUES
-              (%s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s)
+              (%s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s, %s::jsonb)
             ON CONFLICT(name) DO UPDATE SET
               description = excluded.description,
               body = excluded.body,
@@ -123,7 +130,8 @@ def write_note(settings: Settings, note: Note) -> Path:
               created = excluded.created,
               updated = excluded.updated,
               last_recalled = excluded.last_recalled,
-              recall_count = excluded.recall_count
+              recall_count = excluded.recall_count,
+              relations = excluded.relations
             """,
             (
                 note.name,
@@ -138,6 +146,7 @@ def write_note(settings: Settings, note: Note) -> Path:
                 note.updated,
                 note.last_recalled,
                 note.recall_count,
+                json.dumps(note.relations),
             ),
         )
     return virtual_note_path(settings, note)
@@ -152,7 +161,7 @@ def list_notes(settings: Settings) -> list[Note]:
     with connect(settings) as conn:
         cur = conn.execute(
             "SELECT name, description, body, kind, salience, confidence, tags,"
-            " source, created, updated, last_recalled, recall_count"
+            " source, created, updated, last_recalled, recall_count, relations"
             " FROM assistant_memory_notes ORDER BY name"
         )
         return [_note_from_row(row) for row in _rows(cur)]
@@ -163,7 +172,7 @@ def find_note(settings: Settings, name: str) -> Note | None:
     with connect(settings) as conn:
         cur = conn.execute(
             "SELECT name, description, body, kind, salience, confidence, tags,"
-            " source, created, updated, last_recalled, recall_count"
+            " source, created, updated, last_recalled, recall_count, relations"
             " FROM assistant_memory_notes WHERE name = %s",
             (name,),
         )

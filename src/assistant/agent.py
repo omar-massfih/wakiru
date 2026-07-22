@@ -59,6 +59,7 @@ from .config import Settings, get_settings
 from .context_providers import build_context
 from .docs import store as docs_store
 from .llm import build_model
+from .memory import graph as memory_graph
 from .memory import index
 from .tools import ToolContext, available_tools, execute_tool
 
@@ -258,6 +259,14 @@ def build_agent(settings: Settings | None = None) -> CompiledStateGraph:
         index.reindex(settings)
     except Exception:
         logger.exception("startup reindex failed; continuing with existing index")
+
+    # Rebuild the knowledge graph from the notes' relations frontmatter, the same
+    # way — a derived index that self-heals from the source-of-truth files.
+    if settings.enable_graph_memory:
+        try:
+            memory_graph.reindex(settings)
+        except Exception:
+            logger.exception("startup graph reindex failed; continuing with existing graph")
 
     # Same for the document chunk index, rebuilt from the stored document text.
     if settings.enable_docs:

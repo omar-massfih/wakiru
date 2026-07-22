@@ -25,7 +25,7 @@ from langchain_core.messages import SystemMessage
 
 from ..calendar.context import resolve_tz
 from ..config import Settings, get_settings
-from . import index, store
+from . import graph, index, store
 from .embeddings import embed_query
 from .locks import locked
 from .store import Note
@@ -118,8 +118,46 @@ def search_memory(
         )
         scored.append((note, score))
 
+    _augment_with_graph(settings, query, scored)
     scored.sort(key=lambda pair: pair[1], reverse=True)
     return scored[:k]
+
+
+def _augment_with_graph(
+    settings: Settings, query: str, scored: list[tuple[Note, float]]
+) -> None:
+    """Add notes reachable in the knowledge graph from entities named in ``query``.
+
+    Multi-hop recall: the vector pool may miss a fact that no single note phrases
+    like the question (``Sara works at Acme`` for "where does my sister work?"),
+    yet the graph connects it via ``user -sister-> Sara -works_at-> Acme``. We
+    seed traversal from the entities the query mentions, pull the provenance notes
+    of that neighborhood, and fold in any not already present with a retention
+    score plus a fixed graph bias — so a structurally-relevant note isn't dropped
+    by the cosine floor it might sit below. Mutates ``scored`` in place.
+    """
+    if not settings.enable_graph_memory:
+        return
+    seeds = graph.resolve(settings, query)
+    if not seeds:
+        return
+    reached = graph.neighbors(settings, seeds, settings.graph_max_hops)
+    names = graph.note_names_for(settings, reached)
+    if not names:
+        return
+    have = {note.name for note, _ in scored}
+    for name in names:
+        if name in have:
+            continue
+        note = store.find_note(settings, name)
+        if note is None:
+            continue
+        score = settings.recall_graph_bias + retention_score(
+            settings, note.kind, note.salience, note.recall_count,
+            note.last_recalled, note.updated,
+        )
+        scored.append((note, score))
+        have.add(name)
 
 
 def _load(settings: Settings, name: str, path: str) -> Note | None:

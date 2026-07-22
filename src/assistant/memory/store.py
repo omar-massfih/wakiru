@@ -54,6 +54,35 @@ def _today() -> str:
     return date.today().isoformat()
 
 
+def normalize_relations(value: object) -> list[dict]:
+    """Coerce raw ``relations`` (from frontmatter or an LLM op) to clean triples.
+
+    Each kept entry is a dict with string ``subj``/``rel``/``obj`` (all required
+    and non-empty) plus optional ISO-date ``valid_from``/``valid_to``. ``subj``
+    and ``obj`` are free-text entity labels; :mod:`.graph` slugs them into node
+    keys. Anything malformed is dropped rather than raised — a bad triple must
+    never break a note's save.
+    """
+    if not isinstance(value, list):
+        return []
+    out: list[dict] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        subj = str(item.get("subj", "")).strip()
+        rel = str(item.get("rel", "")).strip()
+        obj = str(item.get("obj", "")).strip()
+        if not (subj and rel and obj):
+            continue
+        triple = {"subj": subj, "rel": rel, "obj": obj}
+        for stamp in ("valid_from", "valid_to"):
+            val = str(item.get(stamp, "")).strip()
+            if val:
+                triple[stamp] = val
+        out.append(triple)
+    return out
+
+
 def normalize_kind(kind: str | None) -> str | None:
     """Map legacy kind names ("fact"/"learning") to current ones; ``None`` if unknown.
 
@@ -83,9 +112,15 @@ class Note:
     updated: str = field(default_factory=_today)
     last_recalled: str = ""
     recall_count: int = 0
+    # Entity-relationship triples extracted from this note, e.g.
+    # {"subj": "Sara", "rel": "works_at", "obj": "Acme"}. The knowledge graph in
+    # :mod:`.graph` is a rebuildable derived index over these — the note file
+    # (this field) stays the source of truth, exactly like the vector index.
+    relations: list[dict] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self.kind = normalize_kind(self.kind) or _DEFAULT_KIND
+        self.relations = normalize_relations(self.relations)
 
     @property
     def index_text(self) -> str:
@@ -107,6 +142,9 @@ class Note:
             "last_recalled": self.last_recalled,
             "recall_count": int(self.recall_count),
         }
+        # Only written when present, so existing note files stay unchanged.
+        if self.relations:
+            meta["relations"] = [dict(r) for r in self.relations]
         front = yaml.safe_dump(meta, sort_keys=False, allow_unicode=True).strip()
         return f"---\n{front}\n---\n\n{self.body.strip()}\n"
 
@@ -166,6 +204,7 @@ def parse_note(text: str) -> Note:
         updated=str(meta.get("updated", _today())),
         last_recalled=str(meta.get("last_recalled", "") or ""),
         recall_count=int(_as_float(meta.get("recall_count"), 0)),
+        relations=normalize_relations(meta.get("relations")),
     )
 
 

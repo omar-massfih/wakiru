@@ -186,6 +186,19 @@ class Settings(BaseSettings):
         "episodic": -0.05,
     }
 
+    # --- Knowledge graph (entity-relationship memory) ---
+    # Mirror extracted (subject, relation, object) triples into a graph and let
+    # recall traverse it, so multi-hop questions ("where does my sister work?")
+    # reach facts no single note states. Derived from note frontmatter and fully
+    # rebuildable; a no-op when notes carry no relations. False disables both the
+    # extraction ask and the recall augmentation (behavior identical to before).
+    enable_graph_memory: bool = True
+    # How many relationship hops to expand from the entities named in a query.
+    graph_max_hops: int = 2
+    # Additive score boost for a note pulled in via graph traversal, so a
+    # graph-linked fact isn't dropped by the cosine floor it may sit below.
+    recall_graph_bias: float = 0.2
+
     # --- Consolidation ("sleep") ---
     # Run a consolidation pass every N chat turns (0 disables the auto-trigger).
     consolidate_every_n_turns: int = 20
@@ -546,6 +559,16 @@ class Settings(BaseSettings):
     def memory_db_path(self) -> Path:
         """SQLite file holding the vector index + reinforcement counters."""
         return self.memory_path / "index.db"
+
+    @property
+    def graph_db_path(self) -> Path:
+        """SQLite file holding the knowledge-graph nodes + edges (derived index).
+
+        Kept separate from ``index.db`` so the sqlite-vec extension load and the
+        graph's plain-SQL traversal never share a connection, and either index
+        can be rebuilt from the notes without disturbing the other.
+        """
+        return self.memory_path / "graph.db"
 
     @property
     def calendar_db_path(self) -> Path:

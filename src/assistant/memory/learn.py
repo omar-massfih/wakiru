@@ -30,7 +30,7 @@ from datetime import date
 from ..config import Settings, get_settings
 from ..llm import complete_text
 from ..ops_parse import parse_ops
-from . import index, store
+from . import graph, index, store
 from .embeddings import embed_one, embed_query
 from .locks import locked
 from .store import Note, slugify
@@ -59,6 +59,11 @@ def _write_and_index(settings: Settings, note: Note, vector: list[float]) -> Not
         recall_count=note.recall_count,
         text_hash=index.content_hash(note.index_text),
     )
+    # Mirror the note's triples into the knowledge graph (rebuildable from the
+    # file just written). Unconditional sync — an absorb/revise that dropped a
+    # relation must clear the stale edge, so this runs even when relations is [].
+    if settings.enable_graph_memory:
+        graph.sync_note(settings, note)
     store.regenerate_index(settings)
     return note
 
@@ -73,6 +78,7 @@ def save_memory(
     confidence: float | None = None,
     source: str = "",
     tags: list[str] | None = None,
+    relations: list[dict] | None = None,
 ) -> Note:
     """Persist a memory, deduping against existing notes.
 
@@ -94,6 +100,7 @@ def save_memory(
         tags=[str(t) for t in tags] if tags else [],
         source=source,
         updated=_today(),
+        relations=relations or [],
     )
 
     vector = embed_one(note.index_text, settings)
@@ -150,6 +157,7 @@ def revise_memory(
     kind: str | None = None,
     salience: float | None = None,
     tags: list[str] | None = None,
+    relations: list[dict] | None = None,
 ) -> Note | None:
     """Supersede an existing note in place, keeping its identity and counters.
 
@@ -175,6 +183,10 @@ def revise_memory(
         existing.salience = float(salience)
     if tags:  # additive only — an update never strips e.g. the profile tag
         existing.tags += [str(t) for t in tags if str(t) not in existing.tags]
+    if relations is not None:
+        # Replace, not append: an update restates the note's facts, so its
+        # triples supersede the old ones (a moved-away edge must not linger).
+        existing.relations = store.normalize_relations(relations)
     existing.updated = _today()
 
     new_path = store.note_path(settings, existing)
@@ -211,6 +223,8 @@ def forget_memory(
             return None
         deleted = store.delete_note(settings, query)
         index.remove(settings, query)
+        if settings.enable_graph_memory:
+            graph.remove(settings, query)
         store.regenerate_index(settings)
         return deleted
 
@@ -244,6 +258,8 @@ def forget_memory(
     name = candidates[0][0]
     deleted = store.delete_note(settings, name)
     index.remove(settings, name)
+    if settings.enable_graph_memory:
+        graph.remove(settings, name)
     store.regenerate_index(settings)
     return deleted
 
@@ -321,9 +337,20 @@ language, formality, humor tolerance, brevity ("keep answers short"), how they
 like to be greeted, and when not to be disturbed. These profile memories
 personalize scheduling, reminders, and tone every turn.
 
+On a "save" or "update", also extract the entity RELATIONSHIPS the memory states
+as (subject, relation, object) triples, when any are present. These build a graph
+that answers multi-hop questions ("where does my sister work?"). Use short slug
+relations (works_at, lives_in, sister, brother, parent, spouse, friend, owns,
+member_of); name the user as "user". Only include a relationship the memory
+actually asserts — omit "relations" entirely when there are none. If the exchange
+makes clear when a relationship started or ended, add ISO-date "valid_from" /
+"valid_to". Example: "My sister Sara works at Acme" ->
+  "relations": [{{"subj": "user", "rel": "sister", "obj": "Sara"}},
+                {{"subj": "Sara", "rel": "works_at", "obj": "Acme"}}]
+
 Return a JSON array of operations, each one of:
-  {{"op": "save", "kind": "semantic|procedural", "description": "<short summary>", "body": "<one clear sentence>", "salience": <0..1>, "tags": ["profile"]?}}
-  {{"op": "update", "name": "<existing memory name>", "description": "<short summary>", "body": "<the corrected sentence>", "tags": ["profile"]?}}
+  {{"op": "save", "kind": "semantic|procedural", "description": "<short summary>", "body": "<one clear sentence>", "salience": <0..1>, "tags": ["profile"]?, "relations": [{{"subj": "..", "rel": "..", "obj": "..", "valid_from": "..?", "valid_to": "..?"}}]?}}
+  {{"op": "update", "name": "<existing memory name>", "description": "<short summary>", "body": "<the corrected sentence>", "tags": ["profile"]?, "relations": [..]?}}
   {{"op": "forget", "name": "<existing memory name>"}}   (or {{"op": "forget", "query": "<what to drop>"}})
 For "forget", always use the exact name when the memory appears in the known
 list; only use "query" for memories not shown.
@@ -406,6 +433,7 @@ def update_memory(
         try:
             if op["op"] == "save" and op.get("body"):
                 tags = op.get("tags")
+                rels = op.get("relations")
                 note = save_memory(
                     settings,
                     body=str(op["body"]),
@@ -414,11 +442,14 @@ def update_memory(
                     salience=op.get("salience"),
                     source=source,
                     tags=tags if isinstance(tags, list) else None,
+                    relations=rels if isinstance(rels, list) else None,
                 )
                 applied.append(f"saved: {note.description}")
             elif op["op"] == "update" and op.get("name"):
                 tags = op.get("tags")
                 tags = tags if isinstance(tags, list) else None
+                rels = op.get("relations")
+                rels = rels if isinstance(rels, list) else None
                 revised = revise_memory(
                     settings,
                     name=str(op["name"]),
@@ -426,6 +457,7 @@ def update_memory(
                     description=op.get("description"),
                     kind=op.get("kind"),
                     tags=tags,
+                    relations=rels,
                 )
                 if revised is None:  # name didn't exist — treat as a save
                     if op.get("body"):
@@ -436,6 +468,7 @@ def update_memory(
                             kind=op.get("kind"),
                             source=source,
                             tags=tags,
+                            relations=rels,
                         )
                         applied.append(f"saved: {note.description}")
                 else:

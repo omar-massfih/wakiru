@@ -27,7 +27,7 @@ from datetime import date
 
 from ..config import Settings, get_settings
 from ..llm import complete_text
-from . import index, learn, recall, store
+from . import graph, index, learn, recall, store
 from .locks import CONSOLIDATE_LOCK, MEMORY_LOCK, locked
 
 logger = logging.getLogger(__name__)
@@ -257,6 +257,13 @@ def consolidate_memory(
         with MEMORY_LOCK:
             trash_pruned = store.prune_trash(settings, settings.trash_retention_days)
             store.regenerate_index(settings)
+        # Reconcile the graph against the surviving notes: the deterministic
+        # delete paths (episodic decay, cap eviction) drop notes directly, so
+        # sweep any edges their provenance left behind.
+        graph_orphans = 0
+        if settings.enable_graph_memory:
+            live = {note.name for note in store.list_notes(settings)}
+            graph_orphans = graph.prune_orphans(settings, live)
         summary = {
             "pruned_episodes": pruned,
             "changes": changes,
@@ -264,6 +271,7 @@ def consolidate_memory(
             "durable_decayed": durable_decayed,
             "evicted": evicted,
             "trash_pruned": trash_pruned,
+            "graph_orphans_pruned": graph_orphans,
         }
         logger.info("consolidation: %s", summary)
         return summary
