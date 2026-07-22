@@ -401,6 +401,37 @@ def test_chat_stream_error_frame_survives_multiline_message(client, monkeypatch)
     assert events["error"] == "failed:\n\nstderr detail"
 
 
+def test_chat_stream_error_frame_for_non_codex_provider_failure(client, monkeypatch) -> None:
+    # A provider other than codex (chatgpt/openai/anthropic) raises its own error
+    # type — it must still surface as an error frame, not break the stream.
+    import assistant.api as api
+
+    async def boom(agent, message, thread_id, settings=None):
+        raise RuntimeError("azure foundry rate limit")
+        yield  # pragma: no cover - makes this an async generator
+
+    monkeypatch.setattr(api, "run_chat_stream", boom)
+    monkeypatch.setattr(api, "_agent", lambda: object())
+
+    resp = client(None).post("/chat/stream", json={"message": "hi"})
+    _, events = _parse_sse(resp.text)
+    assert events["error"] == "azure foundry rate limit"
+
+
+def test_chat_buffered_non_codex_provider_failure_is_502(client, monkeypatch) -> None:
+    import assistant.api as api
+
+    def boom(agent, message, thread_id, settings=None):
+        raise RuntimeError("azure foundry rate limit")
+
+    monkeypatch.setattr(api, "run_chat", boom)
+    monkeypatch.setattr(api, "_agent", lambda: object())
+
+    resp = client(None).post("/chat", json={"message": "hi"})
+    assert resp.status_code == 502
+    assert "azure foundry rate limit" in resp.text
+
+
 def test_sse_frame_encodes_one_data_line_per_content_line() -> None:
     from assistant.api import sse_frame
 

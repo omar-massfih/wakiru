@@ -89,7 +89,9 @@ async def run_chat_stream(
     The caller is responsible for running :func:`run_upkeep` once the stream
     is exhausted.
 
-    Raises :class:`assistant.codex_runner.CodexError` when the model fails.
+    Propagates whatever the configured provider raises when the model fails
+    (e.g. ``CodexError``, ``ChatGptError``, or an openai/anthropic error) — the
+    caller catches broadly and turns it into a clean error response.
     """
     settings = settings or get_settings()
     config: RunnableConfig = {"configurable": {"thread_id": thread_id}}

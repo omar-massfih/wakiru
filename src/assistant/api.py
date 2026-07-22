@@ -34,7 +34,6 @@ from .calendar import run_reminders
 from .calendar import sync as calendar_sync
 from .calendar.context import now, resolve_tz, upcoming_events
 from .chat import run_chat, run_chat_stream, run_upkeep
-from .codex_runner import CodexError
 from .config import get_settings
 from .docs import extract as docs_extract
 from .docs import store as docs_store
@@ -344,7 +343,11 @@ def chat(req: ChatRequest, background: BackgroundTasks) -> ChatResponse:
     thread_id = req.thread_id or str(uuid.uuid4())
     try:
         reply = run_chat(_agent(), req.message, thread_id, settings=get_settings())
-    except CodexError as exc:
+    except Exception as exc:
+        # Any provider's failure — codex, chatgpt.com, openai/Azure, anthropic —
+        # should surface as a clean 502, not just CodexError (which would leak
+        # every other provider's error out as a bare 500).
+        logger.exception("chat turn failed")
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     # All post-reply maintenance — long-term memory, working-memory folding,
@@ -391,8 +394,11 @@ async def chat_stream(req: ChatRequest, background: BackgroundTasks) -> Streamin
             ):
                 parts.append(chunk)
                 yield sse_frame(chunk)
-        except CodexError as exc:
-            logger.error("streaming chat turn failed: %s", exc)
+        except Exception as exc:
+            # Every provider, not just codex, must surface as an error frame
+            # rather than breaking the stream with an unhandled exception (no
+            # done/error frame at all) partway through.
+            logger.exception("streaming chat turn failed")
             yield sse_frame(str(exc), event="error")
             return
         yield sse_frame(thread_id, event="done")
@@ -634,7 +640,9 @@ def docs_summarize(doc_id: str) -> dict:
     """Summarize a stored document with the configured model."""
     try:
         summary = summarize_document(get_settings(), doc_id)
-    except CodexError as exc:
+    except Exception as exc:
+        # Provider-agnostic, like /chat: any model failure is a 502, not a 500.
+        logger.exception("document summarization failed for %s", doc_id)
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     if summary is None:
         raise HTTPException(status_code=404, detail="No such document.")
