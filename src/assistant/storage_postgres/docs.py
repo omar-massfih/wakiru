@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from ..config import Settings
+from ..memory.embeddings import embedding_signature
 from .core import (
     _rows,
     _schema_done,
@@ -77,7 +78,7 @@ def reindex_docs(settings: Settings) -> int:
     with connect(settings) as conn:
         stored_model = docs_meta_get(conn, "embedding_model")
         rows = _rows(conn.execute("SELECT id, text FROM assistant_documents"))
-        model_changed = stored_model != settings.embedding_model
+        model_changed = stored_model != embedding_signature(settings)
         if not rows or not model_changed:
             return len(rows)
         conn.execute("DELETE FROM assistant_document_chunks")
@@ -95,7 +96,7 @@ def reindex_docs(settings: Settings) -> int:
         with connect(settings) as conn:
             if vectors and docs_meta_get(conn, "dim") is None:
                 docs_meta_set(conn, "dim", str(len(vectors[0])))
-                docs_meta_set(conn, "embedding_model", settings.embedding_model)
+                docs_meta_set(conn, "embedding_model", embedding_signature(settings))
             for ord_, (piece, vector) in enumerate(zip(pieces, vectors, strict=True)):
                 conn.execute(
                     "INSERT INTO assistant_document_chunks(doc_id, ord, text, embedding) "
@@ -106,7 +107,7 @@ def reindex_docs(settings: Settings) -> int:
     # A corpus whose documents are all empty never records a dim above; stamp the
     # model anyway so the next startup doesn't see a "changed" model and rebuild.
     with connect(settings) as conn:
-        docs_meta_set(conn, "embedding_model", settings.embedding_model)
+        docs_meta_set(conn, "embedding_model", embedding_signature(settings))
     return len(rows)
 
 
@@ -126,7 +127,7 @@ def add_document(settings: Settings, title: str, text: str, pieces: list[str], v
     with connect(settings) as conn:
         if vectors and docs_meta_get(conn, "dim") is None:
             docs_meta_set(conn, "dim", str(len(vectors[0])))
-            docs_meta_set(conn, "embedding_model", settings.embedding_model)
+            docs_meta_set(conn, "embedding_model", embedding_signature(settings))
         conn.execute(
             "INSERT INTO assistant_documents(id, title, text, added) VALUES (%s, %s, %s, %s)",
             (doc.id, doc.title, doc.text, doc.added),
@@ -218,7 +219,7 @@ def reindex_documents(settings: Settings, chunker, embedder) -> int:
     with connect(settings) as conn:
         stored_model = docs_meta_get(conn, "embedding_model")
         documents = _rows(conn.execute("SELECT id, text FROM assistant_documents"))
-        if not documents or stored_model == settings.embedding_model:
+        if not documents or stored_model == embedding_signature(settings):
             return len(documents)
         conn.execute("DELETE FROM assistant_document_chunks")
         conn.execute("DELETE FROM assistant_docs_meta WHERE key IN ('dim', 'embedding_model')")
@@ -233,7 +234,7 @@ def reindex_documents(settings: Settings, chunker, embedder) -> int:
         with connect(settings) as conn:
             if vectors and docs_meta_get(conn, "dim") is None:
                 docs_meta_set(conn, "dim", str(len(vectors[0])))
-                docs_meta_set(conn, "embedding_model", settings.embedding_model)
+                docs_meta_set(conn, "embedding_model", embedding_signature(settings))
             for ord_, (piece, vector) in enumerate(zip(pieces, vectors, strict=True)):
                 conn.execute(
                     "INSERT INTO assistant_document_chunks(doc_id, ord, text, embedding) "

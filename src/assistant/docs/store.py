@@ -19,7 +19,7 @@ from datetime import UTC, datetime
 import sqlite_vec
 
 from ..config import Settings, postgres_backend
-from ..memory.embeddings import embed_passages, embed_query
+from ..memory.embeddings import embed_passages, embed_query, embedding_signature
 from ..sqlite_util import open_db
 
 _VEC_TABLE = "chunk_vec"
@@ -91,7 +91,7 @@ def _ensure_vec_table(conn: sqlite3.Connection, dim: int, settings: Settings) ->
         f" vec0(embedding float[{dim}] distance_metric=cosine)"
     )
     _meta_set(conn, "dim", str(dim))
-    _meta_set(conn, "embedding_model", settings.embedding_model)
+    _meta_set(conn, "embedding_model", embedding_signature(settings))
 
 
 def _check_vectors(pieces: list[str], vectors: list[list[float]]) -> None:
@@ -257,7 +257,7 @@ def reindex(settings: Settings) -> int:
         documents = conn.execute("SELECT id, text FROM documents").fetchall()
         # A blank stored model means a pre-migration db: rebuild it once so the
         # model it was embedded under is recorded from here on.
-        model_changed = stored_model != settings.embedding_model
+        model_changed = stored_model != embedding_signature(settings)
         if not documents or not model_changed:
             return len(documents)
         conn.execute(f"DROP TABLE IF EXISTS {_VEC_TABLE}")
@@ -292,7 +292,7 @@ def reindex(settings: Settings) -> int:
     # otherwise every startup would see a "changed" model and rebuild nothing.
     conn = _connect(settings)
     try:
-        _meta_set(conn, "embedding_model", settings.embedding_model)
+        _meta_set(conn, "embedding_model", embedding_signature(settings))
         conn.commit()
     finally:
         conn.close()

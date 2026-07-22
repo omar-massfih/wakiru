@@ -21,6 +21,27 @@ from ..config import Settings, get_settings
 _QUERY_PREFIX = "query: "
 _PASSAGE_PREFIX = "passage: "
 
+# Bumped when the produced *vectors* change meaning without the model name
+# changing. fastembed 0.8 silently switched ``intfloat/multilingual-e5-large``
+# from CLS to mean pooling, so vectors written by earlier versions no longer sit
+# in the same space as new queries — cosine similarity quietly degrades with no
+# error. The vector stores stamp and compare the full signature below (not the
+# bare model name), so such a shift reads as a model change and re-embeds from
+# source on the next run. Bump this on any future pooling/behaviour change.
+_EMBEDDING_REVISION = "2"  # 1 = fastembed<0.8 CLS pooling; 2 = fastembed>=0.8 mean pooling
+
+
+def embedding_signature(settings: Settings | None = None) -> str:
+    """A stable stamp for the embedding *space*, not just the model name.
+
+    Stored alongside every vector index and compared on startup: when it differs
+    from what a store recorded, the store's model-change migration drops and
+    rebuilds the index from its retained source. Carries a revision that captures
+    pooling/behaviour shifts a bare model name would miss (see ``_EMBEDDING_REVISION``).
+    """
+    settings = settings or get_settings()
+    return f"{settings.embedding_model}#r{_EMBEDDING_REVISION}"
+
 
 @lru_cache(maxsize=4)
 def _embedder(model_name: str):

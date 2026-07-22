@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from ..config import Settings
+from ..memory.embeddings import embedding_signature
 from ..memory.store import INDEX_FILENAME, Note
 from .core import (
     _executemany,
@@ -304,7 +305,7 @@ def upsert_memory_index(
         dim = meta_get(conn, "dim")
         if dim is None:
             meta_set(conn, "dim", str(len(vector)))
-            meta_set(conn, "embedding_model", settings.embedding_model)
+            meta_set(conn, "embedding_model", embedding_signature(settings))
         conn.execute(
             """
             INSERT INTO assistant_memory_index
@@ -342,6 +343,15 @@ def remove_memory_index(settings: Settings, name: str) -> bool:
             "DELETE FROM assistant_memory_index WHERE name = %s RETURNING name", (name,)
         )
         return cur.fetchone() is not None
+
+
+def memory_index_is_empty(settings: Settings) -> bool:
+    """Whether the memory index has no rows — the Postgres twin of
+    :func:`assistant.memory.index.is_empty`, letting recall skip the query embed."""
+    ensure_memory_schema(settings)
+    with connect(settings) as conn:
+        row = conn.execute("SELECT 1 FROM assistant_memory_index LIMIT 1").fetchone()
+    return row is None
 
 
 def search_memory_index(
@@ -454,7 +464,7 @@ def reindex_memory(settings: Settings) -> int:
     ensure_memory_schema(settings)
     with connect(settings) as conn:
         stored_model = meta_get(conn, "embedding_model")
-        model_changed = stored_model not in (None, settings.embedding_model)
+        model_changed = stored_model not in (None, embedding_signature(settings))
         prior = {
             name: (int(rc), str(lr or ""))
             for name, rc, lr in conn.execute(

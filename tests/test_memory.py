@@ -287,6 +287,41 @@ def test_reindex_on_model_change_preserves_counters(settings, tmp_path) -> None:
     assert stats is not None and stats[0] == 2
 
 
+def test_search_on_empty_index_skips_the_embed(settings, monkeypatch) -> None:
+    # Recall runs every turn even with no memories yet (e.g. enable_memory off or
+    # a fresh install). Embedding loads the real ~2GB model, so an empty index
+    # must short-circuit before embedding rather than after.
+    def _boom(*a, **k):
+        raise AssertionError("embedded a query against an empty index")
+
+    monkeypatch.setattr("assistant.memory.embeddings._embed", _boom)
+    assert recall.search_memory(settings, "anything at all") == []
+
+
+def test_reindex_migrates_a_pre_signature_index(settings, monkeypatch) -> None:
+    # A pre-signature index stamped the bare model name. A fastembed pooling swap
+    # keeps the name but changes the vectors, so the migration must key off the
+    # signature (not the name) and re-embed the notes from their markdown source.
+    learn.save_memory(settings, body="The user plays chess.")
+    conn = index._connect(settings)
+    try:
+        index._meta_set(conn, "embedding_model", settings.embedding_model)  # legacy bare name
+        conn.commit()
+    finally:
+        conn.close()
+
+    embedded: list[int] = []
+
+    def counting(texts, prefix: str = "", settings=None):
+        embedded.append(len(texts))
+        return _fake_embed(texts, prefix, settings)
+
+    monkeypatch.setattr("assistant.memory.embeddings._embed", counting)
+    assert index.reindex(settings) == 1
+    assert embedded  # re-embedded from source rather than trusting stale vectors
+    assert recall.search_memory(settings, "chess")
+
+
 # --- LLM-driven update (save + update + forget in one pass) ---------------- #
 
 

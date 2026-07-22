@@ -31,6 +31,7 @@ import sqlite_vec
 
 from ..config import Settings, postgres_backend
 from ..sqlite_util import open_db
+from .embeddings import embedding_signature
 from .locks import locked
 
 VEC_TABLE = "vec_notes"
@@ -92,7 +93,7 @@ def _ensure_vec_table(conn: sqlite3.Connection, dim: int, settings: Settings) ->
         f"vec0(embedding float[{dim}] distance_metric=cosine)"
     )
     _meta_set(conn, "dim", str(dim))
-    _meta_set(conn, "embedding_model", settings.embedding_model)
+    _meta_set(conn, "embedding_model", embedding_signature(settings))
 
 
 def upsert(
@@ -153,6 +154,23 @@ def remove(settings: Settings, name: str) -> bool:
         conn.execute("DELETE FROM notes WHERE id = ?", (row[0],))
         conn.commit()
         return True
+    finally:
+        conn.close()
+
+
+def is_empty(settings: Settings) -> bool:
+    """Whether the index holds no vectors yet.
+
+    A cheap check callers make *before* embedding a query: on an empty index the
+    vector search can only return nothing, so there is no point paying the (real
+    model-loading) embed cost. Mirrors the ``_vec_dim`` short-circuit inside
+    :func:`search_ranked`, but without a query vector in hand.
+    """
+    if storage_postgres := postgres_backend(settings):
+        return storage_postgres.memory_index_is_empty(settings)
+    conn = _connect(settings)
+    try:
+        return _vec_dim(conn) is None
     finally:
         conn.close()
 
@@ -316,7 +334,7 @@ def reindex(settings: Settings) -> int:
         }
         model_changed = _meta_get(conn, "embedding_model") not in (
             None,
-            settings.embedding_model,
+            embedding_signature(settings),
         )
         if model_changed and _vec_dim(conn) is not None:
             conn.execute(f"DROP TABLE IF EXISTS {VEC_TABLE}")

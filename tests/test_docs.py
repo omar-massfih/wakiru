@@ -179,6 +179,32 @@ def test_reindex_embeds_nothing_when_the_model_is_unchanged(settings, monkeypatc
     assert embedded == []  # a routine restart must not re-embed the corpus
 
 
+def test_reindex_migrates_a_pre_signature_db(settings, monkeypatch) -> None:
+    # A db written before embedding_signature() stamped the *bare* model name.
+    # The fastembed pooling swap keeps that name identical, so keying the
+    # migration off the name alone would leave the corpus on stale vectors. The
+    # signature must read the legacy stamp as changed and re-embed from source.
+    store.add_document(settings, "Bergen", "The Bergen fish market sells salmon.")
+    conn = store._connect(settings)
+    try:
+        store._meta_set(conn, "embedding_model", settings.embedding_model)  # legacy bare name
+        conn.commit()
+    finally:
+        conn.close()
+
+    embedded: list[int] = []
+
+    def counting(texts, prefix: str = "", settings=None):
+        embedded.append(len(texts))
+        return _fake_embed(texts, prefix, settings)
+
+    monkeypatch.setattr("assistant.memory.embeddings._embed", counting)
+    assert store.reindex(settings) == 1
+    assert embedded  # the corpus was re-embedded, not left on stale vectors
+    hits = store.search_chunks(settings, "fish market salmon")
+    assert hits and hits[0].doc_title == "Bergen"
+
+
 # --- summarize -------------------------------------------------------------- #
 
 

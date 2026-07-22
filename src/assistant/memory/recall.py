@@ -103,20 +103,24 @@ def search_memory(
     if not query.strip():
         return []
     k = k or settings.recall_top_k
-    pool = max(k * settings.recall_candidate_multiplier, k)
-    hits = index.search_ranked(settings, embed_query(query, settings), pool)
 
     scored: list[tuple[Note, float]] = []
-    for name, path, _desc, kind, salience, recall_count, last_recalled, sim in hits:
-        if sim < settings.recall_min_similarity:
-            continue
-        note = _load(settings, name, path)
-        if note is None:
-            continue
-        score = _blended_score(
-            settings, sim, kind, salience, recall_count, last_recalled, note.updated
-        )
-        scored.append((note, score))
+    # Embedding loads the (real, ~2GB) model, so skip it entirely when the index
+    # holds nothing to match — the vector search could only return []. Graph
+    # augmentation below still runs; it resolves entities by name, not vectors.
+    if not index.is_empty(settings):
+        pool = max(k * settings.recall_candidate_multiplier, k)
+        hits = index.search_ranked(settings, embed_query(query, settings), pool)
+        for name, path, _desc, kind, salience, recall_count, last_recalled, sim in hits:
+            if sim < settings.recall_min_similarity:
+                continue
+            note = _load(settings, name, path)
+            if note is None:
+                continue
+            score = _blended_score(
+                settings, sim, kind, salience, recall_count, last_recalled, note.updated
+            )
+            scored.append((note, score))
 
     _augment_with_graph(settings, query, scored)
     scored.sort(key=lambda pair: pair[1], reverse=True)

@@ -17,7 +17,7 @@ from .calendar import store as calendar_store
 from .config import Settings, get_settings
 from .docs import store as docs_store
 from .memory import store as memory_store
-from .memory.embeddings import embed_passages
+from .memory.embeddings import embed_passages, embedding_signature
 from .tasks import store as task_store
 
 logger = logging.getLogger(__name__)
@@ -96,7 +96,7 @@ def import_documents(local: Settings, pg: Settings) -> int:
         with storage_postgres.connect(pg) as conn:
             if vectors and storage_postgres.docs_meta_get(conn, "dim") is None:
                 storage_postgres.docs_meta_set(conn, "dim", str(len(vectors[0])))
-                storage_postgres.docs_meta_set(conn, "embedding_model", local.embedding_model)
+                storage_postgres.docs_meta_set(conn, "embedding_model", embedding_signature(local))
             conn.execute(
                 "INSERT INTO assistant_documents(id, title, text, added) "
                 "VALUES (%s, %s, %s, %s) ON CONFLICT(id) DO UPDATE SET "
