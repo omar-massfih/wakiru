@@ -138,6 +138,19 @@ def list_open(settings: Settings) -> list[Goal]:
     return rows
 
 
+def find_exact_open_title(settings: Settings, title: str) -> Goal | None:
+    """The open goal whose title exactly matches ``title`` (case-insensitive,
+    stripped), or None. Used solely to dedupe open_goal, the same way
+    tasks.store.find_exact_open_title dedupes add_task."""
+    needle = title.strip().lower()
+    if not needle:
+        return None
+    for g in list_open(settings):
+        if g.title.strip().lower() == needle:
+            return g
+    return None
+
+
 def ready(settings: Settings, current: datetime | None = None) -> list[Goal]:
     """Open goals whose next action is due — raised, never claimed."""
     current = current or now(settings)
@@ -148,11 +161,13 @@ def ready(settings: Settings, current: datetime | None = None) -> list[Goal]:
     ]
 
 
-def _match_open(settings: Settings, ident: str, action: str) -> Goal | None:
+def _match_open(settings: Settings, ident: str, action: str) -> Goal | list[Goal] | None:
     """Resolve an open goal by id or an unambiguous title reference.
 
     Refuses ambiguity rather than guessing — the same rule followups and the
-    calendar targets follow.
+    calendar targets follow. Returns the candidate list (len > 1) rather than
+    None on an ambiguous match, so the caller can tell the model which goals
+    collided instead of a generic "not found."
     """
     ident = str(ident).strip()
     if not ident:
@@ -162,14 +177,15 @@ def _match_open(settings: Settings, ident: str, action: str) -> Goal | None:
     if not matches:
         needle = ident.lower()
         matches = [g for g in candidates if needle in g.title.lower()]
+    if len(matches) > 1:
+        logger.warning(
+            "goal %s target %r is ambiguous between %d goals; returning candidates",
+            action,
+            ident,
+            len(matches),
+        )
+        return matches
     if len(matches) != 1:
-        if len(matches) > 1:
-            logger.warning(
-                "goal %s target %r is ambiguous between %d goals; skipping",
-                action,
-                ident,
-                len(matches),
-            )
         return None
     return matches[0]
 
@@ -181,16 +197,19 @@ def update(
     next_action_at: datetime | None = None,
     title: str | None = None,
     clear_next_action: bool = False,
-) -> Goal | None:
+) -> Goal | list[Goal] | None:
     """Revise an open goal's working state, next action time, or title.
 
     ``clear_next_action`` parks the goal (no scheduled next step) — the model's
     way of saying "waiting on the world, don't raise me". Returns the revised
-    row, or ``None`` when nothing matched or no field was given.
+    row; the candidate list when ``ident`` was ambiguous; or ``None`` when
+    nothing matched or no field was given.
     """
     if state is None and next_action_at is None and title is None and not clear_next_action:
         return None
     target = _match_open(settings, ident, "update")
+    if isinstance(target, list):
+        return target
     if target is None:
         return None
     if clear_next_action:
@@ -236,13 +255,16 @@ def update(
 
 def close(
     settings: Settings, ident: str, outcome: str = "", abandoned: bool = False
-) -> Goal | None:
+) -> Goal | list[Goal] | None:
     """Close an open goal as done (or abandoned) with a one-line outcome.
 
     The closure is recorded as an episodic trace, so nightly consolidation can
-    promote what worked (or what kept failing) into durable lessons.
+    promote what worked (or what kept failing) into durable lessons. Returns
+    the candidate list when ``ident`` was ambiguous.
     """
     target = _match_open(settings, ident, "close")
+    if isinstance(target, list):
+        return target
     if target is None:
         return None
     status = "abandoned" if abandoned else "done"

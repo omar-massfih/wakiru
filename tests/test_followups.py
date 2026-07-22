@@ -43,9 +43,13 @@ def test_cancel_by_id_and_by_unambiguous_topic(settings) -> None:
 
 
 def test_cancel_ambiguous_topic_refuses(settings) -> None:
-    followups.add(settings, _due_in(settings, hours=1), "check flight to Oslo")
-    followups.add(settings, _due_in(settings, hours=2), "check flight to Bergen")
-    assert followups.cancel(settings, "check flight") is None
+    a = followups.add(settings, _due_in(settings, hours=1), "check flight to Oslo")
+    b = followups.add(settings, _due_in(settings, hours=2), "check flight to Bergen")
+    result = followups.cancel(settings, "check flight")
+    # ambiguous — cancelling nothing beats cancelling the wrong one, but the
+    # model needs the candidate ids back so it can retry unambiguously.
+    assert isinstance(result, list)
+    assert {f.id for f in result} == {a.id, b.id}
     assert len(followups.list_open(settings)) == 2  # nothing guessed at
 
 
@@ -75,9 +79,11 @@ def test_update_by_unambiguous_topic(settings) -> None:
 
 
 def test_update_ambiguous_topic_refuses(settings) -> None:
-    followups.add(settings, _due_in(settings, hours=1), "check flight to Oslo")
-    followups.add(settings, _due_in(settings, hours=2), "check flight to Bergen")
-    assert followups.update(settings, "check flight", context="x") is None
+    a = followups.add(settings, _due_in(settings, hours=1), "check flight to Oslo")
+    b = followups.add(settings, _due_in(settings, hours=2), "check flight to Bergen")
+    result = followups.update(settings, "check flight", context="x")
+    assert isinstance(result, list)
+    assert {f.id for f in result} == {a.id, b.id}
     assert all(f.context == "" for f in followups.list_open(settings))
 
 

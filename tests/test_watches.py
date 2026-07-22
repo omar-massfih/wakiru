@@ -58,8 +58,10 @@ def test_watch_gets_a_default_expiry_and_expires(settings) -> None:
 
 def test_cancel_by_id_and_pattern_refusing_ambiguity(settings) -> None:
     a = watches.add(settings, "mail_from", "flight to Oslo")
-    watches.add(settings, "mail_from", "flight to Bergen")
-    assert watches.cancel(settings, "flight") is None  # ambiguous
+    b = watches.add(settings, "mail_from", "flight to Bergen")
+    result = watches.cancel(settings, "flight")  # ambiguous
+    assert isinstance(result, list)
+    assert {w.id for w in result} == {a.id, b.id}
     assert watches.cancel(settings, a.id).id == a.id
     assert watches.cancel(settings, "bergen") is not None
     assert watches.list_active(settings) == []

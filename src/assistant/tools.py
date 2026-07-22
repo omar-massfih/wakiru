@@ -437,10 +437,14 @@ def _forget(ctx: ToolContext, target: str) -> str:
     from .memory.learn import forget_memory
 
     deleted = forget_memory(ctx.settings, str(target))
+    if isinstance(deleted, list):
+        return (
+            f"Ambiguous — {len(deleted)} memories are too close to call: "
+            f"{', '.join(deleted)}. Use the exact name from the memory index."
+        )
     if deleted is None:
         return (
-            "No memory matched (or the match was ambiguous). "
-            "Use the exact name from the memory index."
+            "No memory matched. Use the exact name from the memory index."
         )
     return f"Forgot: {deleted.description}"
 
@@ -992,6 +996,15 @@ def _email_tools(settings: Settings) -> list[ToolSpec]:
 # Followups — the assistant schedules its own future check-ins
 # --------------------------------------------------------------------------- #
 
+def _ambiguous_followups_message(matches: list) -> str:
+    shown = ", ".join(f'{f.id} ("{f.topic}")' for f in matches[:5])
+    more = f", +{len(matches) - 5} more" if len(matches) > 5 else ""
+    return (
+        f"Ambiguous — {len(matches)} follow-ups match: {shown}{more}. "
+        "Retry with one exact id from list_followups."
+    )
+
+
 def _schedule_followup(ctx: ToolContext, when: str, topic: str, context: str = "") -> str:
     from . import followups
     from .calendar.context import format_when, now
@@ -1015,6 +1028,8 @@ def _cancel_followup(ctx: ToolContext, target: str) -> str:
     from . import followups
 
     cancelled = followups.cancel(ctx.settings, str(target))
+    if isinstance(cancelled, list):
+        return _ambiguous_followups_message(cancelled)
     if cancelled is None:
         return _NO_MATCH
     return f"Cancelled follow-up: {cancelled.topic}"
@@ -1047,6 +1062,8 @@ def _update_followup(
         topic=topic or None,
         context=context or None,
     )
+    if isinstance(revised, list):
+        return _ambiguous_followups_message(revised)
     if revised is None:
         return _NO_MATCH
     return (
@@ -1142,10 +1159,27 @@ def _format_goal(ctx: ToolContext, goal) -> str:
     return f"{goal.title}{when} (id {goal.id})"
 
 
+def _ambiguous_goals_message(matches: list) -> str:
+    shown = ", ".join(f'{g.id} ("{g.title}")' for g in matches[:5])
+    more = f", +{len(matches) - 5} more" if len(matches) > 5 else ""
+    return (
+        f"Ambiguous — {len(matches)} goals match: {shown}{more}. "
+        "Retry with one exact id from Open goals."
+    )
+
+
 def _open_goal(ctx: ToolContext, title: str, state: str = "", next_action: str = "") -> str:
     from . import goals
     from .calendar.store import parse_dt
 
+    dupe = goals.find_exact_open_title(ctx.settings, str(title))
+    if dupe is not None:
+        return (
+            f"Not opened — an open goal already has this exact title: "
+            f"{dupe.id} (\"{dupe.title}\"). Use update_goal with id {dupe.id} "
+            "to change it, or open_goal again with a more distinguishing "
+            "title if this is genuinely a separate goal."
+        )
     due = None
     if next_action:
         due = parse_dt(str(next_action))
@@ -1188,6 +1222,8 @@ def _update_goal(
         title=title or None,
         clear_next_action=bool(park),
     )
+    if isinstance(revised, list):
+        return _ambiguous_goals_message(revised)
     if revised is None:
         return _NO_MATCH
     return f"Goal updated: {_format_goal(ctx, revised)}"
@@ -1197,6 +1233,8 @@ def _close_goal(ctx: ToolContext, target: str, outcome: str = "", abandoned: boo
     from . import goals
 
     closed = goals.close(ctx.settings, str(target), str(outcome), bool(abandoned))
+    if isinstance(closed, list):
+        return _ambiguous_goals_message(closed)
     if closed is None:
         return _NO_MATCH
     return f"Goal {closed.status}: {closed.title}"
@@ -1346,10 +1384,21 @@ def _watch(
     )
 
 
+def _ambiguous_watches_message(matches: list) -> str:
+    shown = ", ".join(f'{w.id} ("{w.pattern or w.kind}")' for w in matches[:5])
+    more = f", +{len(matches) - 5} more" if len(matches) > 5 else ""
+    return (
+        f"Ambiguous — {len(matches)} watches match: {shown}{more}. "
+        "Retry with one exact id from list_watches."
+    )
+
+
 def _unwatch(ctx: ToolContext, target: str) -> str:
     from . import watches
 
     cancelled = watches.cancel(ctx.settings, str(target))
+    if isinstance(cancelled, list):
+        return _ambiguous_watches_message(cancelled)
     if cancelled is None:
         return _NO_MATCH
     return f"Stopped watching: {cancelled.pattern or cancelled.kind}"

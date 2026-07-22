@@ -206,13 +206,15 @@ def revise_memory(
 @locked
 def forget_memory(
     settings: Settings, query: str, *, allow_fuzzy: bool = True
-) -> Note | None:
+) -> Note | list[str] | None:
     """Delete the memory best matching ``query`` (by name, else by similarity).
 
     ``allow_fuzzy=False`` restricts deletion to an exact name match. Callers
     applying an LLM ``forget`` op that carries a *name* must pass it: a
     hallucinated name falling through to the similarity match could delete an
-    unrelated real memory.
+    unrelated real memory. Returns the near-tied candidate names (not just
+    None) when the fuzzy fallback is ambiguous, so the caller can tell the
+    model which memories were too close to call.
     """
     by_name = store.find_note(settings, query)
     if by_name is not None:
@@ -249,12 +251,18 @@ def forget_memory(
         len(candidates) > 1
         and candidates[0][1] - candidates[1][1] < settings.forget_ambiguity_margin
     ):
+        top_score = candidates[0][1]
+        tied = [
+            name
+            for name, sim in candidates
+            if top_score - sim < settings.forget_ambiguity_margin
+        ]
         logger.warning(
-            "fuzzy forget %r is ambiguous between %r (%.3f) and %r (%.3f); skipping",
+            "fuzzy forget %r is ambiguous between %r (%.3f) and %r (%.3f); returning candidates",
             query, candidates[0][0], candidates[0][1],
             candidates[1][0], candidates[1][1],
         )
-        return None
+        return tied
     name = candidates[0][0]
     deleted = store.delete_note(settings, name)
     index.remove(settings, name)

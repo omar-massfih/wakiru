@@ -618,3 +618,95 @@ def test_find_free_time_names_an_inverted_window(settings) -> None:
         },
     )
     assert "not after window_start" in result  # not a bogus "no free time"
+
+
+# --- goals/followups/watches ambiguous-match + dedupe ------------------------- #
+
+
+@pytest.fixture
+def heartbeat_settings(tmp_path) -> Settings:
+    return Settings(
+        memory_dir=str(tmp_path / "memory"),
+        timezone="Europe/Oslo",
+        enable_write_confirmation=True,
+        enable_heartbeat=True,
+    )
+
+
+def test_open_goal_tool_refuses_duplicate_title(heartbeat_settings) -> None:
+    ctx = _ctx(heartbeat_settings)
+    tools = tool_map(heartbeat_settings)
+    args = {"title": "Plan the Oslo trip", "state": "researching flights"}
+    first = execute_tool(tools["open_goal"], ctx, args)
+    assert first.startswith("Goal opened")
+    second = execute_tool(tools["open_goal"], ctx, args)
+    assert second.startswith("Not opened")
+
+    from assistant import goals
+
+    assert len(goals.list_open(heartbeat_settings)) == 1
+
+
+def test_update_goal_tool_ambiguous_returns_candidates(heartbeat_settings) -> None:
+    from assistant import goals
+
+    a = goals.open_goal(heartbeat_settings, "check flight to Oslo")
+    b = goals.open_goal(heartbeat_settings, "check flight to Bergen")
+    result = execute_tool(
+        tool_map(heartbeat_settings)["update_goal"],
+        _ctx(heartbeat_settings),
+        {"target": "check flight", "state": "x"},
+    )
+    assert "Ambiguous" in result
+    assert a.id in result and b.id in result
+
+
+def test_cancel_followup_tool_ambiguous_returns_candidates(heartbeat_settings) -> None:
+    from assistant import followups
+    from assistant.calendar.context import now
+
+    due = now(heartbeat_settings) + timedelta(hours=1)
+    a = followups.add(heartbeat_settings, due, "check flight to Oslo")
+    b = followups.add(heartbeat_settings, due, "check flight to Bergen")
+    result = execute_tool(
+        tool_map(heartbeat_settings)["cancel_followup"],
+        _ctx(heartbeat_settings),
+        {"target": "check flight"},
+    )
+    assert "Ambiguous" in result
+    assert a.id in result and b.id in result
+
+
+def test_unwatch_tool_ambiguous_returns_candidates(heartbeat_settings) -> None:
+    from assistant import watches
+
+    a = watches.add(heartbeat_settings, "mail_from", "flight to Oslo")
+    b = watches.add(heartbeat_settings, "mail_from", "flight to Bergen")
+    result = execute_tool(
+        tool_map(heartbeat_settings)["unwatch"],
+        _ctx(heartbeat_settings),
+        {"target": "flight"},
+    )
+    assert "Ambiguous" in result
+    assert a.id in result and b.id in result
+
+
+def test_forget_tool_ambiguous_returns_candidates(settings) -> None:
+    from assistant.memory import learn
+
+    # Mirrors test_memory.py's test_fuzzy_forget_ambiguous_is_noop setup: the
+    # bag-of-words fake embedder (already active via the autouse _patch_embed
+    # fixture) scores these two bodies close enough to tie within
+    # forget_ambiguity_margin without being similar enough to trigger
+    # dedupe_threshold's merge-on-save. Set up via save_memory directly with
+    # distinct descriptions — the remember *tool* omits description, and its
+    # auto-generated one could collide for near-identical bodies.
+    learn.save_memory(
+        settings, body="The user's favorite color is teal.", description="color teal"
+    )
+    learn.save_memory(
+        settings, body="The user's favorite color is red.", description="color red"
+    )
+    ctx = _ctx(settings)
+    result = execute_tool(tool_map(settings)["forget"], ctx, {"target": "favorite color"})
+    assert "Ambiguous" in result

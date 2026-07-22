@@ -112,13 +112,15 @@ def list_open(settings: Settings) -> list[Followup]:
     return [_from_row(row) for row in rows]
 
 
-def _match_open(settings: Settings, ident: str, action: str) -> Followup | None:
+def _match_open(settings: Settings, ident: str, action: str) -> Followup | list[Followup] | None:
     """Resolve an open followup by id or an unambiguous topic reference.
 
     A topic reference matching more than one open followup is refused rather
     than guessed at — touching nothing beats touching the wrong intent (the
     same rule the calendar and mute targets follow). ``action`` names the
-    caller for the ambiguity log line.
+    caller for the ambiguity log line. Returns the candidate list (len > 1)
+    rather than None on an ambiguous match, so the caller can tell the model
+    which followups collided instead of a generic "not found."
     """
     ident = str(ident).strip()
     if not ident:
@@ -128,21 +130,24 @@ def _match_open(settings: Settings, ident: str, action: str) -> Followup | None:
     if not matches:
         needle = ident.lower()
         matches = [f for f in candidates if needle in f.topic.lower()]
+    if len(matches) > 1:
+        logger.warning(
+            "followup %s target %r is ambiguous between %d followups; returning candidates",
+            action,
+            ident,
+            len(matches),
+        )
+        return matches
     if len(matches) != 1:
-        if len(matches) > 1:
-            logger.warning(
-                "followup %s target %r is ambiguous between %d followups; skipping",
-                action,
-                ident,
-                len(matches),
-            )
         return None
     return matches[0]
 
 
-def cancel(settings: Settings, ident: str) -> Followup | None:
+def cancel(settings: Settings, ident: str) -> Followup | list[Followup] | None:
     """Cancel one open followup by id or an unambiguous topic reference."""
     target = _match_open(settings, ident, "cancel")
+    if isinstance(target, list):
+        return target
     if target is None:
         return None
     if storage_postgres := postgres_backend(settings):
@@ -161,16 +166,19 @@ def update(
     due: datetime | None = None,
     topic: str | None = None,
     context: str | None = None,
-) -> Followup | None:
+) -> Followup | list[Followup] | None:
     """Revise an open followup's due time, topic, or context (note-to-self).
 
     Resolves the target the same ambiguity-refusing way :func:`cancel` does, and
     only touches open rows — a fired or cancelled followup is done. Returns the
-    revised row, or ``None`` when nothing matched or no field was given.
+    revised row; the candidate list when ``ident`` was ambiguous; or ``None``
+    when nothing matched or no field was given.
     """
     if due is None and topic is None and context is None:
         return None
     target = _match_open(settings, ident, "update")
+    if isinstance(target, list):
+        return target
     if target is None:
         return None
     revised = Followup(

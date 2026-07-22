@@ -81,10 +81,15 @@ def test_update_can_park_a_goal(settings) -> None:
 
 
 def test_update_by_unambiguous_title_and_refuses_ambiguity(settings) -> None:
-    goals.open_goal(settings, "plan the Oslo trip", "s")
+    oslo = goals.open_goal(settings, "plan the Oslo trip", "s")
     assert goals.update(settings, "oslo", state="new") is not None
-    goals.open_goal(settings, "plan the Bergen trip", "s")
-    assert goals.update(settings, "plan the", state="x") is None
+    bergen = goals.open_goal(settings, "plan the Bergen trip", "s")
+    result = goals.update(settings, "plan the", state="x")
+    # ambiguous — reverting nothing beats updating the wrong goal, but the
+    # model needs the candidate ids back so it can retry unambiguously.
+    assert isinstance(result, list)
+    ids = {g.id for g in result}
+    assert ids == {oslo.id, bergen.id}
 
 
 def test_update_with_no_fields_is_a_noop(settings) -> None:

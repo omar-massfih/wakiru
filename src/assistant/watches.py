@@ -174,8 +174,13 @@ def list_active(settings: Settings, current: datetime | None = None) -> list[Wat
     return [_from_row(row) for row in rows if row["id"] not in dropped]
 
 
-def _match_active(settings: Settings, ident: str, action: str) -> Watch | None:
-    """Resolve an active watch by id or an unambiguous pattern/note reference."""
+def _match_active(settings: Settings, ident: str, action: str) -> Watch | list[Watch] | None:
+    """Resolve an active watch by id or an unambiguous pattern/note reference.
+
+    Returns the candidate list (len > 1) rather than None on an ambiguous
+    match, so the caller can tell the model which watches collided instead
+    of a generic "not found."
+    """
     ident = str(ident).strip()
     if not ident:
         return None
@@ -188,20 +193,23 @@ def _match_active(settings: Settings, ident: str, action: str) -> Watch | None:
             for w in candidates
             if needle in w.pattern.lower() or needle in w.note.lower()
         ]
+    if len(matches) > 1:
+        logger.warning(
+            "watch %s target %r is ambiguous between %d watches; returning candidates",
+            action,
+            ident,
+            len(matches),
+        )
+        return matches
     if len(matches) != 1:
-        if len(matches) > 1:
-            logger.warning(
-                "watch %s target %r is ambiguous between %d watches; skipping",
-                action,
-                ident,
-                len(matches),
-            )
         return None
     return matches[0]
 
 
-def cancel(settings: Settings, ident: str) -> Watch | None:
+def cancel(settings: Settings, ident: str) -> Watch | list[Watch] | None:
     target = _match_active(settings, ident, "cancel")
+    if isinstance(target, list):
+        return target
     if target is None:
         return None
     if storage_postgres := postgres_backend(settings):

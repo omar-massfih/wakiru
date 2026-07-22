@@ -408,10 +408,13 @@ def test_cross_kind_distinct_notes_stay_separate(settings) -> None:
 
 def test_fuzzy_forget_ambiguous_is_noop(settings) -> None:
     # Both notes match "favorite color" equally well — deleting nothing beats
-    # deleting the wrong one.
-    learn.save_memory(settings, body="The user's favorite color is teal.", description="color teal")
-    learn.save_memory(settings, body="The user's favorite color is red.", description="color red")
-    assert learn.forget_memory(settings, "favorite color") is None
+    # deleting the wrong one, but the model needs the candidate names back so
+    # it can retry with an exact name instead of guessing blind again.
+    teal = learn.save_memory(settings, body="The user's favorite color is teal.", description="color teal")
+    red = learn.save_memory(settings, body="The user's favorite color is red.", description="color red")
+    result = learn.forget_memory(settings, "favorite color")
+    assert isinstance(result, list)
+    assert set(result) == {teal.name, red.name}
     assert len(store.list_notes(settings)) == 2
 
 
