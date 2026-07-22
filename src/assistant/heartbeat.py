@@ -486,9 +486,11 @@ def _mail_changed(settings: Settings) -> str:
     """
     if not (settings.enable_email and settings.email_snapshot_minutes > 0):
         return ""
-    from .mail.snapshot import current as snapshot_current
+    from .mail.snapshot import content as snapshot_content
 
-    snapshot = snapshot_current(settings)
+    # Key off the raw unread set, never current()'s stamped block — the "as of
+    # HH:MM" stamp advances on every refresh and would fake a change each tick.
+    snapshot = snapshot_content(settings)
     if not snapshot:
         return ""
     digest = hashlib.sha256(snapshot.encode("utf-8")).hexdigest()

@@ -252,12 +252,14 @@ def _claim(settings: Settings, watch: Watch, match_hash: str = "") -> bool:
 def _mail_matches(settings: Settings, pattern: str) -> list[str]:
     if not (settings.enable_email and settings.email_snapshot_minutes > 0):
         return []
-    from .mail.snapshot import current as snapshot_current
+    from .mail.snapshot import content as snapshot_content
 
+    # Match the raw unread lines, not current()'s stamped block — a pattern like
+    # "mail" must not match the "## Unread mail (snapshot as of …)" header.
     needle = pattern.lower()
     return [
         line.strip()
-        for line in snapshot_current(settings).splitlines()
+        for line in snapshot_content(settings).splitlines()
         if needle and needle in line.lower()
     ]
 

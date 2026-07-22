@@ -34,7 +34,8 @@ def _at(settings: Settings, **delta):
 
 
 def _snapshot(monkeypatch, text: str) -> None:
-    monkeypatch.setattr("assistant.mail.snapshot.current", lambda s: text)
+    # Matching keys off the raw content accessor, not the stamped current().
+    monkeypatch.setattr("assistant.mail.snapshot.content", lambda s: text)
 
 
 # --- the store ---------------------------------------------------------------- #

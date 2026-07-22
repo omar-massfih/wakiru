@@ -137,6 +137,26 @@ def maybe_refresh(settings: Settings) -> None:
     refresh(settings)
 
 
+def content(settings: Settings) -> str:
+    """The snapshot's raw text with no ``as of HH:MM`` stamp — ``""`` when
+    disabled, never fetched, or too old.
+
+    For change-detection (the heartbeat's mail-changed check) and pattern
+    matching (mail_from watches): both must key off the unread set itself, not
+    the fetch time. Hashing or scanning :func:`current`'s stamped block instead
+    would flip on every refresh (a new stamp) even when the inbox is unchanged.
+    """
+    if not (settings.enable_email and settings.email_snapshot_minutes > 0):
+        return ""
+    stored = _load(settings)
+    if stored is None:
+        return ""
+    text, fetched_at = stored
+    if not text or now(settings) - fetched_at > timedelta(hours=_MAX_AGE_HOURS):
+        return ""
+    return text
+
+
 def current(settings: Settings) -> str:
     """The snapshot as a context block, or ``""`` — never any I/O.
 

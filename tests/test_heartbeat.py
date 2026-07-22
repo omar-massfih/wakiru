@@ -132,8 +132,8 @@ def test_contact_staleness_is_reported(settings) -> None:
 def test_mail_change_is_reported_once_per_snapshot(settings, monkeypatch) -> None:
     mail_on = settings.model_copy(update={"enable_email": True})
     monkeypatch.setattr(
-        "assistant.mail.snapshot.current",
-        lambda s: "## Unread mail (snapshot as of 09:12)\n1 unread message(s):\n- Hei",
+        "assistant.mail.snapshot.content",
+        lambda s: "1 unread message(s):\n- Hei",
     )
     first = heartbeat.gather_situation(mail_on)
     assert first is not None and "unread-mail snapshot changed" in first.report()
@@ -142,6 +142,25 @@ def test_mail_change_is_reported_once_per_snapshot(settings, monkeypatch) -> Non
     second = heartbeat.gather_situation(mail_on)
     assert second is not None
     assert "unread-mail snapshot changed" not in second.report()
+
+
+def test_mail_change_ignores_the_snapshot_refresh_timestamp(settings, monkeypatch) -> None:
+    # The unread set is unchanged across two ticks; only the snapshot's fetch
+    # time would advance. _mail_changed must key off content, not current()'s
+    # "as of HH:MM" stamp, or every refresh fakes a change.
+    mail_on = settings.model_copy(update={"enable_email": True})
+    stamps = iter(["09:00", "09:15", "09:30"])
+    body = "1 unread message(s):\n- Hei"
+    monkeypatch.setattr("assistant.mail.snapshot.content", lambda s: body)
+    # current() would still churn its stamp each refresh; content() must not.
+    monkeypatch.setattr(
+        "assistant.mail.snapshot.current",
+        lambda s: f"## Unread mail (snapshot as of {next(stamps)})\n{body}",
+    )
+    first = heartbeat.gather_situation(mail_on)
+    assert first is not None and "unread-mail snapshot changed" in first.report()
+    second = heartbeat.gather_situation(mail_on)
+    assert second is not None and "unread-mail snapshot changed" not in second.report()
 
 
 def test_open_followups_are_surfaced_before_they_are_due(settings) -> None:
