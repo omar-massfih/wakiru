@@ -171,10 +171,12 @@ def prune_graph_orphans(settings: Settings, live_names: set[str]) -> int:
     with connect(settings) as conn:
         cur = conn.execute(
             "DELETE FROM assistant_graph_edges WHERE NOT (note_name = ANY(%s)) "
-            "RETURNING id",
+            "RETURNING note_name",
             (list(live_names),),
         )
-        dropped = len(cur.fetchall())
+        # Count distinct orphaned note names, not edge rows, so the returned
+        # tally matches the SQLite twin (memory.graph.prune_orphans).
+        dropped = len({r[0] for r in cur.fetchall()})
         conn.execute(
             "DELETE FROM assistant_graph_nodes WHERE key NOT IN "
             "(SELECT subj FROM assistant_graph_edges "
