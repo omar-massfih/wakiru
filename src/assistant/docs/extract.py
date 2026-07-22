@@ -47,12 +47,16 @@ def extract_text(filename: str, content: bytes) -> str:
 
 def _from_pdf(content: bytes) -> str:
     from pypdf import PdfReader
-    from pypdf.errors import PyPdfError
 
     try:
         reader = PdfReader(io.BytesIO(content))
         pages = [page.extract_text() or "" for page in reader.pages]
-    except PyPdfError as exc:
+    except Exception as exc:
+        # pypdf raises PyPdfError for the common malformed cases, but its text
+        # extraction also surfaces assorted other types (KeyError, AssertionError,
+        # struct.error, RecursionError) on adversarial PDFs. They all mean the
+        # same thing here — a bad upload — and must fail as ExtractionError (a
+        # clean 422 at the endpoint), never escape as an unhandled 500.
         raise ExtractionError(f"could not read PDF: {exc}") from exc
     text = "\n\n".join(p.strip() for p in pages if p.strip())
     if not text:
@@ -61,19 +65,18 @@ def _from_pdf(content: bytes) -> str:
 
 
 def _from_docx(content: bytes) -> str:
-    import zipfile
-
     import docx
-    from docx.opc.exceptions import OpcError
 
     try:
         document = docx.Document(io.BytesIO(content))
-    except (OpcError, KeyError, ValueError, zipfile.BadZipFile) as exc:
+        parts = [p.text for p in document.paragraphs]
+        for table in document.tables:
+            for row in table.rows:
+                parts.append("\t".join(cell.text for cell in row.cells))
+    except Exception as exc:
+        # As with _from_pdf: any failure parsing an untrusted OOXML file (bad
+        # zip, missing part, malformed XML) is a bad upload, not a server error.
         raise ExtractionError(f"could not read DOCX: {exc}") from exc
-    parts = [p.text for p in document.paragraphs]
-    for table in document.tables:
-        for row in table.rows:
-            parts.append("\t".join(cell.text for cell in row.cells))
     text = "\n".join(p for p in parts if p.strip())
     if not text:
         raise ExtractionError("DOCX contained no text")

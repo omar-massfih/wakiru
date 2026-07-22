@@ -91,6 +91,25 @@ def test_extract_corrupt_docx_raises() -> None:
         extract.extract_text("broken.docx", b"not a zip at all")
 
 
+def test_pdf_extraction_wraps_non_pypdf_errors(monkeypatch) -> None:
+    # pypdf can raise assorted non-PyPdfError types deep in extract_text() on
+    # adversarial PDFs; the boundary must still fail as ExtractionError (a clean
+    # 422 upstream), never let a raw exception escape to a 500.
+    import pypdf
+
+    class _BoomReader:
+        def __init__(self, *a, **k):
+            pass
+
+        @property
+        def pages(self):
+            raise KeyError("/Contents")  # not a PyPdfError
+
+    monkeypatch.setattr(pypdf, "PdfReader", _BoomReader)
+    with pytest.raises(extract.ExtractionError, match="could not read PDF"):
+        extract.extract_text("weird.pdf", b"%PDF-1.4 ...")
+
+
 def test_extract_plain_text_decodes() -> None:
     assert extract.extract_text("plan.txt", "hei på deg".encode()) == "hei på deg"
 
