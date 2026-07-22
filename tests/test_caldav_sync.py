@@ -239,6 +239,36 @@ def test_reconcile_drops_persistent_conflict_toward_remote(settings, server) -> 
     assert outbox.pending(settings) == []  # deferred to the server, not retried forever
 
 
+def test_reconcile_isolates_a_poison_row_from_the_rest(settings, server, monkeypatch) -> None:
+    from assistant.calendar import remote
+
+    # Two edits queued during an outage.
+    server.raise_exc = caldav.CalDavError("down")
+    ops.apply_op(settings, {"op": "create", "title": "Alpha", "start": "2026-12-05T09:00:00+01:00"})
+    ops.apply_op(settings, {"op": "create", "title": "Beta", "start": "2026-12-06T09:00:00+01:00"})
+    server.raise_exc = None
+    assert len(outbox.pending(settings)) == 2
+
+    # The first row hits an unexpected error (not a RemoteError) — a raw failure
+    # like a corrupt event or a DB hiccup. It must not abort the drain and strand
+    # the healthy row behind it.
+    real_upsert = remote.upsert
+    seen: list[str] = []
+
+    def flaky_upsert(s, event):
+        seen.append(event.title)
+        if len(seen) == 1:
+            raise RuntimeError("boom building the request")
+        return real_upsert(s, event)
+
+    monkeypatch.setattr(remote, "upsert", flaky_upsert)
+
+    result = sync.reconcile_caldav(settings)  # must not raise
+    assert len(seen) == 2  # the second row was still attempted
+    assert result["reconciled"] == 1 and result["still_pending"] == 1
+    assert len(outbox.pending(settings)) == 1  # only the poison row stays queued
+
+
 # --- undo ----------------------------------------------------------------------
 
 

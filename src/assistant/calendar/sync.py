@@ -335,6 +335,16 @@ def reconcile_caldav(settings: Settings) -> dict:
             )
         except remote.RemoteError:
             still_pending += 1  # still offline — leave it queued for the next pass
+        except Exception:
+            # An unexpected error on one row — a corrupt event, a DB hiccup, a
+            # provider error not wrapped as RemoteError, an iCal-build failure —
+            # must not abort the whole drain and strand every push queued behind
+            # it. Isolate per row like pull_feeds does; leave it queued to retry.
+            still_pending += 1
+            logger.exception(
+                "caldav reconcile: unexpected error on %s %s; leaving it queued",
+                row["op"], event_id,
+            )
 
     return {"reconciled": reconciled, "dropped": dropped, "still_pending": still_pending}
 
