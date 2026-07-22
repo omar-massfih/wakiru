@@ -62,6 +62,26 @@ def test_environment_secrets_are_not_visible(settings, monkeypatch) -> None:
     assert "None" in out
 
 
+def test_large_output_is_capped_without_buffering_it_all(settings) -> None:
+    # Bulk output goes to a file and only a small slice is read back — the
+    # result must stay bounded near the char cap, not balloon to the full size.
+    out = run_python("print('x' * 2_000_000)", settings)
+    assert "[truncated" in out
+    assert len(out) <= settings.code_exec_max_output_chars + 100
+
+
+def test_invalid_utf8_output_does_not_raise(settings) -> None:
+    # A script printing raw non-UTF-8 bytes must come back as a result, not
+    # blow up the never-raise contract with a UnicodeDecodeError in the parent.
+    out = run_python(
+        "import sys\n"
+        "sys.stdout.buffer.write(b'\\xff\\xfe ok')\n"
+        "sys.stdout.buffer.flush()\n",
+        settings,
+    )
+    assert "ok" in out
+
+
 def test_numpy_and_pandas_are_available() -> None:
     # A cold pandas import is heavy, so this one gets the realistic default
     # timeout rather than the deliberately short fixture.

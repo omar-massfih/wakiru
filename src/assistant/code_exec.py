@@ -92,8 +92,10 @@ def _rlimits(settings: Settings):
 
     cpu_seconds = max(settings.code_exec_timeout, 1) + 1
     address_space = max(settings.code_exec_max_memory_mb, 1) * 1024 * 1024
-    # Cap scratch writes generously above the output cap so a legitimate temp
-    # file is fine but a disk-filling loop is not.
+    # Also caps the stdout/stderr files run_python redirects into: because those
+    # are regular files, a runaway print loop hits SIGXFSZ instead of streaming
+    # unbounded output the parent would have to buffer. Sized generously above
+    # the output cap so a legitimate temp file (or print) is fine.
     file_size = max(settings.code_exec_max_output_chars * 8, 16 * 1024 * 1024)
 
     limits = (
@@ -113,6 +115,19 @@ def _rlimits(settings: Settings):
                 resource.setrlimit(what, (value, value))
 
     return apply
+
+
+def _read_capped(path: Path, limit: int) -> str:
+    """Read back a captured-output file, bounded and lenient.
+
+    Only a small slice is ever pulled into memory — enough that ``_clip`` can
+    trim it to ``limit`` chars — even though the file on disk may be larger (it
+    is itself bounded by ``RLIMIT_FSIZE`` on the child). ``errors="replace"``
+    keeps a script that prints raw non-UTF-8 bytes from raising here.
+    """
+    with path.open("rb") as f:
+        data = f.read(limit * 4 + 4096)
+    return data.decode("utf-8", errors="replace")
 
 
 def _clip(text: str, limit: int) -> str:
@@ -156,34 +171,46 @@ def run_python(code: str, settings: Settings | None = None) -> str:
     limit = settings.code_exec_max_output_chars
 
     with _exec_slot(settings), tempfile.TemporaryDirectory() as tmp:
-        script = Path(tmp) / "script.py"
+        tmp_path = Path(tmp)
+        script = tmp_path / "script.py"
         script.write_text(_PREAMBLE + "\n" + code, encoding="utf-8")
 
         # Minimal env: never expose the parent's tokens/secrets. TMPDIR points
         # at the throwaway cwd so stdlib temp writes stay contained.
         env = {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "TMPDIR": tmp}
 
+        # Redirect output to files rather than pipes: RLIMIT_FSIZE then caps how
+        # much the child can emit (SIGXFSZ on overflow), so a runaway print loop
+        # can never make the parent buffer unbounded output into memory. We read
+        # back only a small capped slice afterwards.
+        out_path = tmp_path / "stdout"
+        err_path = tmp_path / "stderr"
         try:
-            result = subprocess.run(
-                # -I (isolated): ignore PYTHONPATH and user site, but keep the
-                # standard site-packages so numpy/pandas import.
-                [sys.executable, "-I", str(script)],
-                cwd=tmp,
-                env=env,
-                capture_output=True,
-                text=True,
-                timeout=settings.code_exec_timeout,
-                preexec_fn=_rlimits(settings),
-            )
-        except subprocess.TimeoutExpired:
-            return (
-                f"Script timed out after {settings.code_exec_timeout}s and was "
-                "killed. Reduce the work or avoid unbounded loops."
-            )
+            with out_path.open("wb") as out_f, err_path.open("wb") as err_f:
+                proc = subprocess.Popen(
+                    # -I (isolated): ignore PYTHONPATH and user site, but keep the
+                    # standard site-packages so numpy/pandas import.
+                    [sys.executable, "-I", str(script)],
+                    cwd=tmp,
+                    env=env,
+                    stdin=subprocess.DEVNULL,
+                    stdout=out_f,
+                    stderr=err_f,
+                    preexec_fn=_rlimits(settings),
+                )
+                try:
+                    proc.wait(timeout=settings.code_exec_timeout)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
+                    return (
+                        f"Script timed out after {settings.code_exec_timeout}s "
+                        "and was killed. Reduce the work or avoid unbounded loops."
+                    )
         except FileNotFoundError:
             logger.error("python interpreter %r not found", sys.executable)
             return "Tool failed: the Python interpreter is unavailable."
 
-        return _format_result(
-            result.stdout, result.stderr, result.returncode, limit
-        )
+        stdout = _read_capped(out_path, limit)
+        stderr = _read_capped(err_path, limit)
+        return _format_result(stdout, stderr, proc.returncode, limit)
