@@ -221,7 +221,8 @@ class _StreamingCodexProcess:
             self._stderr_text.append(self.proc.stderr.read())
 
         threading.Thread(target=_feed_stdin, daemon=True).start()
-        threading.Thread(target=_drain_stderr, daemon=True).start()
+        self._stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
+        self._stderr_thread.start()
 
         def _expire() -> None:
             self.timed_out.set()
@@ -244,6 +245,10 @@ class _StreamingCodexProcess:
             self.proc.wait()
 
     def stderr(self) -> str:
+        # Join the drain thread before reading: reap() only wait()s the process,
+        # which leaves the daemon's final stderr.read()/append racing the error
+        # path that calls this — without the join the detail can come back empty.
+        self._stderr_thread.join(timeout=5)
         return (self._stderr_text[0].strip() if self._stderr_text else "") or ""
 
 

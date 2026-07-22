@@ -148,6 +148,23 @@ def test_run_codex_stream_nonzero_exit_raises(tmp_path) -> None:
         list(run_codex_stream("hi", settings=settings))
 
 
+def test_run_codex_stream_nonzero_exit_surfaces_stderr(tmp_path) -> None:
+    from assistant.codex_runner import CodexError, run_codex_stream
+
+    # A failing codex writes its diagnosis to stderr; the CodexError must carry
+    # it (the drain thread is joined before stderr is read, so no lost detail).
+    settings = _fake_codex(
+        tmp_path,
+        """
+sys.stderr.write("auth token expired\\n")
+sys.stderr.flush()
+sys.exit(7)
+""",
+    )
+    with pytest.raises(CodexError, match="auth token expired"):
+        list(run_codex_stream("hi", settings=settings))
+
+
 def test_run_codex_stream_falls_back_to_output_file(tmp_path) -> None:
     from assistant.codex_runner import run_codex_stream
 
