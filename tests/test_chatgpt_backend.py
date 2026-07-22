@@ -24,6 +24,7 @@ from assistant.chatgpt_backend import (
     access_token,
     build_headers,
     build_payload,
+    iter_sse,
     run_chatgpt,
     run_chatgpt_stream,
 )
@@ -226,6 +227,21 @@ def test_auth_file_without_tokens_raises_auth_error(tmp_path) -> None:
 def _stream_settings(tmp_path) -> Settings:
     _, settings = _write_auth(tmp_path, _fresh_token())
     return settings
+
+
+def test_iter_sse_flushes_a_final_frame_without_trailing_blank_line() -> None:
+    # An unofficial backend may close the stream right after the last data line,
+    # with no terminating blank line — the final frame must still be parsed.
+    lines = [
+        b"event: response.output_text.delta\n",
+        b'data: {"delta": "hi"}\n',
+        b"\n",
+        b"event: response.completed\n",
+        b'data: {"response": {}}\n',
+        # (no trailing blank line — stream just ends here)
+    ]
+    events = list(iter_sse(lines))
+    assert ("response.completed", {"response": {}}) in events
 
 
 def test_run_chatgpt_concatenates_deltas(tmp_path, monkeypatch) -> None:

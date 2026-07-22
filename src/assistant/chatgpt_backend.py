@@ -274,25 +274,40 @@ def iter_sse(lines: Iterable[bytes | str]) -> Iterator[tuple[str, dict]]:
     """
     event_type = ""
     data_lines: list[str] = []
+
+    def _frame(etype: str, payload_lines: list[str]) -> tuple[str, dict] | None:
+        payload = "\n".join(payload_lines)
+        if not payload or payload.strip() == "[DONE]":
+            return None
+        try:
+            data = json.loads(payload)
+        except ValueError:
+            return None
+        if isinstance(data, dict):
+            return etype or str(data.get("type", "")), data
+        return None
+
     for raw in lines:
         line = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else raw
         line = line.rstrip("\r\n")
         if line == "":
-            etype, payload = event_type, "\n".join(data_lines)
+            frame = _frame(event_type, data_lines)
             event_type, data_lines = "", []
-            if not payload or payload.strip() == "[DONE]":
-                continue
-            try:
-                data = json.loads(payload)
-            except ValueError:
-                continue
-            if isinstance(data, dict):
-                yield etype or str(data.get("type", "")), data
+            if frame is not None:
+                yield frame
             continue
         if line.startswith("event:"):
             event_type = line[len("event:") :].strip()
         elif line.startswith("data:"):
             data_lines.append(line[len("data:") :].lstrip())
+    # Flush a trailing frame the server never terminated with a blank line: this
+    # backend is unofficial, so we can't assume every stream ends cleanly, and a
+    # dropped final frame would silently swallow the last delta or the completed
+    # signal (turning a good reply into an "ended without any reply text" error).
+    if data_lines:
+        frame = _frame(event_type, data_lines)
+        if frame is not None:
+            yield frame
 
 
 class ChatGptStreamParser:
