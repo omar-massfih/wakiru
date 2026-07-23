@@ -472,6 +472,11 @@ class Settings(BaseSettings):
     # overdue repeat so a forgotten task can't nudge forever. Only used when
     # reminder_repeat_minutes > 0.
     reminder_overdue_max_minutes: int = 1440  # 24h
+    # A tighter cap on overdue nagging: stop after this many past-due re-nudges
+    # (whichever comes first with reminder_overdue_max_minutes). At the default
+    # 15-min repeat that is ~1h of gentle "still open" reminders, not the ~96 the
+    # time bound alone would allow. 0 = no count cap (the legacy time-only bound).
+    reminder_overdue_max_nudges: int = 4
 
     # --- Daily briefing ---
     # Push one proactive digest per day (agenda + due tasks + unread mail when
@@ -503,6 +508,11 @@ class Settings(BaseSettings):
     # doesn't become a barrage. Bounds delivery, never the model's judgment;
     # due follow-ups and the briefing always deliver regardless of the gap.
     heartbeat_min_gap_minutes: int = 120
+    # How many hours of already-delivered nudges (reminders, briefings, prior
+    # heartbeat pushes) to show the model each wake as "don't repeat these", so a
+    # wake doesn't re-send — in different words — a reminder the ticker or an
+    # earlier wake already pushed. 0 disables the de-dup context.
+    heartbeat_dedup_push_hours: int = 6
     # Hours of user silence (across all channels) before "we haven't talked in
     # a while" becomes a heartbeat trigger. 0 disables the staleness trigger.
     heartbeat_contact_gap_hours: int = 0

@@ -129,6 +129,27 @@ def test_contact_staleness_is_reported(settings) -> None:
     assert situation is not None and "haven't heard from the user" in situation.report()
 
 
+def test_recent_pushes_are_surfaced_for_dedup(settings) -> None:
+    from assistant import reflect
+
+    reflect.log_push(settings, "reminder", "Heads up: dentist at 14:00")
+    situation = heartbeat.gather_situation(settings)
+    assert situation is not None
+    report = situation.report()
+    assert "do NOT send these" in report
+    assert "dentist at 14:00" in report
+
+
+def test_dedup_context_can_be_disabled(settings) -> None:
+    from assistant import reflect
+
+    off = settings.model_copy(update={"heartbeat_dedup_push_hours": 0})
+    reflect.log_push(off, "reminder", "Heads up: dentist at 14:00")
+    situation = heartbeat.gather_situation(off)
+    assert situation is not None
+    assert "dentist at 14:00" not in situation.report()
+
+
 def test_mail_change_is_reported_once_per_snapshot(settings, monkeypatch) -> None:
     mail_on = settings.model_copy(update={"enable_email": True})
     monkeypatch.setattr(

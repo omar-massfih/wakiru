@@ -61,10 +61,17 @@ def due_task_reminders(settings: Settings, current: datetime | None = None) -> l
             continue
         remaining = due - current
         # In repeat mode the nagging continues while overdue, until the task is
-        # done or the overdue window is exhausted.
+        # done or the overdue window is exhausted — bounded by *both* a time
+        # window and a count of re-nudges, so a forgotten (or purely
+        # informational) task can't nag dozens of times before the day is out.
+        overdue_minutes = settings.reminder_overdue_max_minutes
+        if repeat > 0 and settings.reminder_overdue_max_nudges > 0:
+            overdue_minutes = min(
+                overdue_minutes, settings.reminder_overdue_max_nudges * repeat
+            )
         slots = due_slots(
             remaining, leads, repeat,
-            repeat_floor=timedelta(minutes=-settings.reminder_overdue_max_minutes),
+            repeat_floor=timedelta(minutes=-overdue_minutes),
         )
         if not slots:
             continue

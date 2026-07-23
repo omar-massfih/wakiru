@@ -442,6 +442,28 @@ def test_repeat_nags_overdue_then_stops(settings, monkeypatch) -> None:
         assert countdown in m
 
 
+def test_repeat_overdue_capped_by_nudge_count(settings, monkeypatch) -> None:
+    # A generous time window, but a 2-nudge count cap → overdue nags stop after
+    # two, even though reminder_overdue_max_minutes would allow far more.
+    settings = settings.model_copy(
+        update={
+            "reminder_lead_minutes": [60],
+            "reminder_repeat_minutes": 15,
+            "reminder_overdue_max_minutes": 1440,
+            "reminder_overdue_max_nudges": 2,
+        }
+    )
+    base = context.now(settings).replace(second=0, microsecond=0)
+    store.create_task(settings, "call bank", due=base.isoformat(timespec="seconds"))
+
+    overdue: list[str] = []
+    for step in (15, 30, 45):  # 15, 30, then 45 min past due
+        monkeypatch.setattr(reminders, "now", lambda s, t=base + timedelta(minutes=step): t)
+        overdue += [r["message"] for r in reminders.run_task_reminders(settings)]
+    # Cap = 2 * 15 min = 30 min, so +15 and +30 fire but +45 is silent.
+    assert len(overdue) == 2
+
+
 def test_repeat_overdue_stops_once_done(settings, monkeypatch) -> None:
     settings = settings.model_copy(
         update={"reminder_lead_minutes": [60], "reminder_repeat_minutes": 15}

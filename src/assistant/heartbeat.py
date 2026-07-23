@@ -416,6 +416,28 @@ def gather_situation(
             info.append("Mailbox actions you took on recent wakes (do not redo them):")
             info += [f"  - {row['detail']}" for row in actions]
 
+    # De-dup accountability: the nudges already delivered to the user recently
+    # (by the reminder ticker, the briefing, or an earlier wake). A fixed-time
+    # reminder is the ticker's job — surfacing what it already sent stops a wake
+    # from re-sending the same thing in different words (the repeated
+    # "session resets…" nudges this guards against).
+    if settings.heartbeat_dedup_push_hours > 0:
+        try:
+            from .reflect import recent_pushes
+
+            delivered = recent_pushes(
+                settings, current - timedelta(hours=settings.heartbeat_dedup_push_hours)
+            )
+        except Exception:
+            logger.exception("heartbeat: reading the recent-push log failed")
+            delivered = []
+        if delivered:
+            info.append(
+                "Nudges already delivered to the user recently — do NOT send these "
+                "again, or a reworded version; they have been handled:"
+            )
+            info += [f"  - [{row['kind']}] {row['excerpt']}" for row in delivered[-6:]]
+
     return Situation(
         triggers=triggers,
         followups=due,
