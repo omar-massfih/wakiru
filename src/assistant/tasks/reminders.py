@@ -19,7 +19,7 @@ from ..calendar.context import now
 from ..calendar.store import parse_dt
 from ..config import Settings, get_settings
 from ..notify import deliver_reminder
-from ..reminder_windows import due_slots
+from ..reminder_windows import START_GRACE, due_slots
 from . import store
 
 # The dedupe ledger lives in the same ``tasks.db`` file the store uses.
@@ -60,19 +60,22 @@ def due_task_reminders(settings: Settings, current: datetime | None = None) -> l
         if due is None:
             continue
         remaining = due - current
-        # In repeat mode the nagging continues while overdue, until the task is
-        # done or the overdue window is exhausted — bounded by *both* a time
-        # window and a count of re-nudges, so a forgotten (or purely
-        # informational) task can't nag dozens of times before the day is out.
-        overdue_minutes = settings.reminder_overdue_max_minutes
-        if repeat > 0 and settings.reminder_overdue_max_nudges > 0:
-            overdue_minutes = min(
-                overdue_minutes, settings.reminder_overdue_max_nudges * repeat
-            )
-        slots = due_slots(
-            remaining, leads, repeat,
-            repeat_floor=timedelta(minutes=-overdue_minutes),
-        )
+        if task.notify_only:
+            # A one-time informational nudge: fire the leads and one "now" band,
+            # then go silent — never chase it overdue, whatever the repeat config.
+            overdue_floor = -START_GRACE
+        else:
+            # In repeat mode the nagging continues while overdue, until the task
+            # is done or the overdue window is exhausted — bounded by *both* a
+            # time window and a count of re-nudges, so a forgotten task can't nag
+            # dozens of times before the day is out.
+            overdue_minutes = settings.reminder_overdue_max_minutes
+            if repeat > 0 and settings.reminder_overdue_max_nudges > 0:
+                overdue_minutes = min(
+                    overdue_minutes, settings.reminder_overdue_max_nudges * repeat
+                )
+            overdue_floor = timedelta(minutes=-overdue_minutes)
+        slots = due_slots(remaining, leads, repeat, repeat_floor=overdue_floor)
         if not slots:
             continue
         reminders.append(

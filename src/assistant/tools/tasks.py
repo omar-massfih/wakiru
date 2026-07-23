@@ -28,6 +28,12 @@ def _task_tools() -> list[ToolSpec]:
                         "RFC 5545 RRULE for a recurring chore (needs a due date"
                         " to anchor); completing rolls the due forward",
                     ),
+                    "notify_only": (
+                        "string",
+                        "\"true\" for a one-time informational nudge that fires at "
+                        "its due time and does NOT keep nagging once overdue — a "
+                        "plain \"remind me at TIME that X\", not a to-do to complete",
+                    ),
                 },
                 ["title"],
             ),
@@ -50,6 +56,7 @@ def _task_tools() -> list[ToolSpec]:
                     "due": ("string", f"New due date, {_ISO}"),
                     "notes": ("string", "New notes"),
                     "rrule": ("string", "New RFC 5545 RRULE"),
+                    "notify_only": ("string", "\"true\"/\"false\" one-time nudge flag"),
                 },
                 ["id"],
             ),

@@ -464,6 +464,38 @@ def test_repeat_overdue_capped_by_nudge_count(settings, monkeypatch) -> None:
     assert len(overdue) == 2
 
 
+def test_notify_only_flag_round_trips_and_clears(settings) -> None:
+    t = store.create_task(settings, "session resets", notify_only=True)
+    assert store.get_task(settings, t.id).notify_only is True
+    store.update_task(settings, t.id, notify_only="false")
+    assert store.get_task(settings, t.id).notify_only is False
+
+
+def test_notify_only_reminder_does_not_nag_overdue(settings, monkeypatch) -> None:
+    settings = settings.model_copy(
+        update={
+            "reminder_lead_minutes": [60],
+            "reminder_repeat_minutes": 15,
+            "reminder_overdue_max_minutes": 120,
+        }
+    )
+    base = context.now(settings).replace(second=0, microsecond=0)
+    _apply(
+        settings,
+        [{"op": "add", "title": "session resets", "notify_only": "true",
+          "due": base.isoformat(timespec="seconds")}],
+    )
+    assert store.find_task(settings, "session resets").notify_only is True
+
+    messages: list[str] = []
+    for step in (0, 15, 30):  # at due, then 15 and 30 min overdue
+        monkeypatch.setattr(reminders, "now", lambda s, t=base + timedelta(minutes=step): t)
+        messages += [r["message"] for r in reminders.run_task_reminders(settings)]
+    # Fires once at its time, then stays quiet — a normal repeat-mode task would
+    # keep nagging overdue here (see test_repeat_nags_overdue_then_stops).
+    assert len(messages) == 1
+
+
 def test_repeat_overdue_stops_once_done(settings, monkeypatch) -> None:
     settings = settings.model_copy(
         update={"reminder_lead_minutes": [60], "reminder_repeat_minutes": 15}

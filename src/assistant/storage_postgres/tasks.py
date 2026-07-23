@@ -26,14 +26,19 @@ def ensure_tasks_schema(settings: Settings) -> None:
               rrule TEXT NOT NULL DEFAULT '',
               created TEXT NOT NULL DEFAULT '',
               updated TEXT NOT NULL DEFAULT '',
-              done_at TEXT NOT NULL DEFAULT ''
+              done_at TEXT NOT NULL DEFAULT '',
+              notify_only TEXT NOT NULL DEFAULT ''
             )
             """
         )
-        # Tables created before the column existed need it added in place.
+        # Tables created before a column existed need it added in place.
         conn.execute(
             "ALTER TABLE assistant_tasks"
             " ADD COLUMN IF NOT EXISTS rrule TEXT NOT NULL DEFAULT ''"
+        )
+        conn.execute(
+            "ALTER TABLE assistant_tasks"
+            " ADD COLUMN IF NOT EXISTS notify_only TEXT NOT NULL DEFAULT ''"
         )
         conn.execute(
             """
@@ -77,11 +82,18 @@ def _task_from_row(row: dict):
         created=str(row.get("created") or ""),
         updated=str(row.get("updated") or ""),
         done_at=str(row.get("done_at") or ""),
+        notify_only=str(row.get("notify_only") or "").strip().lower()
+        in ("1", "true", "yes", "on"),
     )
 
 
 def create_task(
-    settings: Settings, title: str, due: str = "", notes: str = "", rrule: str = ""
+    settings: Settings,
+    title: str,
+    due: str = "",
+    notes: str = "",
+    rrule: str = "",
+    notify_only: object = False,
 ):
     import uuid
 
@@ -98,12 +110,14 @@ def create_task(
         rrule=rrule.strip(),
         created=now,
         updated=now,
+        notify_only=task_store._truthy(notify_only),
     )
     with connect(settings) as conn:
         conn.execute(
-            "INSERT INTO assistant_tasks (id, title, done, due, notes, rrule, created, updated, done_at) "
-            "VALUES (%s, %s, FALSE, %s, %s, %s, %s, %s, '')",
-            (task.id, task.title, task.due, task.notes, task.rrule, task.created, task.updated),
+            "INSERT INTO assistant_tasks (id, title, done, due, notes, rrule, created, updated, done_at, notify_only) "
+            "VALUES (%s, %s, FALSE, %s, %s, %s, %s, %s, '', %s)",
+            (task.id, task.title, task.due, task.notes, task.rrule, task.created,
+             task.updated, "1" if task.notify_only else ""),
         )
     return task
 
@@ -111,14 +125,14 @@ def create_task(
 def get_task(settings: Settings, task_id: str):
     ensure_tasks_schema(settings)
     with connect(settings) as conn:
-        rows = _rows(conn.execute("SELECT id, title, done, due, notes, rrule, created, updated, done_at FROM assistant_tasks WHERE id = %s", (task_id,)))
+        rows = _rows(conn.execute("SELECT id, title, done, due, notes, rrule, created, updated, done_at, notify_only FROM assistant_tasks WHERE id = %s", (task_id,)))
     return _task_from_row(rows[0]) if rows else None
 
 
 def list_tasks(settings: Settings):
     ensure_tasks_schema(settings)
     with connect(settings) as conn:
-        rows = _rows(conn.execute("SELECT id, title, done, due, notes, rrule, created, updated, done_at FROM assistant_tasks"))
+        rows = _rows(conn.execute("SELECT id, title, done, due, notes, rrule, created, updated, done_at, notify_only FROM assistant_tasks"))
     return [_task_from_row(r) for r in rows]
 
 
@@ -163,8 +177,8 @@ def restore_task(settings: Settings, task) -> object:
     with connect(settings) as conn:
         conn.execute(
             """
-            INSERT INTO assistant_tasks (id, title, done, due, notes, rrule, created, updated, done_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO assistant_tasks (id, title, done, due, notes, rrule, created, updated, done_at, notify_only)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT(id) DO UPDATE SET
               title = excluded.title,
               done = excluded.done,
@@ -173,9 +187,11 @@ def restore_task(settings: Settings, task) -> object:
               rrule = excluded.rrule,
               created = excluded.created,
               updated = excluded.updated,
-              done_at = excluded.done_at
+              done_at = excluded.done_at,
+              notify_only = excluded.notify_only
             """,
-            (task.id, task.title, bool(task.done), task.due, task.notes, task.rrule, task.created, task.updated, task.done_at),
+            (task.id, task.title, bool(task.done), task.due, task.notes, task.rrule,
+             task.created, task.updated, task.done_at, "1" if task.notify_only else ""),
         )
     return task
 

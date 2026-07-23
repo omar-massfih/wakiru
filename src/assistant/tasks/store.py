@@ -28,7 +28,12 @@ from ..sqlite_util import ensure_columns, open_db, transaction
 _FIELDS = ("title", "due", "notes", "rrule")
 
 # Columns added after the table's first creation (see _open's cheap migration).
-_ADDED_COLUMNS = ("rrule",)
+_ADDED_COLUMNS = ("rrule", "notify_only")
+
+
+def _truthy(value: object) -> bool:
+    """Interpret a tool/DB flag value (string, bool, int) as a boolean."""
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
 
 
 @dataclass
@@ -52,6 +57,10 @@ class Task:
     created: str = ""
     updated: str = ""
     done_at: str = ""
+    # A one-time timed reminder that fires at its due time and does NOT keep
+    # nagging once overdue (a purely informational "remind me at TIME that X",
+    # not a to-do to complete). See tasks.reminders.due_task_reminders.
+    notify_only: bool = False
 
 
 def _open(settings: Settings) -> sqlite3.Connection:
@@ -60,7 +69,8 @@ def _open(settings: Settings) -> sqlite3.Connection:
         "CREATE TABLE IF NOT EXISTS tasks ("
         " id TEXT PRIMARY KEY, title TEXT NOT NULL, done INTEGER DEFAULT 0,"
         " due TEXT DEFAULT '', notes TEXT DEFAULT '', rrule TEXT DEFAULT '',"
-        " created TEXT DEFAULT '', updated TEXT DEFAULT '', done_at TEXT DEFAULT '')"
+        " created TEXT DEFAULT '', updated TEXT DEFAULT '', done_at TEXT DEFAULT '',"
+        " notify_only TEXT DEFAULT '')"
     )
     ensure_columns(conn, "tasks", _ADDED_COLUMNS)
     return conn
@@ -84,6 +94,7 @@ def _row_to_task(row: sqlite3.Row) -> Task:
         created=row["created"] or "",
         updated=row["updated"] or "",
         done_at=row["done_at"] or "",
+        notify_only=_truthy(row["notify_only"] or ""),
     )
 
 
@@ -122,11 +133,16 @@ def _sort_key(task: Task) -> tuple[int, float, str]:
 
 
 def create_task(
-    settings: Settings, title: str, due: str = "", notes: str = "", rrule: str = ""
+    settings: Settings,
+    title: str,
+    due: str = "",
+    notes: str = "",
+    rrule: str = "",
+    notify_only: object = False,
 ) -> Task:
     """Insert a new open task and return it (with a generated id and timestamps)."""
     if storage_postgres := postgres_backend(settings):
-        return storage_postgres.create_task(settings, title, due, notes, rrule)
+        return storage_postgres.create_task(settings, title, due, notes, rrule, notify_only)
     now = _stamp_now(settings)
     task = Task(
         id=uuid.uuid4().hex[:12],
@@ -137,13 +153,15 @@ def create_task(
         rrule=rrule.strip(),
         created=now,
         updated=now,
+        notify_only=_truthy(notify_only),
     )
     with _connect(settings) as conn:
         conn.execute(
-            "INSERT INTO tasks (id, title, done, due, notes, rrule, created, updated, done_at)"
-            " VALUES (?, ?, 0, ?, ?, ?, ?, ?, '')",
+            "INSERT INTO tasks"
+            " (id, title, done, due, notes, rrule, created, updated, done_at, notify_only)"
+            " VALUES (?, ?, 0, ?, ?, ?, ?, ?, '', ?)",
             (task.id, task.title, task.due, task.notes, task.rrule,
-             task.created, task.updated),
+             task.created, task.updated, "1" if task.notify_only else ""),
         )
     return task
 
@@ -174,10 +192,16 @@ def list_tasks(settings: Settings, include_done: bool = False) -> list[Task]:
     return open_tasks + done_tasks
 
 
-def update_task(settings: Settings, task_id: str, **fields: str | None) -> Task | None:
+def update_task(settings: Settings, task_id: str, **fields: object) -> Task | None:
     """Update the given columns on a task; return it, or ``None`` if absent."""
+    # notify_only is a boolean flag, stored as "1"/"" — coerced apart from the
+    # plain text _FIELDS so "false" clears it rather than storing the word.
+    notify_update: dict[str, str] = {}
+    if fields.get("notify_only") is not None:
+        notify_update["notify_only"] = "1" if _truthy(fields["notify_only"]) else ""
     if storage_postgres := postgres_backend(settings):
         updates = {k: str(v).strip() for k, v in fields.items() if k in _FIELDS and v is not None}
+        updates.update(notify_update)
         return storage_postgres.update_task(settings, task_id, updates)
     updates = {
         k: str(v).strip()
@@ -186,6 +210,7 @@ def update_task(settings: Settings, task_id: str, **fields: str | None) -> Task 
     }
     if "due" in updates:
         updates["due"] = _normalize_due(settings, updates["due"])
+    updates.update(notify_update)
     existing = get_task(settings, task_id)
     if existing is None:
         return None
@@ -262,11 +287,12 @@ def restore_task(settings: Settings, task: Task) -> Task:
     with _connect(settings) as conn:
         conn.execute(
             "INSERT OR REPLACE INTO tasks"
-            " (id, title, done, due, notes, rrule, created, updated, done_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " (id, title, done, due, notes, rrule, created, updated, done_at, notify_only)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 task.id, task.title, int(task.done), task.due, task.notes,
                 task.rrule, task.created, task.updated, task.done_at,
+                "1" if task.notify_only else "",
             ),
         )
     return task

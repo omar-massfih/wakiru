@@ -105,6 +105,7 @@ def apply_op(
             due=str(op.get("due", "") or ""),
             notes=str(op.get("notes", "") or ""),
             rrule=rrule,
+            notify_only=op.get("notify_only", False),
         )
         suffix = f" ({recurrence.humanize_rrule(task.rrule)})" if task.rrule else ""
         summary = f"added task: {task.title}{suffix}{note}"
@@ -154,7 +155,7 @@ def apply_op(
         revised = store.update_task(
             settings, target,
             title=op.get("title"), due=op.get("due"), notes=op.get("notes"),
-            rrule=new_rule,
+            rrule=new_rule, notify_only=op.get("notify_only"),
         )
         if revised is None:
             return None
