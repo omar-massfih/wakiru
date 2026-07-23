@@ -355,6 +355,20 @@ completes (the CLI does not expose token deltas, so granularity is per message).
   files; `POST /documents` can also take a `url` (opt-in, `ENABLE_DOCS_URL_INGEST`).
 - **Voice notes** — with `ENABLE_VOICE=true`, Telegram voice messages are
   transcribed locally (faster-whisper) and answered like typed text.
+- **People / contacts (lightweight CRM)** — with `ENABLE_PEOPLE=true`, a store
+  of the people you know (relationship, keep-in-touch cadence, last contact,
+  birthday, notes). A compact roster rides in each turn with anyone overdue for
+  contact or with a birthday soon flagged first, so "who is this meeting with?"
+  and "haven't spoken to Kari in a while" both work; the assistant manages it
+  with the people tools (add / update / log-contact / remove), every write
+  undoable. Birthdays within `PEOPLE_BIRTHDAY_LEAD_DAYS` fire a proactive
+  reminder and appear in the daily briefing.
+- **Weather** — with `ENABLE_WEATHER=true` and a location (`WEATHER_LATITUDE`/
+  `WEATHER_LONGITUDE`, or a `WEATHER_LOCATION_NAME` that gets geocoded), a short
+  forecast is fetched off the reply path (Open-Meteo, keyless) and folded into
+  each turn's context and the daily briefing — "bring a jacket" grounded in real
+  conditions. The `get_weather` tool answers about any other city or a multi-day
+  outlook on demand.
 
 ## Roadmap / not yet wired
 
