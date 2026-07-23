@@ -464,6 +464,11 @@ class Settings(BaseSettings):
     people_max_open: int = 20
     # A birthday within this many days is flagged in the roster and the briefing.
     people_birthday_lead_days: int = 7
+    # Meeting prep: when a calendar event starting (or running) within this
+    # many minutes names someone from the people store in its title or notes,
+    # a "Meeting prep" block with their stored detail rides into each turn.
+    # Needs both enable_calendar and enable_people; 0 disables the block.
+    meeting_prep_minutes: int = 60
 
     # --- Confirmation on writes (undo) ---
     # Master switch: log every calendar write to an undo ledger, let the user

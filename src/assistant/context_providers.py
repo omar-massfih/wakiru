@@ -119,6 +119,14 @@ def _people(ctx: TurnContext) -> str:
     return people_context(ctx.settings)
 
 
+def _meeting_prep(ctx: TurnContext) -> str:
+    """Who the user is about to meet — empty except right before (or during)
+    a calendar event that names someone from the people store."""
+    from .meeting_prep import meeting_prep_context
+
+    return meeting_prep_context(ctx.settings)
+
+
 def _goals(ctx: TurnContext) -> str:
     """The standing goals the assistant carries — the same intentions the
     heartbeat advances, so a chat turn about one picks up its working state
@@ -158,6 +166,13 @@ def default_providers() -> list[ContextProvider]:
         ContextProvider("worklog", lambda s: s.enable_worklog, _worklog),
         ContextProvider("trip", lambda s: s.enable_trips, _trip),
         ContextProvider("people", lambda s: s.enable_people, _people),
+        ContextProvider(
+            "meeting_prep",
+            lambda s: s.enable_calendar
+            and s.enable_people
+            and s.meeting_prep_minutes > 0,
+            _meeting_prep,
+        ),
         ContextProvider("goals", lambda s: s.enable_heartbeat, _goals),
         ContextProvider(
             "mail", lambda s: s.enable_email and s.email_snapshot_minutes > 0, _mail
