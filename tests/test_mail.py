@@ -417,6 +417,35 @@ def test_send_works_when_both_switches_are_on(settings, monkeypatch) -> None:
     assert sent[0]["From"] == "me@example.com"
 
 
+def test_send_sets_cc_header(settings, monkeypatch) -> None:
+    sent: list[EmailMessage] = []
+
+    class _FakeSMTP:
+        def send_message(self, message):
+            sent.append(message)
+
+        def quit(self):
+            pass
+
+    enabled = settings.model_copy(update={"enable_email_send": True})
+    monkeypatch.setattr(client, "_smtp_connect", lambda s: _FakeSMTP())
+    summary = client.send_message(
+        enabled, "bob@x.com", "Hi", "body", cc="carol@x.com, dave@x.com"
+    )
+    # send_message derives envelope recipients from To + Cc, so the header alone
+    # makes the copy go out.
+    assert sent[0]["Cc"] == "carol@x.com, dave@x.com"
+    assert "cc carol@x.com" in summary
+
+
+def test_draft_sets_cc_header(settings, monkeypatch) -> None:
+    fake = _FakeIMAP()
+    monkeypatch.setattr(client, "imap_connect", lambda s: fake)
+    summary = client.save_draft(settings, "bob@x.com", "Hi", "body", cc="carol@x.com")
+    assert b"carol@x.com" in fake.appended[0][2]
+    assert "cc carol@x.com" in summary
+
+
 def test_send_blocked_when_email_disabled_entirely(tmp_path) -> None:
     s = Settings(memory_dir=str(tmp_path / "m"), enable_email_send=True)
     with pytest.raises(MailDisabledError):

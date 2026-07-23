@@ -337,10 +337,14 @@ def _require_address(to: str) -> str:
     return addr
 
 
-def _build(settings: Settings, to: str, subject: str, body: str) -> EmailMessage:
+def _build(settings: Settings, to: str, subject: str, body: str, cc: str = "") -> EmailMessage:
     message = EmailMessage()
     message["From"] = settings.email_address
     message["To"] = to
+    if cc.strip():
+        # smtplib.send_message derives the envelope recipients from To + Cc, so
+        # a Cc header is all that's needed for the copy to actually be sent.
+        message["Cc"] = cc.strip()
     message["Subject"] = subject
     # A Message-ID here means a draft that is later sent (from any client)
     # threads correctly; servers keep a supplied id rather than minting one.
@@ -350,23 +354,24 @@ def _build(settings: Settings, to: str, subject: str, body: str) -> EmailMessage
     return message
 
 
-def save_draft(settings: Settings, to: str, subject: str, body: str) -> str:
+def save_draft(settings: Settings, to: str, subject: str, body: str, cc: str = "") -> str:
     """Append a draft to the drafts folder. The default write path — never sends.
 
     Returns a short confirmation summary.
     """
     _require_address(to)
-    message = _build(settings, to, subject, body)
+    message = _build(settings, to, subject, body, cc)
     conn = imap_connect(settings)
     try:
         stamp = imaplib.Time2Internaldate(datetime.now(UTC).timestamp())
         conn.append(settings.email_drafts_folder, r"\Draft", stamp, message.as_bytes())
     finally:
         _close(conn)
-    return f"drafted: “{subject}” to {to}"
+    cc_note = f" (cc {cc.strip()})" if cc.strip() else ""
+    return f"drafted: “{subject}” to {to}{cc_note}"
 
 
-def send_message(settings: Settings, to: str, subject: str, body: str) -> str:
+def send_message(settings: Settings, to: str, subject: str, body: str, cc: str = "") -> str:
     """Send mail. Gated behind ``enable_email_send`` *in addition to* ``enable_email``.
 
     Never called from a background path — sending is irreversible, so it happens
@@ -381,14 +386,15 @@ def send_message(settings: Settings, to: str, subject: str, body: str) -> str:
             "Use a draft instead, or set ENABLE_EMAIL_SEND=true to allow sending."
         )
     _require_address(to)
-    message = _build(settings, to, subject, body)
+    message = _build(settings, to, subject, body, cc)
     conn = _smtp_connect(settings)
     try:
         conn.send_message(message)
     finally:
         with contextlib.suppress(Exception):
             conn.quit()
-    return f"sent: “{subject}” to {to}"
+    cc_note = f" (cc {cc.strip()})" if cc.strip() else ""
+    return f"sent: “{subject}” to {to}{cc_note}"
 
 
 # --------------------------------------------------------------------------- #

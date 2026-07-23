@@ -54,15 +54,15 @@ def _read_email(ctx: ToolContext, uid: str) -> str:
         f"Date: {message.date}\n{attachments}\n{message.body}"
     )
 
-def _draft_email(ctx: ToolContext, to: str, subject: str, body: str) -> str:
+def _draft_email(ctx: ToolContext, to: str, subject: str, body: str, cc: str = "") -> str:
     from ..mail import client as mail_client
 
-    return mail_client.save_draft(ctx.settings, str(to), str(subject), str(body))
+    return mail_client.save_draft(ctx.settings, str(to), str(subject), str(body), str(cc))
 
-def _send_email(ctx: ToolContext, to: str, subject: str, body: str) -> str:
+def _send_email(ctx: ToolContext, to: str, subject: str, body: str, cc: str = "") -> str:
     from ..mail import client as mail_client
 
-    return mail_client.send_message(ctx.settings, str(to), str(subject), str(body))
+    return mail_client.send_message(ctx.settings, str(to), str(subject), str(body), str(cc))
 
 def _ingest_attachment(ctx: ToolContext, uid: str, name: str = "") -> str:
     from ..docs import extract as docs_extract
@@ -213,6 +213,7 @@ def _email_tools(settings: Settings) -> list[ToolSpec]:
                     "to": ("string", "Recipient address"),
                     "subject": ("string", "Subject line"),
                     "body": ("string", "Plain-text body"),
+                    "cc": ("string", "Optional Cc address(es), comma-separated"),
                 },
                 ["to", "subject", "body"],
             ),
@@ -303,6 +304,7 @@ def _email_tools(settings: Settings) -> list[ToolSpec]:
                         "to": ("string", "Recipient address"),
                         "subject": ("string", "Subject line"),
                         "body": ("string", "Plain-text body"),
+                        "cc": ("string", "Optional Cc address(es), comma-separated"),
                     },
                     ["to", "subject", "body"],
                 ),
