@@ -19,12 +19,15 @@ from __future__ import annotations
 
 from . import store
 from .context import attention_lines, briefing_people, people_context
+from .reminders import due_birthday_reminders, run_birthday_reminders
 from .store import Person
 
 __all__ = [
     "Person",
     "attention_lines",
     "briefing_people",
+    "due_birthday_reminders",
     "people_context",
+    "run_birthday_reminders",
     "store",
 ]

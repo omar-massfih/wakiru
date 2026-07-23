@@ -44,6 +44,7 @@ from .mail import client as mail_client
 from .mail import snapshot as mail_snapshot
 from .mail.client import MailDisabledError
 from .memory import consolidate_memory, store
+from .people.reminders import run_birthday_reminders
 from .sleep import run_sleep
 from .tasks import store as tasks_store
 from .tasks.reminders import run_task_reminders
@@ -74,6 +75,7 @@ def _reminder_tick_once() -> None:
     # into the authorized chats' working memory (proactive loop-in).
     run_reminders(get_settings(), _agent())
     run_task_reminders(get_settings(), _agent())
+    run_birthday_reminders(get_settings(), _agent())
     # The daily briefing rides the same tick; its own ledger makes it
     # exactly-once per day and a cheap no-op every other pass.
     run_briefing(get_settings(), agent=_agent())
@@ -514,10 +516,14 @@ def reminders_run() -> dict:
 
     The in-process ticker calls this same logic on a cadence; this endpoint lets it
     also be driven manually or from external cron. Idempotent via the dedupe ledger.
-    Fires both calendar-event and due-task reminders.
+    Fires calendar-event, due-task, and birthday reminders.
     """
     settings = get_settings()
-    fired = run_reminders(settings, _agent()) + run_task_reminders(settings, _agent())
+    fired = (
+        run_reminders(settings, _agent())
+        + run_task_reminders(settings, _agent())
+        + run_birthday_reminders(settings, _agent())
+    )
     return {"count": len(fired), "fired": fired}
 
 

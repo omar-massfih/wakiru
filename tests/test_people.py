@@ -23,6 +23,7 @@ from assistant.people.context import (
     is_overdue,
     people_context,
 )
+from assistant.people.reminders import run_birthday_reminders
 from assistant.undo import undo_latest
 
 THREAD = "telegram:1"
@@ -169,3 +170,49 @@ def test_no_attention_when_nothing_due(settings) -> None:
     store.create_person(settings, "Ola")  # no cadence, no birthday
     assert attention_lines(settings, cal_context.now(settings)) == []
     assert briefing_people(settings) == ""
+
+
+# --- birthday reminders ----------------------------------------------------- #
+
+
+@pytest.fixture
+def _birthday_delivery(monkeypatch):
+    """Capture pushed birthday reminders; model composer returns the fallback."""
+    sent: list[dict] = []
+    monkeypatch.setattr("assistant.compose.compose_push", lambda s, **kw: kw["fallback"])
+    monkeypatch.setattr(
+        "assistant.people.reminders.deliver_reminder",
+        lambda s, r: bool(sent.append(r)) or True,
+    )
+    monkeypatch.setattr("assistant.proactive.record_push", lambda *a, **k: None)
+    return sent
+
+
+def _birthday_on(settings, name, offset_days) -> None:
+    date = cal_context.now(settings).date() + timedelta(days=offset_days)
+    store.create_person(settings, name, birthday=f"{date.month:02d}-{date.day:02d}")
+
+
+def test_birthday_reminder_fires_once(settings, _birthday_delivery) -> None:
+    _birthday_on(settings, "Kari", 0)  # birthday today
+    sent = run_birthday_reminders(settings)
+    assert len(sent) == 1
+    assert "Kari" in _birthday_delivery[0]["message"]
+    # Exactly-once: a second pass claims nothing.
+    assert run_birthday_reminders(settings) == []
+
+
+def test_birthday_within_lead_window(settings, _birthday_delivery) -> None:
+    _birthday_on(settings, "Ola", settings.people_birthday_lead_days)  # edge of window
+    assert len(run_birthday_reminders(settings)) == 1
+
+
+def test_birthday_outside_lead_window(settings, _birthday_delivery) -> None:
+    _birthday_on(settings, "Ola", settings.people_birthday_lead_days + 5)
+    assert run_birthday_reminders(settings) == []
+
+
+def test_birthday_reminders_respect_switches(settings, _birthday_delivery) -> None:
+    _birthday_on(settings, "Kari", 0)
+    assert run_birthday_reminders(settings.model_copy(update={"enable_reminders": False})) == []
+    assert run_birthday_reminders(settings.model_copy(update={"enable_people": False})) == []
