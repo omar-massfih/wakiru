@@ -103,6 +103,38 @@ def _ingest_url(ctx: ToolContext, url: str, title: str = "") -> str:
         "searchable with search_documents; summarize_document gives an overview."
     )
 
+def _save_note(ctx: ToolContext, title: str, text: str) -> str:
+    from ..docs import store as docs_store
+
+    title = str(title or "").strip()[:_INGEST_TITLE_MAX_CHARS]
+    text = str(text or "").strip()
+    if not title:
+        return "Tool failed: the note needs a title."
+    if not text:
+        return "Tool failed: the note has no text to save."
+    if len(text) > _INGEST_MAX_CHARS:
+        return (
+            f"That note is too large to save ({len(text):,} characters; "
+            f"the cap is {_INGEST_MAX_CHARS:,})."
+        )
+    existing = [
+        d for d in docs_store.list_documents(ctx.settings) if d.title == title
+    ]
+    if existing:
+        current = docs_store.get_document(ctx.settings, existing[0].id)
+        if current is not None and current.text == text:
+            return f"Already saved as document {existing[0].id} (“{title}”)."
+        return (
+            f"A different document titled “{title}” already exists "
+            f"({existing[0].id}) — pass a distinct title to save this note "
+            "alongside it."
+        )
+    doc = docs_store.add_document(ctx.settings, title, text)
+    return (
+        f"Saved “{doc.title}” as document {doc.id}. Its content is now "
+        "searchable with search_documents; summarize_document gives an overview."
+    )
+
 def _web_tools() -> list[ToolSpec]:
     return [
         ToolSpec(
@@ -138,6 +170,19 @@ def _docs_tools() -> list[ToolSpec]:
             "Search the user's ingested documents and notes for relevant passages.",
             _params({"query": ("string", "What to look for")}, ["query"]),
             _search_documents,
+        ),
+        ToolSpec(
+            "save_note",
+            "Save text the user provides — a meeting transcript, minutes, or a "
+            "note — as a document so it stays searchable and summarizable.",
+            _params(
+                {
+                    "title": ("string", "Short descriptive title"),
+                    "text": ("string", "The full text to save, verbatim"),
+                },
+                ["title", "text"],
+            ),
+            _save_note,
         ),
         ToolSpec(
             "summarize_document",

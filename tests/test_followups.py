@@ -214,7 +214,7 @@ def test_heartbeat_mode_never_offers_send_email(tmp_path) -> None:
     # and adds its own set_next_wake.
     assert "set_next_wake" in heartbeat_names and "set_next_wake" not in chat_names
     triage_only = {"reply_email", "archive_email", "mark_email_read", "label_email"}
-    chat_only_docs = {"ingest_attachment", "summarize_document"}
+    chat_only_docs = {"ingest_attachment", "summarize_document", "save_note"}
     assert heartbeat_names == (
         chat_names - {"send_email", "send_reply", "undo"} - triage_only - chat_only_docs
     ) | {"set_next_wake"}

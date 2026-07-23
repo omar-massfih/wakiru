@@ -117,7 +117,7 @@ def available_tools(settings: Settings, mode: str = "chat") -> list[ToolSpec]:
             for spec in tools
             if spec.name not in (
                 "send_email", "send_reply", "undo",
-                "ingest_attachment", "summarize_document",
+                "ingest_attachment", "summarize_document", "save_note",
                 "read_url", "ingest_url",
                 # On-demand weather does a network fetch; like the web tools it
                 # is chat-only — a background wake must not fetch arbitrary places.

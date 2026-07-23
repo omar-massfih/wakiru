@@ -526,6 +526,67 @@ def test_web_tools_are_chat_only(tmp_path) -> None:
     assert {"read_url", "ingest_url"} <= chat
 
 
+# --- save_note (pasted transcripts / notes -> documents) -------------------- #
+
+
+def _docs_settings(tmp_path) -> Settings:
+    return Settings(
+        memory_dir=str(tmp_path / "memory"),
+        enable_docs=True,
+        docs_min_similarity=0.1,
+    )
+
+
+def test_save_note_lands_in_docs_and_is_idempotent(tmp_path) -> None:
+    from assistant.docs import store as docs_store
+
+    s = _docs_settings(tmp_path)
+    args = {"title": "Standup 2026-07-23", "text": "Kari takes the invoice follow-up."}
+    result = execute_tool(tool_map(s)["save_note"], _ctx(s), args)
+    assert "Saved" in result
+    docs = docs_store.list_documents(s)
+    assert [d.title for d in docs] == ["Standup 2026-07-23"]
+    again = execute_tool(tool_map(s)["save_note"], _ctx(s), args)
+    assert "Already saved" in again
+    assert len(docs_store.list_documents(s)) == 1
+
+
+def test_save_note_title_collision_asks_for_distinct_title(tmp_path) -> None:
+    s = _docs_settings(tmp_path)
+    execute_tool(
+        tool_map(s)["save_note"], _ctx(s), {"title": "Notes", "text": "first"}
+    )
+    result = execute_tool(
+        tool_map(s)["save_note"], _ctx(s), {"title": "Notes", "text": "second"}
+    )
+    assert "already exists" in result and "distinct title" in result
+
+
+def test_save_note_refuses_oversized_and_empty_text(tmp_path) -> None:
+    from assistant.docs import store as docs_store
+
+    s = _docs_settings(tmp_path)
+    spec = tool_map(s)["save_note"]
+    assert "too large" in execute_tool(
+        spec, _ctx(s), {"title": "Huge", "text": "x" * 2_000_001}
+    )
+    assert "no text" in execute_tool(spec, _ctx(s), {"title": "Empty", "text": "   "})
+    assert docs_store.list_documents(s) == []
+
+
+def test_save_note_is_chat_only(tmp_path) -> None:
+    s = Settings(
+        memory_dir=str(tmp_path / "memory"),
+        enable_docs=True,
+        enable_heartbeat=True,
+    )
+    # A background wake must not grow docs.db unprompted.
+    assert "save_note" not in {
+        spec.name for spec in available_tools(s, mode="heartbeat")
+    }
+    assert "save_note" in {spec.name for spec in available_tools(s)}
+
+
 def test_read_url_frames_page_text_as_untrusted(tmp_path, monkeypatch) -> None:
     s = _web_settings(tmp_path)
     monkeypatch.setattr(

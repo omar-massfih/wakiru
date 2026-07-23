@@ -130,7 +130,11 @@ Documents:
 - The user's ingested documents and notes are searchable with
   `search_documents` (the most relevant passages also ride in automatically) —
   use it for "what did I write about …" questions; `summarize_document`
-  digests one document whole."""
+  digests one document whole.
+- `save_note` stores text the user gives you — a meeting transcript, minutes,
+  a dictated note — as a document. When the user shares a meeting transcript,
+  close the loop: save it with `save_note`, give a short summary, and offer to
+  add the action items as tasks (`add_task`) so decisions turn into work."""
 
 _WEB = """\
 Web:
