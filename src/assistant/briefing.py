@@ -50,11 +50,27 @@ def _due_time(settings: Settings) -> dtime:
 def build_briefing(settings: Settings) -> str:
     """Assemble the digest text from the subsystem read paths (no LLM)."""
     parts = [agenda_context(settings)]
+    if settings.enable_weather:
+        try:
+            from .weather import current as weather_current
+
+            if block := weather_current(settings):
+                parts.append(block)
+        except Exception:
+            logger.exception("briefing: weather section failed; skipping it")
     if settings.enable_tasks:
         try:
             parts.append(tasks_context(settings))
         except Exception:
             logger.exception("briefing: tasks section failed; skipping it")
+    if settings.enable_people:
+        try:
+            from .people.context import briefing_people
+
+            if block := briefing_people(settings):
+                parts.append(block)
+        except Exception:
+            logger.exception("briefing: people section failed; skipping it")
     if settings.enable_email:
         # Imported lazily so the briefing works with the mail extra not installed.
         try:

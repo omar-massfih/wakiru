@@ -45,7 +45,7 @@ from langchain_core.messages import (
     ToolMessage,
 )
 
-from . import followups, goals, persona, threads, watches
+from . import followups, goals, people, persona, threads, watches
 from .calendar.context import now
 from .calendar.store import parse_dt
 from .config import Settings, get_settings, postgres_backend
@@ -352,6 +352,9 @@ def gather_situation(
     stale_line = _contact_stale(settings, current)
     if stale_line:
         triggers.append(stale_line)
+    people_line = _people_attention(settings, current)
+    if people_line:
+        triggers.append(people_line)
 
     info: list[str] = []
     since_push = _minutes_since(settings, "last_push_at", current)
@@ -498,6 +501,26 @@ def _mail_changed(settings: Settings) -> str:
         return ""
     _state_set(settings, "last_mail_hash", digest)
     return "The unread-mail snapshot changed since your last wake (see the mail block)."
+
+
+def _people_attention(settings: Settings, current: datetime) -> str:
+    """A trigger line when someone in the CRM is overdue for contact or has a
+    birthday coming (see :func:`assistant.people.attention_lines`).
+
+    Recomputed each wake (like ``_contact_stale``, not consumed like a claim):
+    the birthday/overdue signal simply persists while it is true. The ambient
+    push gap keeps a chatty model from acting on it every beat.
+    """
+    if not settings.enable_people:
+        return ""
+    lines = people.attention_lines(settings, current)
+    if not lines:
+        return ""
+    return (
+        "People to keep in touch with: " + "; ".join(lines) + ". Reach out only "
+        "if you can anchor it in something real (their birthday, a shared thread) "
+        "— never empty small talk, and don't repeat outreach you already made."
+    )
 
 
 def _contact_stale(settings: Settings, current: datetime) -> str:

@@ -379,6 +379,37 @@ class Settings(BaseSettings):
     # Cap on how many open tasks are injected per turn.
     tasks_max_open: int = 20
 
+    # --- Weather ---
+    # Master switch: fetch a short forecast off the reply path and inject it
+    # into each turn's context and the daily briefing. OFF by default — it
+    # needs a location and makes an outbound call (to Open-Meteo, keyless).
+    enable_weather: bool = False
+    # The location to forecast for, as decimal degrees. Both must be set or
+    # weather is a no-op even when enabled (geocoding a place name is future work).
+    weather_latitude: float | None = None
+    weather_longitude: float | None = None
+    # A human label for the location shown in the block ("Oslo"). Display only —
+    # the coordinates above are what is actually fetched.
+    weather_location_name: str = ""
+    # "metric" (°C, km/h) or "imperial" (°F, mph).
+    weather_units: str = "metric"
+    # Minutes between background forecast refreshes (rides the reminder ticker).
+    # 0 disables both the refresh and the per-turn weather block.
+    weather_refresh_minutes: int = 60
+
+    # --- People / contacts (lightweight CRM) ---
+    # Master switch: keep a store of people the user knows (relationship,
+    # keep-in-touch cadence, last contact, birthday, notes), inject a compact
+    # roster into each turn, and expose the people tools. OFF by default: a new
+    # subsystem that changes the prompt; flip it on to use it.
+    enable_people: bool = False
+    # Cap on how many people are injected per turn (a token dial, like
+    # tasks_max_open). People needing attention (overdue contact, birthday soon)
+    # are listed first.
+    people_max_open: int = 20
+    # A birthday within this many days is flagged in the roster and the briefing.
+    people_birthday_lead_days: int = 7
+
     # --- Confirmation on writes (undo) ---
     # Master switch: log every calendar write to an undo ledger, let the user
     # revert the latest one by replying "undo", and push an out-of-band
@@ -579,6 +610,11 @@ class Settings(BaseSettings):
     def tasks_db_path(self) -> Path:
         """SQLite file holding the to-do list (tasks + their undo ledger)."""
         return self.memory_path / "tasks.db"
+
+    @property
+    def people_db_path(self) -> Path:
+        """SQLite file holding the people store (contacts + their undo ledger)."""
+        return self.memory_path / "people.db"
 
     @property
     def docs_db_path(self) -> Path:

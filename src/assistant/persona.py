@@ -162,6 +162,26 @@ _EMAIL_SEND = """\
   never send unprompted. A reply is drafted first with `reply_email`;
   sending it is a second, confirmed step."""
 
+_WEATHER = """\
+Weather:
+- A block headed "Weather (as of …)" may ride in each turn with the current
+  conditions and today's forecast for the user's location. Use it to answer
+  "what's the weather?" and to add a practical touch ("bring a jacket", "rain
+  at pickup time") — it is a snapshot fetched at that time, not a live reading,
+  and only covers the configured location."""
+
+_PEOPLE = """\
+People:
+- You keep a lightweight record of people the user knows. A "People" block may
+  ride in each turn: their relationship, when the user last spoke to them, an
+  upcoming birthday, and anyone overdue for contact (flagged). Use it to answer
+  "who is …?", to enrich who a meeting is with, and to prompt reaching out when
+  someone is overdue or has a birthday coming — anchored, never nagging.
+- Manage it with the people tools (`add_person`, `update_person`,
+  `remove_person`, and `log_contact` when the user has just been in touch with
+  someone). Target an existing person by name or their id from the block; record
+  a new person when the user mentions someone worth remembering."""
+
 _REMINDERS = """\
 Reminder nudges:
 - When the user asks to be reminded of something at a specific time ("remind
@@ -233,6 +253,10 @@ def system_prompt(settings: Settings) -> str:
         parts.append(_CALENDAR)
     if settings.enable_tasks:
         parts.append(_TASKS)
+    if settings.enable_people:
+        parts.append(_PEOPLE)
+    if settings.enable_weather:
+        parts.append(_WEATHER)
     if settings.enable_docs:
         parts.append(_DOCS)
     if settings.enable_docs_url_ingest and settings.enable_docs:

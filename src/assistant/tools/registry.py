@@ -12,6 +12,7 @@ from .email import _email_tools, _mail_mutated
 from .followups import _followup_tools
 from .goals import _goal_tools
 from .memory import _memory_tools
+from .people import _people_tools
 from .reminders import _reminder_tools
 from .tasks import _task_tools
 from .undo import _undo_tools
@@ -63,6 +64,8 @@ def available_tools(settings: Settings, mode: str = "chat") -> list[ToolSpec]:
         tools += _calendar_tools()
     if settings.enable_tasks:
         tools += _task_tools()
+    if settings.enable_people:
+        tools += _people_tools()
     if settings.enable_reminders:
         tools += _reminder_tools()
     if settings.enable_write_confirmation and (
@@ -104,6 +107,10 @@ def available_tools(settings: Settings, mode: str = "chat") -> list[ToolSpec]:
                 "send_email", "send_reply", "undo",
                 "ingest_attachment", "summarize_document",
                 "read_url", "ingest_url",
+                # People writes are chat-only: a background wake surfaces who is
+                # due (see heartbeat) and composes outreach, but does not mutate
+                # the CRM unattended.
+                "add_person", "update_person", "remove_person", "log_contact",
             )
         ]
         if settings.email_triage_max_actions > 0:

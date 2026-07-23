@@ -26,7 +26,7 @@ from fastapi import (
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from . import slack, telegram, webui
+from . import slack, telegram, weather, webui
 from .agent import build_agent
 from .briefing import run_briefing
 from .calendar import remote as calendar_remote
@@ -80,6 +80,9 @@ def _reminder_tick_once() -> None:
     # The unread-mail snapshot rides along too, on its own (slower)
     # cadence — a no-op tick when email is off or the snapshot is fresh.
     mail_snapshot.maybe_refresh(get_settings())
+    # The weather forecast refreshes on its own cadence the same way — a no-op
+    # tick when weather is off, unconfigured, or the snapshot is still fresh.
+    weather.maybe_refresh(get_settings())
 
 
 async def _reminder_tick_loop() -> None:

@@ -21,8 +21,13 @@ logger = logging.getLogger(__name__)
 
 
 class SupportsIdTitle(Protocol):
-    id: str
-    title: str
+    # Read-only members so a row may expose ``title`` as a property (people
+    # derive it from ``name``) as readily as a plain dataclass field (tasks,
+    # calendar) — a settable attribute satisfies a read-only protocol member.
+    @property
+    def id(self) -> str: ...
+    @property
+    def title(self) -> str: ...
 
 
 class WriteOpsSpec[RowT: SupportsIdTitle]:

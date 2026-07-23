@@ -11,6 +11,7 @@ from .core import (
     _schema_mark,
     connect,
 )
+from .people import ensure_people_schema
 from .tasks import ensure_tasks_schema
 
 # Separator joining a fired-ledger key tuple into the single TEXT key column.
@@ -126,6 +127,31 @@ def mark_task_writes_undone(settings: Settings, ids: list[int], undone_at: str) 
     ensure_tasks_schema(settings)
     with connect(settings) as conn:
         _executemany(conn, "UPDATE assistant_task_write_log SET undone_at = %s WHERE id = %s", [(undone_at, i) for i in ids])
+
+
+def record_person_write(settings: Settings, thread_id: str, batch_id: str, person_id: str, op: str, summary: str, before_json: str | None, applied_at: str) -> None:
+    if not thread_id:
+        return
+    ensure_people_schema(settings)
+    with connect(settings) as conn:
+        conn.execute(
+            "INSERT INTO assistant_person_write_log (thread_id, batch_id, person_id, op, summary, before_json, applied_at) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+            (thread_id, batch_id, person_id, op, summary, before_json, applied_at),
+        )
+
+
+def person_write_rows(settings: Settings, thread_id: str) -> list[dict]:
+    ensure_people_schema(settings)
+    with connect(settings) as conn:
+        return _rows(conn.execute("SELECT * FROM assistant_person_write_log WHERE thread_id = %s AND undone_at IS NULL ORDER BY id DESC", (thread_id,)))
+
+
+def mark_person_writes_undone(settings: Settings, ids: list[int], undone_at: str) -> None:
+    if not ids:
+        return
+    ensure_people_schema(settings)
+    with connect(settings) as conn:
+        _executemany(conn, "UPDATE assistant_person_write_log SET undone_at = %s WHERE id = %s", [(undone_at, i) for i in ids])
 
 
 def claim_calendar_reminders(settings: Settings, reminders: list[dict], fired_at: str, current) -> list[dict]:

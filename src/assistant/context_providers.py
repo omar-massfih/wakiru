@@ -90,6 +90,21 @@ def _mail(ctx: TurnContext) -> str:
     return current(ctx.settings)
 
 
+def _weather(ctx: TurnContext) -> str:
+    """The cached weather forecast — never an outbound fetch on the reply path."""
+    from .weather import current
+
+    return current(ctx.settings)
+
+
+def _people(ctx: TurnContext) -> str:
+    """The compact people roster, with anyone due for contact / a birthday soon
+    flagged first — so "who is this with?" and "reach out to X" both work."""
+    from .people import people_context
+
+    return people_context(ctx.settings)
+
+
 def _goals(ctx: TurnContext) -> str:
     """The standing goals the assistant carries — the same intentions the
     heartbeat advances, so a chat turn about one picks up its working state
@@ -126,9 +141,15 @@ def default_providers() -> list[ContextProvider]:
         ContextProvider("profile", lambda s: s.enable_profile, _profile),
         ContextProvider("agenda", lambda s: s.enable_calendar, _agenda),
         ContextProvider("tasks", lambda s: s.enable_tasks, _tasks),
+        ContextProvider("people", lambda s: s.enable_people, _people),
         ContextProvider("goals", lambda s: s.enable_heartbeat, _goals),
         ContextProvider(
             "mail", lambda s: s.enable_email and s.email_snapshot_minutes > 0, _mail
+        ),
+        ContextProvider(
+            "weather",
+            lambda s: s.enable_weather and s.weather_refresh_minutes > 0,
+            _weather,
         ),
     ]
 
