@@ -164,6 +164,14 @@ from .tasks import (
 )
 from .telegram import ensure_telegram_schema, pair_telegram_chat, paired_telegram_chats
 from .threads import ensure_threads_schema, known_threads, touch_thread
+from .trips import (
+    create_trip,
+    delete_trip,
+    ensure_trips_schema,
+    get_trip,
+    list_trips,
+    update_trip,
+)
 from .watches import (
     add_watch,
     cancel_watch,
@@ -200,6 +208,7 @@ __all__ = [
     "create_reading_item",
     "create_subscription",
     "create_task",
+    "create_trip",
     "delete_document",
     "delete_event",
     "delete_habit_entry",
@@ -209,6 +218,7 @@ __all__ = [
     "delete_reading_item",
     "delete_subscription",
     "delete_task",
+    "delete_trip",
     "docs_meta_get",
     "docs_meta_set",
     "enabled",
@@ -231,6 +241,7 @@ __all__ = [
     "ensure_tasks_schema",
     "ensure_telegram_schema",
     "ensure_threads_schema",
+    "ensure_trips_schema",
     "ensure_watches_schema",
     "find_by_href",
     "find_note",
@@ -243,6 +254,7 @@ __all__ = [
     "get_stats",
     "get_subscription",
     "get_task",
+    "get_trip",
     "graph_list_edges",
     "graph_neighbors",
     "graph_note_names",
@@ -265,6 +277,7 @@ __all__ = [
     "list_reading_items",
     "list_subscriptions",
     "list_tasks",
+    "list_trips",
     "log_habit_entry",
     "mail_audit_rows",
     "mark_calendar_writes_undone",
@@ -315,6 +328,7 @@ __all__ = [
     "update_reading_item",
     "update_subscription",
     "update_task",
+    "update_trip",
     "upsert_memory_index",
     "vector_literal",
     "virtual_note_path",

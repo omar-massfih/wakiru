@@ -907,6 +907,30 @@ def checklists(include_done: bool = False) -> dict:
     }
 
 
+@app.get("/trips", dependencies=[Depends(require_token)])
+def trips_list(include_past: bool = False) -> dict:
+    """Current and upcoming trips — finished ones with ``?include_past=true``."""
+    from .trips import store as trips_store
+
+    settings = get_settings()
+    trips = trips_store.list_trips(settings, include_past=include_past)
+    return {
+        "total": len(trips),
+        "trips": [
+            {
+                "id": t.id,
+                "name": t.name,
+                "destination": t.destination,
+                "start": t.start,
+                "end": t.end,
+                "timezone": t.timezone,
+                "notes": t.notes,
+            }
+            for t in trips
+        ],
+    }
+
+
 @app.get("/calendar", dependencies=[Depends(require_token)])
 def calendar() -> dict:
     """List upcoming events (within the configured horizon) and the current time."""

@@ -221,6 +221,14 @@ Reading list:
   one, `remove_reading` to drop it. It is not shown each turn — reach for
   `list_reading` when it's relevant."""
 
+_TRIPS = """\
+Trips:
+- The user's travel is tracked as trips (`add_trip` with destination and
+  dates; `list_trips`, `update_trip`, `remove_trip`). An imminent or
+  in-progress trip rides into context by itself — use it: flag what needs
+  doing before departure, mind the destination's local time, and reach for
+  `get_weather` on the destination when packing or planning comes up."""
+
 _LISTS = """\
 Lists:
 - The user keeps named checklists (shopping, errands, packing …) separate from
@@ -310,6 +318,8 @@ def system_prompt(settings: Settings) -> str:
         parts.append(_PEOPLE)
     if settings.enable_reading:
         parts.append(_READING)
+    if settings.enable_trips:
+        parts.append(_TRIPS)
     if settings.enable_lists:
         parts.append(_LISTS)
     if settings.enable_habits:

@@ -19,6 +19,7 @@ from .reading import _reading_tools
 from .reminders import _reminder_tools
 from .subscriptions import _subscription_tools
 from .tasks import _task_tools
+from .trips import _trip_tools
 from .undo import _undo_tools
 from .wake import _wake_tools
 from .watches import _chat_only_feed, _watch_tools
@@ -75,6 +76,8 @@ def available_tools(settings: Settings, mode: str = "chat") -> list[ToolSpec]:
         tools += _reading_tools()
     if settings.enable_lists:
         tools += _lists_tools()
+    if settings.enable_trips:
+        tools += _trip_tools()
     if settings.enable_habits:
         tools += _habit_tools()
     if settings.enable_subscriptions:
@@ -135,6 +138,9 @@ def available_tools(settings: Settings, mode: str = "chat") -> list[ToolSpec]:
                 # Checklist writes likewise: the user says what goes on a list;
                 # show_list stays readable for briefing enrichment.
                 "add_to_list", "check_off_item", "remove_from_list",
+                # Trip writes are chat-only; list_trips stays readable so a
+                # wake can reason about imminent travel.
+                "add_trip", "update_trip", "remove_trip",
                 # Subscription writes are chat-only; the heartbeat only fires
                 # renewal reminders, it does not edit what's tracked.
                 "add_subscription", "update_subscription", "remove_subscription",

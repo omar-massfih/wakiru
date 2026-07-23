@@ -387,6 +387,15 @@ class Settings(BaseSettings):
     # Cap on how many unread items list_reading returns per call.
     reading_max_open: int = 50
 
+    # --- Trips (travel awareness) ---
+    # Master switch: track trips (destination + dates) and expose the trip
+    # tools. Off by default. Unlike the other tool-only domains, an imminent
+    # or in-progress trip *is* injected each turn (a `trip` context provider)
+    # — silent the rest of the year.
+    enable_trips: bool = False
+    # How many days before departure the upcoming trip enters context.
+    trips_context_days: int = 14
+
     # --- Named checklists (shopping / errands / packing) ---
     # Master switch: keep named checklists distinct from dated tasks and expose
     # the list tools (add / show / check off / remove). Off by default.
@@ -661,6 +670,11 @@ class Settings(BaseSettings):
     def reading_db_path(self) -> Path:
         """SQLite file holding the read-it-later list."""
         return self.memory_path / "reading.db"
+
+    @property
+    def trips_db_path(self) -> Path:
+        """SQLite file holding the trips store."""
+        return self.memory_path / "trips.db"
 
     @property
     def lists_db_path(self) -> Path:

@@ -97,6 +97,13 @@ def _weather(ctx: TurnContext) -> str:
     return current(ctx.settings)
 
 
+def _trip(ctx: TurnContext) -> str:
+    """The active or imminent trip — empty (and free) between travels."""
+    from .trips import trips_context
+
+    return trips_context(ctx.settings)
+
+
 def _people(ctx: TurnContext) -> str:
     """The compact people roster, with anyone due for contact / a birthday soon
     flagged first — so "who is this with?" and "reach out to X" both work."""
@@ -141,6 +148,7 @@ def default_providers() -> list[ContextProvider]:
         ContextProvider("profile", lambda s: s.enable_profile, _profile),
         ContextProvider("agenda", lambda s: s.enable_calendar, _agenda),
         ContextProvider("tasks", lambda s: s.enable_tasks, _tasks),
+        ContextProvider("trip", lambda s: s.enable_trips, _trip),
         ContextProvider("people", lambda s: s.enable_people, _people),
         ContextProvider("goals", lambda s: s.enable_heartbeat, _goals),
         ContextProvider(
