@@ -200,7 +200,14 @@ By default each configured lead fires once. Set `REMINDER_REPEAT_MINUTES` (e.g. 
 to instead re-nudge on that cadence from the outermost lead onward, until the event
 starts — so an event no longer goes quiet after the first "in 1 hour". Dated tasks
 also keep nagging *past* their due time ("Still open: … — was due 30 min ago.")
-until you mark them done, bounded by `REMINDER_OVERDUE_MAX_MINUTES` (default 24h).
+until you mark them done, bounded by `REMINDER_OVERDUE_MAX_MINUTES` (default 24h)
+*and* `REMINDER_OVERDUE_MAX_NUDGES` (default 4), whichever is hit first, so a
+forgotten task can't chase you dozens of times. A purely informational one-time
+reminder ("remind me the session resets at 14:50") is instead recorded as a
+*notify-only* task: it fires once at its time and never nags overdue. And each
+heartbeat wake is shown what the reminder ticker already pushed
+(`HEARTBEAT_DEDUP_PUSH_HOURS`, default 6) so it doesn't re-send the same nudge in
+different words.
 
 Delivery fans out to every configured channel: the webhook (any endpoint that accepts
 a plain POST — ntfy, a Discord/Slack webhook, … — the message is the body, the event
