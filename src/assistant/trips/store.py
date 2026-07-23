@@ -113,6 +113,12 @@ def _stamp_now(settings: Settings) -> str:
     return datetime.now(resolve_tz(settings)).isoformat(timespec="seconds")
 
 
+def _today(settings: Settings) -> date:
+    from ..calendar.context import resolve_tz
+
+    return datetime.now(resolve_tz(settings)).date()
+
+
 def create_trip(
     settings: Settings,
     destination: str,
@@ -167,11 +173,10 @@ def list_trips(settings: Settings, include_past: bool = False, today: date | Non
         with _connect(settings) as conn:
             rows = conn.execute("SELECT * FROM trips").fetchall()
         trips = [_row_to_trip(r) for r in rows]
-    if today is None:
-        today = parse_date(_stamp_now(settings))
+    cutoff = today if today is not None else _today(settings)
     def is_past(trip: Trip) -> bool:
         ended = parse_date(trip.end)
-        return ended is not None and ended < today
+        return ended is not None and ended < cutoff
     current = sorted(
         (t for t in trips if not is_past(t)), key=lambda t: (t.start or "9999", t.created)
     )
@@ -251,7 +256,7 @@ def find_trip(settings: Settings, query: str) -> Trip | None:
 def active_trip(settings: Settings, today: date | None = None) -> Trip | None:
     """The trip whose inclusive date range contains ``today``, if any."""
     if today is None:
-        today = parse_date(_stamp_now(settings))
+        today = _today(settings)
     for trip in list_trips(settings, today=today):
         started, ends = parse_date(trip.start), parse_date(trip.end)
         if started is not None and ends is not None and started <= today <= ends:
@@ -262,7 +267,7 @@ def active_trip(settings: Settings, today: date | None = None) -> Trip | None:
 def next_trip(settings: Settings, today: date | None = None) -> Trip | None:
     """The soonest trip that has not started yet, if any."""
     if today is None:
-        today = parse_date(_stamp_now(settings))
+        today = _today(settings)
     for trip in list_trips(settings, today=today):
         started = parse_date(trip.start)
         if started is not None and started > today:

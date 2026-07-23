@@ -31,9 +31,12 @@ def trips_context(settings: Settings) -> str:
     today = current.date()
     active = store.active_trip(settings, today)
     if active is not None:
+        started = store.parse_date(active.start)
         ends = store.parse_date(active.end)
-        day = (today - store.parse_date(active.start)).days + 1
-        total = (ends - store.parse_date(active.start)).days + 1
+        if started is None or ends is None:  # unreachable: active implies both
+            return ""
+        day = (today - started).days + 1
+        total = (ends - started).days + 1
         lines = [
             "## Trip in progress",
             f"{active.name} — in {active.destination} until {active.end} "
@@ -51,6 +54,8 @@ def trips_context(settings: Settings) -> str:
     if upcoming is None:
         return ""
     departs = store.parse_date(upcoming.start)
+    if departs is None:  # unreachable: next_trip implies a parseable start
+        return ""
     days_out = (departs - today).days
     if days_out > max(settings.trips_context_days, 0):
         return ""
