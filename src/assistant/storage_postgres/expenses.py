@@ -76,6 +76,66 @@ def log_expense_entry(
     return entry
 
 
+def ensure_budget_schema(settings: Settings) -> None:
+    if _schema_done(settings, "expense_budgets"):
+        return
+    with connect(settings) as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS assistant_expense_budgets (
+              category TEXT PRIMARY KEY,
+              amount DOUBLE PRECISION NOT NULL,
+              currency TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+    _schema_mark(settings, "expense_budgets")
+
+
+def set_expense_budget(settings: Settings, budget):
+    ensure_budget_schema(settings)
+    with connect(settings) as conn:
+        conn.execute(
+            "INSERT INTO assistant_expense_budgets (category, amount, currency)"
+            " VALUES (%s, %s, %s)"
+            " ON CONFLICT (category) DO UPDATE SET amount = EXCLUDED.amount,"
+            " currency = EXCLUDED.currency",
+            (budget.category, budget.amount, budget.currency),
+        )
+    return budget
+
+
+def list_expense_budgets(settings: Settings):
+    from ..expenses.store import Budget
+
+    ensure_budget_schema(settings)
+    with connect(settings) as conn:
+        rows = _rows(
+            conn.execute("SELECT category, amount, currency FROM assistant_expense_budgets")
+        )
+    return [
+        Budget(
+            category=str(row.get("category") or ""),
+            amount=float(row.get("amount") or 0.0),
+            currency=str(row.get("currency") or ""),
+        )
+        for row in rows
+    ]
+
+
+def remove_expense_budget(settings: Settings, category: str):
+    existing = next(
+        (b for b in list_expense_budgets(settings) if b.category == category), None
+    )
+    if existing is None:
+        return None
+    with connect(settings) as conn:
+        conn.execute(
+            "DELETE FROM assistant_expense_budgets WHERE category = %s", (category,)
+        )
+    return existing
+
+
 def get_expense_entry(settings: Settings, entry_id: str):
     ensure_expenses_schema(settings)
     with connect(settings) as conn:

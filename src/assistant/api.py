@@ -854,6 +854,10 @@ def expenses_list(month: str = "", category: str = "") -> dict:
     return {
         "categories": expense_store.category_names(settings),
         "totals": expense_context.totals_by_currency(entries),
+        "budgets": [
+            {"category": b.category, "amount": b.amount, "currency": b.currency}
+            for b in expense_store.list_budgets(settings)
+        ],
         "total": len(entries),
         "entries": [
             {

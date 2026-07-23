@@ -43,10 +43,14 @@ from .docs import (
 )
 from .expenses import (
     delete_expense_entry,
+    ensure_budget_schema,
     ensure_expenses_schema,
     get_expense_entry,
+    list_expense_budgets,
     list_expense_entries,
     log_expense_entry,
+    remove_expense_budget,
+    set_expense_budget,
 )
 from .followups import (
     add_followup,
@@ -239,6 +243,7 @@ __all__ = [
     "docs_meta_get",
     "docs_meta_set",
     "enabled",
+    "ensure_budget_schema",
     "ensure_calendar_schema",
     "ensure_docs_schema",
     "ensure_expenses_schema",
@@ -289,6 +294,7 @@ __all__ = [
     "list_active_watches",
     "list_documents",
     "list_events",
+    "list_expense_budgets",
     "list_expense_entries",
     "list_habit_entries",
     "list_list_items",
@@ -331,6 +337,7 @@ __all__ = [
     "reindex_documents",
     "reindex_graph",
     "reindex_memory",
+    "remove_expense_budget",
     "remove_graph_note",
     "remove_memory_index",
     "require_url",
@@ -340,6 +347,7 @@ __all__ = [
     "search_chunks",
     "search_memory_index",
     "set_caldav_meta",
+    "set_expense_budget",
     "set_list_item_done",
     "set_mute",
     "set_salience",

@@ -8,7 +8,7 @@ from datetime import date, timedelta
 
 from ..config import Settings
 from . import store
-from .store import ExpenseEntry
+from .store import Budget, ExpenseEntry
 
 
 def _num(value: float) -> str:
@@ -49,12 +49,44 @@ def _render_totals(totals: dict[str, float]) -> str:
     )
 
 
+def _budget_spent(budget: Budget, entries: list[ExpenseEntry]) -> float:
+    """The spend that counts against a budget: its category (all when the
+    budget is overall), in its currency (all currencies when unset)."""
+    return sum(
+        e.amount
+        for e in entries
+        if (not budget.category or e.category == budget.category)
+        and (not budget.currency or (e.currency or "") == budget.currency)
+    )
+
+
+def budget_lines(settings: Settings, month: str) -> list[str]:
+    """One "spent X of Y" line per budget for a month; empty without budgets."""
+    budgets = store.list_budgets(settings)
+    if not budgets:
+        return []
+    entries = store.list_entries(settings, month=month)
+    lines = []
+    for b in budgets:
+        spent = _budget_spent(b, entries)
+        cur = f" {b.currency}" if b.currency else ""
+        pct = round(spent / b.amount * 100) if b.amount else 0
+        line = f"{b.category or 'overall'}: {_num(spent)} of {_num(b.amount)}{cur} ({pct}%)"
+        if spent > b.amount:
+            line += f" — over by {_num(spent - b.amount)}{cur}"
+        lines.append(line)
+    return lines
+
+
 def month_summary(settings: Settings, month: str, today: date) -> str:
     """A detailed rollup for one month: totals, categories, recent entries with
     ids (so the model can correct a mis-log). ``month`` is ``YYYY-MM``."""
     entries = store.list_entries(settings, month=month)
     if not entries:
-        return f"No expenses logged for {month}."
+        text = f"No expenses logged for {month}."
+        if budgets := budget_lines(settings, month):
+            text += "\n  budgets:\n" + "\n".join(f"    - {line}" for line in budgets)
+        return text
     label = "month to date" if month == today.isoformat()[:7] else "full month"
     lines = [f"Expenses for {month} ({label}):"]
     lines.append(f"  total: {_render_totals(totals_by_currency(entries))}"
@@ -62,6 +94,9 @@ def month_summary(settings: Settings, month: str, today: date) -> str:
     lines.append("  by category:")
     for cat, per_cur in totals_by_category(entries).items():
         lines.append(f"    - {cat}: {_render_totals(per_cur)}")
+    if budgets := budget_lines(settings, month):
+        lines.append("  budgets:")
+        lines.extend(f"    - {line}" for line in budgets)
     lines.append("  recent:")
     for e in entries[:8]:
         cat = f" {e.category}" if e.category else ""
@@ -86,4 +121,7 @@ def briefing_expenses(settings: Settings, today: date) -> str:
     top = list(totals_by_category(entries).items())[:5]
     for cat, per_cur in top:
         lines.append(f"- {cat}: {_render_totals(per_cur)}")
+    if budgets := budget_lines(settings, last_month):
+        lines.append("Against budgets:")
+        lines.extend(f"- {line}" for line in budgets)
     return "\n".join(lines)

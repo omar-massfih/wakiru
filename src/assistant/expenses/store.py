@@ -7,6 +7,9 @@ and the ``spent_on`` date. Like the habits log this is an append log, not a
 mutable record set; the read path (:mod:`.context`) rolls a month up by
 currency and category over it.
 
+Alongside it lives ``expense_budgets`` — at most one monthly cap per category
+(empty category = the overall budget) that the rollups compare spend against.
+
 A fresh connection is opened per operation with WAL + a busy timeout, so the
 store is safe from FastAPI request handlers and background tasks alike.
 """
@@ -41,6 +44,29 @@ class ExpenseEntry:
     note: str = ""
     spent_on: str = ""
     created: str = ""
+
+
+@dataclass
+class Budget:
+    """A monthly spending cap.
+
+    ``category`` is normalized lower-case; empty means the overall budget
+    across all categories. ``currency`` scopes which entries count toward it —
+    empty counts every currency together.
+    """
+
+    category: str
+    amount: float
+    currency: str = ""
+
+
+_OVERALL_ALIASES = frozenset({"total", "overall", "all", "everything"})
+
+
+def normalize_budget_category(value: str) -> str:
+    """Lower-cased category name; overall-budget aliases collapse to ""."""
+    value = (value or "").strip().lower()
+    return "" if value in _OVERALL_ALIASES else value
 
 
 def parse_date(value: str) -> date | None:
@@ -89,6 +115,10 @@ def _open(settings: Settings) -> sqlite3.Connection:
         " id TEXT PRIMARY KEY, amount REAL NOT NULL,"
         " currency TEXT DEFAULT '', category TEXT DEFAULT '',"
         " note TEXT DEFAULT '', spent_on TEXT DEFAULT '', created TEXT DEFAULT '')"
+    )
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS expense_budgets ("
+        " category TEXT PRIMARY KEY, amount REAL NOT NULL, currency TEXT DEFAULT '')"
     )
     return conn
 
@@ -182,6 +212,62 @@ def delete_entry(settings: Settings, entry_id: str) -> ExpenseEntry | None:
         return None
     with _connect(settings) as conn:
         conn.execute("DELETE FROM expense_log WHERE id = ?", (entry_id,))
+    return existing
+
+
+def set_budget(
+    settings: Settings, category: str, amount: object, currency: str = ""
+) -> Budget | None:
+    """Upsert the monthly budget for a category (empty = overall); ``None``
+    when the amount isn't positive."""
+    value = _coerce_amount(amount)
+    if value <= 0:
+        return None
+    budget = Budget(
+        category=normalize_budget_category(category),
+        amount=value,
+        currency=currency.strip(),
+    )
+    if storage_postgres := postgres_backend(settings):
+        return storage_postgres.set_expense_budget(settings, budget)
+    with _connect(settings) as conn:
+        conn.execute(
+            "INSERT INTO expense_budgets (category, amount, currency) VALUES (?, ?, ?)"
+            " ON CONFLICT(category) DO UPDATE SET amount = excluded.amount,"
+            " currency = excluded.currency",
+            (budget.category, budget.amount, budget.currency),
+        )
+    return budget
+
+
+def list_budgets(settings: Settings) -> list[Budget]:
+    """All budgets, the overall one first, then alphabetically by category."""
+    if storage_postgres := postgres_backend(settings):
+        budgets = storage_postgres.list_expense_budgets(settings)
+    else:
+        with _connect(settings) as conn:
+            rows = conn.execute("SELECT * FROM expense_budgets").fetchall()
+        budgets = [
+            Budget(
+                category=row["category"] or "",
+                amount=float(row["amount"] or 0.0),
+                currency=row["currency"] or "",
+            )
+            for row in rows
+        ]
+    return sorted(budgets, key=lambda b: (b.category != "", b.category))
+
+
+def remove_budget(settings: Settings, category: str) -> Budget | None:
+    """Delete the budget for a category (empty = overall); return it if set."""
+    name = normalize_budget_category(category)
+    if storage_postgres := postgres_backend(settings):
+        return storage_postgres.remove_expense_budget(settings, name)
+    existing = next((b for b in list_budgets(settings) if b.category == name), None)
+    if existing is None:
+        return None
+    with _connect(settings) as conn:
+        conn.execute("DELETE FROM expense_budgets WHERE category = ?", (name,))
     return existing
 
 

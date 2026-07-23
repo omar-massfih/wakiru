@@ -149,9 +149,10 @@ def _habits_section(settings: Settings, today) -> str:
 
 
 def _expenses_section(settings: Settings, today) -> str:
-    """Last seven days of spending, totalled per currency with top categories."""
+    """Last seven days of spending, totalled per currency with top categories,
+    plus month-to-date standing against any budgets."""
     from .expenses import store as expenses_store
-    from .expenses.context import _num, totals_by_category, totals_by_currency
+    from .expenses.context import _num, budget_lines, totals_by_category, totals_by_currency
 
     week_ago = today - timedelta(days=7)
     months = {today.isoformat()[:7], week_ago.isoformat()[:7]}
@@ -161,18 +162,27 @@ def _expenses_section(settings: Settings, today) -> str:
         for e in expenses_store.list_entries(settings, month=month)
         if week_ago.isoformat() <= e.spent_on <= today.isoformat()
     ]
-    if not entries:
+    budgets = budget_lines(settings, today.isoformat()[:7])
+    if not entries and not budgets:
         return ""
     by_category = totals_by_category(entries)
     lines = []
     for currency, total in sorted(totals_by_currency(entries).items()):
         top = sorted(
-            by_category.get(currency, {}).items(), key=lambda kv: -kv[1]
+            (
+                (cat, per_cur[currency])
+                for cat, per_cur in by_category.items()
+                if currency in per_cur
+            ),
+            key=lambda kv: -kv[1],
         )[:3]
         detail = ", ".join(f"{cat} {_num(amount)}" for cat, amount in top)
         lines.append(
             f"- {_num(total)} {currency}" + (f" (top: {detail})" if detail else "")
         )
+    if budgets:
+        lines.append("Budgets (month to date):")
+        lines.extend(f"- {line}" for line in budgets)
     return "## Spending last 7 days\n" + "\n".join(lines)
 
 

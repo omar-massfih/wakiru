@@ -152,6 +152,7 @@ def test_expenses_and_subscriptions_ride_in(settings, delivered, monkeypatch) ->
         settings, amount=999, currency="kr", category="food",
         on=(today - timedelta(days=20)).isoformat(),
     )
+    expenses_store.set_budget(settings, "food", "2000", currency="kr")
     subs_store.create_subscription(
         settings, name="Spotify", amount=129, currency="kr", cadence="monthly",
         renews_on=(today + timedelta(days=3)).isoformat(),
@@ -159,8 +160,10 @@ def test_expenses_and_subscriptions_ride_in(settings, delivered, monkeypatch) ->
     assert weekly_review.run_weekly_review(settings)["sent"]
     message = delivered[0]["message"]
     assert "Spending last 7 days" in message
-    assert "250 kr" in message
+    assert "250 kr" in message and "top: food 250" in message
     assert "999" not in message
+    assert "Budgets (month to date):" in message
+    assert "food: 250 of 2000 kr (12%)" in message
     assert "Renewals this week" in message
     assert "Spotify" in message
 

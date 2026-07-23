@@ -154,8 +154,9 @@ def available_tools(settings: Settings, mode: str = "chat") -> list[ToolSpec]:
                 # background wake has nothing to record on their behalf.
                 "log_habit", "remove_habit_entry",
                 # Expense writes likewise — only the user knows what they
-                # spent; expense_summary stays readable for rollup questions.
-                "log_expense", "remove_expense",
+                # spent or wants to cap; expense_summary stays readable for
+                # rollup and budget questions.
+                "log_expense", "remove_expense", "set_budget", "remove_budget",
                 # Work-log writes too — only the user starts, stops, or logs
                 # their time; work_summary stays readable for rollups.
                 "start_work", "stop_work", "log_work", "remove_work_entry",

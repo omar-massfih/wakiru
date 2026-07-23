@@ -6,7 +6,9 @@ expense tools (:mod:`assistant.tools`), which log entries and roll a month up
 by currency and category (:mod:`.context`). The complement of
 :mod:`assistant.subscriptions`: that tracks what *recurs*, this records what
 was *spent* — "250 kr on groceries" — and the briefing opens each month with
-last month's rollup.
+last month's rollup. Monthly budgets (per category, or one overall) live in
+the same store; every rollup — expense_summary, the weekly review, the
+start-of-month briefing — reports spend against them.
 """
 
 from __future__ import annotations

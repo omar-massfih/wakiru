@@ -45,6 +45,34 @@ def _remove_expense(ctx: ToolContext, **args: object) -> str:
     return f"Removed the {num}{cur} expense from {removed.spent_on}."
 
 
+def _set_budget(ctx: ToolContext, **args: object) -> str:
+    from ..expenses import store
+
+    budget = store.set_budget(
+        ctx.settings,
+        category=str(args.get("category", "") or ""),
+        amount=args.get("amount", 0),
+        currency=str(args.get("currency", "") or ""),
+    )
+    if budget is None:
+        return "Tool failed: a positive amount is required."
+    cur = f" {budget.currency}" if budget.currency else ""
+    num = int(budget.amount) if budget.amount == int(budget.amount) else round(budget.amount, 2)
+    label = budget.category or "overall spending"
+    return f"Budget set: {label} — {num}{cur} per month."
+
+
+def _remove_budget(ctx: ToolContext, **args: object) -> str:
+    from ..expenses import store
+
+    category = str(args.get("category", "") or "")
+    removed = store.remove_budget(ctx.settings, category)
+    if removed is None:
+        label = store.normalize_budget_category(category) or "overall"
+        return f"No {label} budget is set."
+    return f"Removed the {removed.category or 'overall'} budget."
+
+
 def _expense_tools() -> list[ToolSpec]:
     return [
         ToolSpec(
@@ -68,8 +96,9 @@ def _expense_tools() -> list[ToolSpec]:
         ToolSpec(
             "expense_summary",
             "Roll up the user's logged expenses for a month — total per "
-            "currency, breakdown by category, and recent entries with ids. "
-            "Defaults to the current month; pass YYYY-MM for another.",
+            "currency, breakdown by category, spend against any budgets, and "
+            "recent entries with ids. Defaults to the current month; pass "
+            "YYYY-MM for another.",
             _params({"month": ("string", "The month as YYYY-MM; omit for this month")}, []),
             _expense_summary,
         ),
@@ -79,5 +108,27 @@ def _expense_tools() -> list[ToolSpec]:
             "for correcting a mistaken log.",
             _params({"id": ("string", "Exact entry id")}, ["id"]),
             _remove_expense,
+        ),
+        ToolSpec(
+            "set_budget",
+            "Set (or update) a monthly spending budget — \"keep groceries "
+            "under 3000 kr\". Leave the category empty for an overall monthly "
+            "budget; expense_summary then reports spend against it.",
+            _params(
+                {
+                    "amount": ("string", "The monthly cap, e.g. \"3000\""),
+                    "category": ("string", "The category to cap, e.g. \"groceries\"; omit for overall"),
+                    "currency": ("string", "The currency, e.g. \"kr\"; omit to count all currencies"),
+                },
+                ["amount"],
+            ),
+            _set_budget,
+        ),
+        ToolSpec(
+            "remove_budget",
+            "Drop a monthly spending budget by its category (omit for the "
+            "overall budget).",
+            _params({"category": ("string", "The budgeted category; omit for overall")}, []),
+            _remove_budget,
         ),
     ]
