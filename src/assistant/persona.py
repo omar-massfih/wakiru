@@ -223,6 +223,17 @@ Expenses:
   subscriptions (recurring charges): this is where the money actually went. The
   monthly briefing opens with last month's rollup on the 1st."""
 
+_WORKLOG = """\
+Work log (time tracking):
+- The user can track working time per project. When they say they are starting
+  on something ("back to the report"), `start_work` starts the clock — it stops
+  any running timer first, so switching is one call; `stop_work` when they are
+  done or stepping away. `log_work` records time after the fact ("2 hours on
+  client X yesterday" — convert to minutes). `work_summary` rolls today and the
+  last N days up per project ("how much did I work this week?");
+  `remove_work_entry` fixes a mistake. While a timer runs you see a Work timer
+  block — offer to stop it when they sound finished."""
+
 _READING = """\
 Reading list:
 - The user keeps a read-it-later list of links. Save one with `save_reading`
@@ -338,6 +349,8 @@ def system_prompt(settings: Settings) -> str:
         parts.append(_SUBSCRIPTIONS)
     if settings.enable_expenses:
         parts.append(_EXPENSES)
+    if settings.enable_worklog:
+        parts.append(_WORKLOG)
     if settings.enable_weather:
         parts.append(_WEATHER)
     if settings.enable_docs:

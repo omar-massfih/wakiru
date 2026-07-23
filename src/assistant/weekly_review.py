@@ -131,6 +131,13 @@ def _subscriptions_section(settings: Settings, today) -> str:
     return "## Renewals this week\n" + lines
 
 
+def _worklog_section(settings: Settings, today) -> str:
+    """Last week's working time per project — empty when nothing was logged."""
+    from .worklog.context import weekly_section
+
+    return weekly_section(settings, today)
+
+
 def _habits_section(settings: Settings, today) -> str:
     """The habit overview (streaks ride along), only when something is tracked."""
     from .habits import store as habits_store
@@ -192,6 +199,7 @@ def build_weekly_review(settings: Settings) -> str:
         (settings.enable_trips, lambda: [_trips_section(settings, today)]),
         (settings.enable_people, lambda: [_people_section(settings)]),
         (settings.enable_subscriptions, lambda: [_subscriptions_section(settings, today)]),
+        (settings.enable_worklog, lambda: [_worklog_section(settings, today)]),
         (settings.enable_habits, lambda: [_habits_section(settings, today)]),
         (settings.enable_expenses, lambda: [_expenses_section(settings, today)]),
     ):
@@ -250,8 +258,8 @@ def run_weekly_review(
         instruction=(
             "Compose the user's weekly review from the sections below — a "
             "short reflective message in your own voice, plain text, in the "
-            "user's language. Celebrate what got done, note streaks and "
-            "spending briefly, then set up the week ahead: the busiest days, "
+            "user's language. Celebrate what got done, note streaks, time "
+            "worked, and spending briefly, then set up the week ahead: the busiest days, "
             "what is due, anything renewing or upcoming. If the week looks "
             "quiet, say so. Reply with the review only."
         ),

@@ -893,6 +893,37 @@ def habits_list(habit: str = "") -> dict:
     }
 
 
+@app.get("/worklog", dependencies=[Depends(require_token)])
+def worklog_list(project: str = "") -> dict:
+    """Work-log overview, or a single project's entries with ``?project=<name>``."""
+    from .worklog import store as worklog_store
+
+    settings = get_settings()
+    entries = worklog_store.list_entries(settings, project)
+    running = worklog_store.running_entry(settings)
+    return {
+        "projects": worklog_store.project_names(settings),
+        "running": (
+            {"id": running.id, "project": running.project, "started": running.started}
+            if running
+            else None
+        ),
+        "total": len(entries),
+        "entries": [
+            {
+                "id": e.id,
+                "project": e.project,
+                "minutes": e.minutes,
+                "note": e.note,
+                "worked_on": e.worked_on,
+                "started": e.started,
+                "ended": e.ended,
+            }
+            for e in entries
+        ],
+    }
+
+
 @app.get("/reading", dependencies=[Depends(require_token)])
 def reading_list(include_read: bool = False) -> dict:
     """List the read-it-later items — unread by default, or all with ``?include_read=true``."""

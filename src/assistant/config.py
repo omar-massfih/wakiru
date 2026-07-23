@@ -416,6 +416,14 @@ class Settings(BaseSettings):
     # default. Tool-only — not injected into every turn.
     enable_expenses: bool = False
 
+    # --- Work log / time tracking ---
+    # Master switch: track working time per project — a start/stop timer plus
+    # after-the-fact logs — and expose the worklog tools (start/stop/log +
+    # per-project rollups). While a timer runs, a small context block rides in
+    # each turn; the weekly review carries last week's hours per project. Off
+    # by default.
+    enable_worklog: bool = False
+
     # --- Subscriptions / bills ---
     # Master switch: track recurring charges (amount, cadence, renewal date),
     # expose the subscription tools, and fire a renewal reminder before each
@@ -708,6 +716,11 @@ class Settings(BaseSettings):
     def expenses_db_path(self) -> Path:
         """SQLite file holding the expense log."""
         return self.memory_path / "expenses.db"
+
+    @property
+    def worklog_db_path(self) -> Path:
+        """SQLite file holding the work log (time tracking)."""
+        return self.memory_path / "worklog.db"
 
     @property
     def subscriptions_db_path(self) -> Path:

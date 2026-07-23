@@ -390,6 +390,15 @@ completes (the CLI does not expose token deltas, so granularity is per message).
   on the 1st the daily briefing opens with last month's rollup. The complement
   of subscriptions: that's what recurs, this is where the money actually went.
   `GET /expenses` inspects the log.
+- **Work log / time tracking** — with `ENABLE_WORKLOG=true`, track working time
+  per project: `start_work` starts the clock ("back to the report" — a running
+  timer is stopped and logged first, so switching is one call), `stop_work`
+  logs the stretch, `log_work` records time after the fact ("2 hours on client
+  X yesterday"), and `work_summary` rolls today and the last N days up per
+  project. While the clock runs a small Work-timer block rides in each turn,
+  and the weekly review carries last week's hours per project. The work twin of
+  the expense log: that's where the money went, this is where the time went.
+  `GET /worklog` inspects the log.
 - **Reading list (read-it-later)** — with `ENABLE_READING=true`, a place to
   save links to get back to: "save this for later" stores it, "what's on my
   reading list?" lists the unread ones, and the assistant can mark them read or

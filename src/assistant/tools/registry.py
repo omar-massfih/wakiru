@@ -25,6 +25,7 @@ from .undo import _undo_tools
 from .wake import _wake_tools
 from .watches import _chat_only_feed, _watch_tools
 from .weather import _weather_tools
+from .worklog import _worklog_tools
 
 _MAIL_MUTATING = frozenset(
     {"reply_email", "archive_email", "mark_email_read", "label_email"}
@@ -85,6 +86,8 @@ def available_tools(settings: Settings, mode: str = "chat") -> list[ToolSpec]:
         tools += _subscription_tools()
     if settings.enable_expenses:
         tools += _expense_tools()
+    if settings.enable_worklog:
+        tools += _worklog_tools()
     if settings.enable_weather:
         tools += _weather_tools()
     if settings.enable_reminders:
@@ -153,6 +156,9 @@ def available_tools(settings: Settings, mode: str = "chat") -> list[ToolSpec]:
                 # Expense writes likewise — only the user knows what they
                 # spent; expense_summary stays readable for rollup questions.
                 "log_expense", "remove_expense",
+                # Work-log writes too — only the user starts, stops, or logs
+                # their time; work_summary stays readable for rollups.
+                "start_work", "stop_work", "log_work", "remove_work_entry",
             )
         ]
         tools = [
