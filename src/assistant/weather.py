@@ -48,6 +48,10 @@ _FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 _GEOCODE_URL = "https://geocoding-api.open-meteo.com/v1/search"
 _FETCH_TIMEOUT = 10.0
 
+# WMO codes worth a proactive heads-up: heavy rain, freezing rain, heavy snow,
+# violent showers, heavy snow showers, and thunderstorms.
+_SEVERE_CODES = {65, 66, 67, 75, 82, 85, 86, 95, 96, 99}
+
 # WMO weather-interpretation codes → short prose (Open-Meteo's `weather_code`).
 # Ranges collapsed to the phrase a person would actually say.
 _WMO = {
@@ -313,6 +317,13 @@ def _render(settings: Settings, data: dict) -> str:
         if pop is not None:
             day_line += f", {pop}% chance of precipitation"
         lines.append(day_line)
+
+    # A prominent heads-up for severe conditions, inserted right after the
+    # location label so it leads the block (and rides into the briefing).
+    day_code = _first("weather_code")
+    if isinstance(day_code, (int, float)) and int(day_code) in _SEVERE_CODES:
+        alert = f"⚠ {_describe_code(day_code).capitalize()} expected today."
+        lines.insert(1 if label else 0, alert)
 
     return "\n".join(lines)
 

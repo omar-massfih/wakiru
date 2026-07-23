@@ -59,6 +59,22 @@ def test_render_covers_now_and_today(settings) -> None:
     assert "60% chance of precipitation" in text
 
 
+def test_severe_conditions_get_a_heads_up(settings) -> None:
+    severe = {
+        "current": _PAYLOAD["current"],
+        "daily": {
+            "temperature_2m_max": [-2.0],
+            "temperature_2m_min": [-8.0],
+            "precipitation_probability_max": [90],
+            "weather_code": [75],  # heavy snow
+        },
+    }
+    text = weather._render(settings, severe)
+    assert "⚠" in text and "snow" in text.lower()
+    # A benign day carries no alert.
+    assert "⚠" not in weather._render(settings, _PAYLOAD)  # code 3 = overcast
+
+
 def test_imperial_units(settings) -> None:
     settings = settings.model_copy(update={"weather_units": "imperial"})
     text = weather._render(settings, _PAYLOAD)
