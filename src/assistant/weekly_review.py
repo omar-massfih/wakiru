@@ -193,6 +193,53 @@ def _people_section(settings: Settings) -> str:
     return briefing_people(settings)
 
 
+def _goals_section(settings: Settings) -> str:
+    """The standing goals carried into next week — title, next step, and a
+    clipped working state, so the review surveys the background projects too."""
+    from . import goals
+    from .calendar.context import format_when
+
+    open_items = goals.list_open(settings)
+    if not open_items:
+        return ""
+    lines = ["## Standing goals"]
+    for goal in open_items:
+        when = (
+            f" — next step {format_when(settings, goal.next_action_at)}"
+            if goal.next_action_at
+            else " — parked"
+        )
+        lines.append(f"- {goal.title}{when}")
+        if goal.state:
+            state = goal.state.replace("\n", " ")
+            if len(state) > 160:
+                state = state[:157].rstrip() + "…"
+            lines.append(f"  {state}")
+    return "\n".join(lines)
+
+
+def _reading_section(settings: Settings, current) -> str:
+    """The read-it-later backlog — how it moved last week, and the oldest
+    saves resurfaced, so a quiet list doesn't silently become a graveyard."""
+    from .reading import store as reading_store
+
+    items = reading_store.list_items(settings, include_read=True)
+    if not items:
+        return ""
+    unread = [i for i in items if not i.read]
+    week_ago = (current - timedelta(days=7)).isoformat(timespec="seconds")
+    finished = sum(1 for i in items if i.read and i.read_at >= week_ago)
+    lines = ["## Reading list"]
+    if finished:
+        lines.append(f"Read last week: {finished}.")
+    if unread:
+        lines.append(f"Backlog: {len(unread)} unread; oldest:")
+        for item in sorted(unread, key=lambda i: i.created)[:3]:
+            saved = f" (saved {item.created[:10]})" if item.created else ""
+            lines.append(f"- {item.title}{saved}")
+    return "\n".join(lines)
+
+
 def build_weekly_review(settings: Settings) -> str:
     """Assemble the digest text from the subsystem read paths (no LLM)."""
     current = now(settings)
@@ -206,12 +253,14 @@ def build_weekly_review(settings: Settings) -> str:
         logger.exception("weekly review: calendar section failed; skipping it")
     for flag, section in (
         (settings.enable_tasks, lambda: _tasks_sections(settings, current)),
+        (settings.enable_heartbeat, lambda: [_goals_section(settings)]),
         (settings.enable_trips, lambda: [_trips_section(settings, today)]),
         (settings.enable_people, lambda: [_people_section(settings)]),
         (settings.enable_subscriptions, lambda: [_subscriptions_section(settings, today)]),
         (settings.enable_worklog, lambda: [_worklog_section(settings, today)]),
         (settings.enable_habits, lambda: [_habits_section(settings, today)]),
         (settings.enable_expenses, lambda: [_expenses_section(settings, today)]),
+        (settings.enable_reading, lambda: [_reading_section(settings, current)]),
     ):
         if not flag:
             continue

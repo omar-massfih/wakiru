@@ -168,6 +168,27 @@ def test_expenses_and_subscriptions_ride_in(settings, delivered, monkeypatch) ->
     assert "Spotify" in message
 
 
+def test_goals_and_reading_backlog_ride_in(settings, delivered, monkeypatch) -> None:
+    settings.enable_heartbeat = True
+    settings.enable_reading = True
+    from assistant import goals
+    from assistant.reading import store as reading_store
+
+    _freeze_clock(monkeypatch, settings, day=6, hhmm="18:00")
+    goals.open_goal(settings, "Plan the summer trip", state="waiting on ferry prices")
+    reading_store.create_item(settings, "https://example.com/a", title="Deep article")
+    done = reading_store.create_item(settings, "https://example.com/b", title="Skim piece")
+    reading_store.mark_read(settings, done.id)
+    assert weekly_review.run_weekly_review(settings)["sent"]
+    message = delivered[0]["message"]
+    assert "Standing goals" in message
+    assert "Plan the summer trip" in message
+    assert "waiting on ferry prices" in message
+    assert "Reading list" in message
+    assert "Backlog: 1 unread" in message and "Deep article" in message
+    assert "Skim piece" not in message  # already read — only counted
+
+
 def test_compose_failure_falls_back_to_the_verbatim_digest(
     settings, delivered, monkeypatch
 ) -> None:
