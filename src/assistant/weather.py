@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime, timedelta
+from urllib.parse import quote
 
 from .calendar.context import now
 from .config import Settings, postgres_backend
@@ -39,8 +40,12 @@ _MAX_AGE_HOURS = 6
 # under the memory dir on the local backend (mirrors mail.snapshot).
 _KV_NAMESPACE = "weather"
 _KV_KEY = "snapshot"
+# The resolved-coordinates cache (geocoding a place name), keyed under the same
+# namespace so re-geocoding only happens when the configured name changes.
+_KV_GEO_KEY = "geocode"
 
 _FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
+_GEOCODE_URL = "https://geocoding-api.open-meteo.com/v1/search"
 _FETCH_TIMEOUT = 10.0
 
 # WMO weather-interpretation codes → short prose (Open-Meteo's `weather_code`).
@@ -90,21 +95,109 @@ def _units(settings: Settings) -> tuple[str, str, str, str]:
     return "celsius", "kmh", "°C", "km/h"
 
 
-def location(settings: Settings) -> tuple[float, float] | None:
-    """The configured coordinates, or ``None`` when weather has no location."""
+def _configured_coords(settings: Settings) -> tuple[float, float] | None:
+    """The explicitly configured latitude/longitude, or ``None``. No I/O."""
     lat, lon = settings.weather_latitude, settings.weather_longitude
     if lat is None or lon is None:
         return None
     return lat, lon
 
 
+def _has_location(settings: Settings) -> bool:
+    """Whether weather has *some* location to work with — explicit coordinates
+    or a place name to geocode. Pure config check, safe on the reply path."""
+    return _configured_coords(settings) is not None or bool(
+        settings.weather_location_name.strip()
+    )
+
+
 def enabled(settings: Settings) -> bool:
-    """Weather is on, on a cadence, and has somewhere to forecast for."""
+    """Weather is on, on a cadence, and has somewhere to forecast for.
+
+    Only a config check (never geocodes) so it is safe to call from
+    :func:`current` on the reply path — the network resolve happens in
+    :func:`refresh`.
+    """
     return (
         settings.enable_weather
         and settings.weather_refresh_minutes > 0
-        and location(settings) is not None
+        and _has_location(settings)
     )
+
+
+def _geocode(settings: Settings, name: str) -> tuple[float, float] | None:
+    """Resolve a place name to coordinates via Open-Meteo's geocoder (keyless).
+
+    Network I/O — call only off the reply path (from :func:`refresh`). Returns
+    ``None`` when the name doesn't resolve or the fetch fails.
+    """
+    url = f"{_GEOCODE_URL}?name={quote(name)}&count=1&format=json"
+    try:
+        with urlopen_public(
+            url, timeout=_FETCH_TIMEOUT, headers={"User-Agent": "wakiru-assistant"}
+        ) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except Exception:
+        logger.exception("weather: geocoding %r failed", name)
+        return None
+    results = data.get("results") or []
+    if not results:
+        logger.warning("weather: no geocoding match for %r", name)
+        return None
+    top = results[0]
+    lat, lon = top.get("latitude"), top.get("longitude")
+    if not isinstance(lat, (int, float)) or not isinstance(lon, (int, float)):
+        return None
+    return float(lat), float(lon)
+
+
+def _geo_cache_load(settings: Settings) -> dict | None:
+    if storage_postgres := postgres_backend(settings):
+        payload = storage_postgres.kv_get(settings, _KV_NAMESPACE, _KV_GEO_KEY)
+    else:
+        try:
+            payload = (settings.memory_path / "weather_geocode.json").read_text(encoding="utf-8")
+        except (FileNotFoundError, OSError):
+            return None
+    try:
+        return json.loads(payload) if payload else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _geo_cache_save(settings: Settings, name: str, lat: float, lon: float) -> None:
+    payload = json.dumps({"name": name, "latitude": lat, "longitude": lon})
+    if storage_postgres := postgres_backend(settings):
+        storage_postgres.kv_set(settings, _KV_NAMESPACE, _KV_GEO_KEY, payload)
+        return
+    settings.memory_path.mkdir(parents=True, exist_ok=True)
+    (settings.memory_path / "weather_geocode.json").write_text(payload, encoding="utf-8")
+
+
+def _resolve_coords(settings: Settings) -> tuple[float, float] | None:
+    """The coordinates to forecast for: explicit config, else the place name
+    geocoded once and cached (re-geocoded only when the name changes).
+
+    May do network I/O (the geocode) — refresh-path only, never on a reply.
+    """
+    coords = _configured_coords(settings)
+    if coords is not None:
+        return coords
+    name = settings.weather_location_name.strip()
+    if not name:
+        return None
+    cached = _geo_cache_load(settings)
+    if (
+        cached
+        and str(cached.get("name", "")).strip().lower() == name.lower()
+        and isinstance(cached.get("latitude"), (int, float))
+        and isinstance(cached.get("longitude"), (int, float))
+    ):
+        return float(cached["latitude"]), float(cached["longitude"])
+    coords = _geocode(settings, name)
+    if coords is not None:
+        _geo_cache_save(settings, name, *coords)
+    return coords
 
 
 def _path(settings: Settings):
@@ -217,10 +310,12 @@ def refresh(settings: Settings) -> str | None:
     """
     if not enabled(settings):
         return None
-    loc = location(settings)
-    assert loc is not None  # enabled() guarantees it
+    coords = _resolve_coords(settings)
+    if coords is None:
+        logger.warning("weather: could not resolve a location; skipping refresh")
+        return None
     try:
-        data = _fetch(settings, *loc)
+        data = _fetch(settings, *coords)
         text = _render(settings, data)
     except Exception:
         logger.exception("weather refresh failed; keeping the previous snapshot")

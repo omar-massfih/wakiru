@@ -384,12 +384,14 @@ class Settings(BaseSettings):
     # into each turn's context and the daily briefing. OFF by default — it
     # needs a location and makes an outbound call (to Open-Meteo, keyless).
     enable_weather: bool = False
-    # The location to forecast for, as decimal degrees. Both must be set or
-    # weather is a no-op even when enabled (geocoding a place name is future work).
+    # The location to forecast for, as decimal degrees. Optional: if unset but
+    # weather_location_name is given, the name is geocoded (Open-Meteo, keyless)
+    # and the coordinates cached. Explicit coordinates, when set, take precedence.
     weather_latitude: float | None = None
     weather_longitude: float | None = None
-    # A human label for the location shown in the block ("Oslo"). Display only —
-    # the coordinates above are what is actually fetched.
+    # A place name for the location ("Oslo"). Shown as the block's label, and —
+    # when no explicit coordinates are set — geocoded to find them. Weather is a
+    # no-op when neither coordinates nor a name is configured.
     weather_location_name: str = ""
     # "metric" (°C, km/h) or "imperial" (°F, mph).
     weather_units: str = "metric"

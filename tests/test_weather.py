@@ -79,9 +79,49 @@ def test_disabled_is_a_no_op(settings) -> None:
 
 
 def test_no_location_disables(settings) -> None:
-    settings = settings.model_copy(update={"weather_longitude": None})
+    # Neither coordinates nor a place name — nothing to forecast for.
+    settings = settings.model_copy(
+        update={
+            "weather_latitude": None,
+            "weather_longitude": None,
+            "weather_location_name": "",
+        }
+    )
     assert weather.enabled(settings) is False
     assert weather.refresh(settings) is None
+
+
+def test_geocodes_place_name_when_no_coords(settings, monkeypatch) -> None:
+    settings = settings.model_copy(
+        update={
+            "weather_latitude": None,
+            "weather_longitude": None,
+            "weather_location_name": "Oslo",
+        }
+    )
+    # A place name alone is a location (resolved off the reply path).
+    assert weather.enabled(settings) is True
+    calls = {"n": 0}
+
+    def _geo(s, name):
+        calls["n"] += 1
+        assert name == "Oslo"
+        return (59.91, 10.75)
+
+    monkeypatch.setattr(weather, "_geocode", _geo)
+    assert weather.refresh(settings) is not None
+    assert "light rain" in weather.current(settings)
+    # A second refresh reuses the cached coordinates — no re-geocode.
+    weather.refresh(settings)
+    assert calls["n"] == 1
+
+
+def test_explicit_coords_skip_geocoding(settings, monkeypatch) -> None:
+    def _boom(s, name):
+        raise AssertionError("should not geocode when coordinates are configured")
+
+    monkeypatch.setattr(weather, "_geocode", _boom)
+    assert weather.refresh(settings) is not None  # fixture has lat/lon set
 
 
 def test_stale_snapshot_withheld(settings, monkeypatch) -> None:
