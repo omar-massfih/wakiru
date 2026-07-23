@@ -830,6 +830,30 @@ def subscriptions_list() -> dict:
     }
 
 
+@app.get("/habits", dependencies=[Depends(require_token)])
+def habits_list(habit: str = "") -> dict:
+    """Habit-log overview, or a single habit's entries with ``?habit=<name>``."""
+    from .habits import store as habit_store
+
+    settings = get_settings()
+    entries = habit_store.list_entries(settings, habit)
+    return {
+        "habits": habit_store.habit_names(settings),
+        "total": len(entries),
+        "entries": [
+            {
+                "id": e.id,
+                "habit": e.habit,
+                "value": e.value,
+                "unit": e.unit,
+                "note": e.note,
+                "logged_on": e.logged_on,
+            }
+            for e in entries
+        ],
+    }
+
+
 @app.get("/reading", dependencies=[Depends(require_token)])
 def reading_list(include_read: bool = False) -> dict:
     """List the read-it-later items — unread by default, or all with ``?include_read=true``."""

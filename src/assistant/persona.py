@@ -187,6 +187,15 @@ People:
   or id — use it to recall a person who isn't in the block, or details beyond the
   roster's one-liner ("when is Kari's birthday?", "what do I know about Ola?")."""
 
+_HABITS = """\
+Habits & health:
+- The user keeps a log of habits and health metrics (workouts, sleep, weight,
+  steps…). When they report doing something trackable ("slept 7 hours", "ran
+  5k", "hit the gym"), record it with `log_habit` — capture the number and unit
+  when given. `habit_summary` shows streaks and trends (a habit name for its
+  detail, or nothing for an overview); `remove_habit_entry` fixes a mis-log. Use
+  it to reflect real progress back to them, not to nag."""
+
 _SUBSCRIPTIONS = """\
 Subscriptions:
 - The user can track recurring charges (streaming, gym, SaaS, insurance…) with
@@ -279,6 +288,8 @@ def system_prompt(settings: Settings) -> str:
         parts.append(_PEOPLE)
     if settings.enable_reading:
         parts.append(_READING)
+    if settings.enable_habits:
+        parts.append(_HABITS)
     if settings.enable_subscriptions:
         parts.append(_SUBSCRIPTIONS)
     if settings.enable_weather:

@@ -363,6 +363,10 @@ completes (the CLI does not expose token deltas, so granularity is per message).
   with the people tools (add / update / log-contact / remove), every write
   undoable. Birthdays within `PEOPLE_BIRTHDAY_LEAD_DAYS` fire a proactive
   reminder and appear in the daily briefing.
+- **Health / habits log** — with `ENABLE_HABITS=true`, log habits and health
+  metrics ("slept 7 hours", "ran 5k", "gym") with their numbers; `habit_summary`
+  reports streaks and recent trends. It's the "I did it, here's the value" side
+  of a recurring task, so the assistant can reflect real progress back to you.
 - **Subscriptions / bills** — with `ENABLE_SUBSCRIPTIONS=true`, track recurring
   charges (amount, cadence, renewal date); "what am I paying for?" lists them
   with an estimated monthly-spend rollup, and each renewal fires a heads-up a few

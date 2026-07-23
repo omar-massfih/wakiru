@@ -11,6 +11,7 @@ from .docs import _docs_tools, _web_ingest_tools, _web_tools
 from .email import _email_tools, _mail_mutated
 from .followups import _followup_tools
 from .goals import _goal_tools
+from .habits import _habit_tools
 from .memory import _memory_tools
 from .people import _people_tools
 from .reading import _reading_tools
@@ -71,6 +72,8 @@ def available_tools(settings: Settings, mode: str = "chat") -> list[ToolSpec]:
         tools += _people_tools()
     if settings.enable_reading:
         tools += _reading_tools()
+    if settings.enable_habits:
+        tools += _habit_tools()
     if settings.enable_subscriptions:
         tools += _subscription_tools()
     if settings.enable_weather:
@@ -129,6 +132,9 @@ def available_tools(settings: Settings, mode: str = "chat") -> list[ToolSpec]:
                 # Subscription writes are chat-only; the heartbeat only fires
                 # renewal reminders, it does not edit what's tracked.
                 "add_subscription", "update_subscription", "remove_subscription",
+                # Habit writes are chat-only — the user logs what they did; a
+                # background wake has nothing to record on their behalf.
+                "log_habit", "remove_habit_entry",
             )
         ]
         if settings.email_triage_max_actions > 0:

@@ -387,6 +387,12 @@ class Settings(BaseSettings):
     # Cap on how many unread items list_reading returns per call.
     reading_max_open: int = 50
 
+    # --- Health / habits log ---
+    # Master switch: keep an append log of habits / health metrics (workouts,
+    # sleep, weight, steps…) and expose the habit tools (log + summarize streaks
+    # and trends). Off by default. Tool-only — not injected into every turn.
+    enable_habits: bool = False
+
     # --- Subscriptions / bills ---
     # Master switch: track recurring charges (amount, cadence, renewal date),
     # expose the subscription tools, and fire a renewal reminder before each
@@ -638,6 +644,11 @@ class Settings(BaseSettings):
     def reading_db_path(self) -> Path:
         """SQLite file holding the read-it-later list."""
         return self.memory_path / "reading.db"
+
+    @property
+    def habits_db_path(self) -> Path:
+        """SQLite file holding the health / habits log."""
+        return self.memory_path / "habits.db"
 
     @property
     def subscriptions_db_path(self) -> Path:

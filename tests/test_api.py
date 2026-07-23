@@ -115,6 +115,22 @@ def test_people_shape_lists_people(client) -> None:
     } <= person.keys()
 
 
+def test_habits_shape_lists_entries(client) -> None:
+    import assistant.api as api
+    from assistant.habits import store as hstore
+
+    c = client(None)
+    app_settings = api.get_settings()
+    hstore.log_entry(app_settings, "sleep", value="7.5", unit="hours")
+
+    body = c.get("/habits").json()
+    assert body["total"] == 1
+    assert "sleep" in body["habits"]
+    entry = body["entries"][0]
+    assert entry["habit"] == "sleep"
+    assert {"id", "habit", "value", "unit", "note", "logged_on"} <= entry.keys()
+
+
 def test_subscriptions_shape_lists_with_rollup(client) -> None:
     import assistant.api as api
     from assistant.subscriptions import store as sstore

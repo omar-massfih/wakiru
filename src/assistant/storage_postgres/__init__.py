@@ -67,6 +67,13 @@ from .graph import (
     remove_graph_note,
     sync_graph_note,
 )
+from .habits import (
+    delete_habit_entry,
+    ensure_habits_schema,
+    get_habit_entry,
+    list_habit_entries,
+    log_habit_entry,
+)
 from .kv import ensure_kv_schema, kv_clear, kv_get, kv_set
 from .ledgers import (
     calendar_write_rows,
@@ -186,6 +193,7 @@ __all__ = [
     "create_task",
     "delete_document",
     "delete_event",
+    "delete_habit_entry",
     "delete_note",
     "delete_person",
     "delete_reading_item",
@@ -200,6 +208,7 @@ __all__ = [
     "ensure_followups_schema",
     "ensure_goals_schema",
     "ensure_graph_schema",
+    "ensure_habits_schema",
     "ensure_kv_schema",
     "ensure_mail_schema",
     "ensure_memory_schema",
@@ -216,6 +225,7 @@ __all__ = [
     "find_note",
     "get_document",
     "get_event",
+    "get_habit_entry",
     "get_person",
     "get_reading_item",
     "get_stats",
@@ -232,6 +242,7 @@ __all__ = [
     "list_active_watches",
     "list_documents",
     "list_events",
+    "list_habit_entries",
     "list_memory_entries",
     "list_mutes",
     "list_notes",
@@ -241,6 +252,7 @@ __all__ = [
     "list_reading_items",
     "list_subscriptions",
     "list_tasks",
+    "log_habit_entry",
     "mail_audit_rows",
     "mark_calendar_writes_undone",
     "mark_person_writes_undone",
