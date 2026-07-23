@@ -772,6 +772,30 @@ def goals_list() -> dict:
     }
 
 
+@app.get("/people", dependencies=[Depends(require_token)])
+def people_list() -> dict:
+    """List the people in the CRM (see assistant.people)."""
+    from .people import store as people_store
+
+    settings = get_settings()
+    items = people_store.list_people(settings)
+    return {
+        "total": len(items),
+        "people": [
+            {
+                "id": p.id,
+                "name": p.name,
+                "relationship": p.relationship,
+                "cadence_days": p.cadence_days,
+                "last_contact": p.last_contact,
+                "birthday": p.birthday,
+                "notes": p.notes,
+            }
+            for p in items
+        ],
+    }
+
+
 @app.get("/calendar", dependencies=[Depends(require_token)])
 def calendar() -> dict:
     """List upcoming events (within the configured horizon) and the current time."""

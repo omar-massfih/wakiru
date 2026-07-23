@@ -96,6 +96,25 @@ def test_goals_shape_lists_open_goals(client) -> None:
     assert {"id", "title", "state", "next_action_at", "created_at", "updated_at"} <= goal.keys()
 
 
+def test_people_shape_lists_people(client) -> None:
+    import assistant.api as api
+    from assistant.people import store as pstore
+
+    c = client(None)
+    app_settings = api.get_settings()
+    pstore.create_person(app_settings, "Kari", relationship="sister", cadence_days=14)
+
+    body = c.get("/people").json()
+    assert body["total"] == 1
+    person = body["people"][0]
+    assert person["name"] == "Kari"
+    assert person["relationship"] == "sister"
+    assert person["cadence_days"] == 14
+    assert {
+        "id", "name", "relationship", "cadence_days", "last_contact", "birthday", "notes"
+    } <= person.keys()
+
+
 def test_tasks_shape_lists_open_and_all(client) -> None:
     import assistant.api as api
     from assistant.tasks import store as tstore
