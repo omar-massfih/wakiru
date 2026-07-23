@@ -13,6 +13,7 @@ from .followups import _followup_tools
 from .goals import _goal_tools
 from .memory import _memory_tools
 from .people import _people_tools
+from .reading import _reading_tools
 from .reminders import _reminder_tools
 from .tasks import _task_tools
 from .undo import _undo_tools
@@ -67,6 +68,8 @@ def available_tools(settings: Settings, mode: str = "chat") -> list[ToolSpec]:
         tools += _task_tools()
     if settings.enable_people:
         tools += _people_tools()
+    if settings.enable_reading:
+        tools += _reading_tools()
     if settings.enable_weather:
         tools += _weather_tools()
     if settings.enable_reminders:
@@ -117,6 +120,9 @@ def available_tools(settings: Settings, mode: str = "chat") -> list[ToolSpec]:
                 # due (see heartbeat) and composes outreach, but does not mutate
                 # the CRM unattended.
                 "add_person", "update_person", "remove_person", "log_contact",
+                # Reading-list writes are chat-only too — nothing a background
+                # wake should be saving or pruning on its own.
+                "save_reading", "mark_read", "remove_reading",
             )
         ]
         if settings.email_triage_max_actions > 0:

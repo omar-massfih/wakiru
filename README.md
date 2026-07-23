@@ -363,6 +363,10 @@ completes (the CLI does not expose token deltas, so granularity is per message).
   with the people tools (add / update / log-contact / remove), every write
   undoable. Birthdays within `PEOPLE_BIRTHDAY_LEAD_DAYS` fire a proactive
   reminder and appear in the daily briefing.
+- **Reading list (read-it-later)** — with `ENABLE_READING=true`, a place to
+  save links to get back to: "save this for later" stores it, "what's on my
+  reading list?" lists the unread ones, and the assistant can mark them read or
+  drop them. Tool-only, so it never bloats the per-turn prompt.
 - **Weather** — with `ENABLE_WEATHER=true` and a location (`WEATHER_LATITUDE`/
   `WEATHER_LONGITUDE`, or a `WEATHER_LOCATION_NAME` that gets geocoded), a short
   forecast is fetched off the reply path (Open-Meteo, keyless) and folded into

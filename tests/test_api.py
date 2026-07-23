@@ -115,6 +115,22 @@ def test_people_shape_lists_people(client) -> None:
     } <= person.keys()
 
 
+def test_reading_shape_lists_unread(client) -> None:
+    import assistant.api as api
+    from assistant.reading import store as rstore
+
+    c = client(None)
+    app_settings = api.get_settings()
+    rstore.create_item(app_settings, "https://example.com/a", title="Article A")
+
+    body = c.get("/reading").json()
+    assert body["total"] == 1
+    item = body["reading"][0]
+    assert item["title"] == "Article A"
+    assert item["read"] is False
+    assert {"id", "url", "title", "note", "read", "created", "read_at"} <= item.keys()
+
+
 def test_tasks_shape_lists_open_and_all(client) -> None:
     import assistant.api as api
     from assistant.tasks import store as tstore

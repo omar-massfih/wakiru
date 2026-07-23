@@ -187,6 +187,14 @@ People:
   or id — use it to recall a person who isn't in the block, or details beyond the
   roster's one-liner ("when is Kari's birthday?", "what do I know about Ola?")."""
 
+_READING = """\
+Reading list:
+- The user keeps a read-it-later list of links. Save one with `save_reading`
+  when they share an article or say "save this for later"; show it with
+  `list_reading` ("what's on my reading list?"); `mark_read` when they've read
+  one, `remove_reading` to drop it. It is not shown each turn — reach for
+  `list_reading` when it's relevant."""
+
 _REMINDERS = """\
 Reminder nudges:
 - When the user asks to be reminded of something at a specific time ("remind
@@ -260,6 +268,8 @@ def system_prompt(settings: Settings) -> str:
         parts.append(_TASKS)
     if settings.enable_people:
         parts.append(_PEOPLE)
+    if settings.enable_reading:
+        parts.append(_READING)
     if settings.enable_weather:
         parts.append(_WEATHER)
     if settings.enable_docs:

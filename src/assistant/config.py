@@ -379,6 +379,14 @@ class Settings(BaseSettings):
     # Cap on how many open tasks are injected per turn.
     tasks_max_open: int = 20
 
+    # --- Reading list (read-it-later) ---
+    # Master switch: keep a list of links to read later and expose the reading
+    # tools. Off by default. Tool-only — it is not injected into every turn; the
+    # model reaches it with list_reading when the user asks.
+    enable_reading: bool = False
+    # Cap on how many unread items list_reading returns per call.
+    reading_max_open: int = 50
+
     # --- Weather ---
     # Master switch: fetch a short forecast off the reply path and inject it
     # into each turn's context and the daily briefing. OFF by default — it
@@ -617,6 +625,11 @@ class Settings(BaseSettings):
     def people_db_path(self) -> Path:
         """SQLite file holding the people store (contacts + their undo ledger)."""
         return self.memory_path / "people.db"
+
+    @property
+    def reading_db_path(self) -> Path:
+        """SQLite file holding the read-it-later list."""
+        return self.memory_path / "reading.db"
 
     @property
     def docs_db_path(self) -> Path:

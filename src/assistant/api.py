@@ -796,6 +796,30 @@ def people_list() -> dict:
     }
 
 
+@app.get("/reading", dependencies=[Depends(require_token)])
+def reading_list(include_read: bool = False) -> dict:
+    """List the read-it-later items — unread by default, or all with ``?include_read=true``."""
+    from .reading import store as reading_store
+
+    settings = get_settings()
+    items = reading_store.list_items(settings, include_read=include_read)
+    return {
+        "total": len(items),
+        "reading": [
+            {
+                "id": i.id,
+                "url": i.url,
+                "title": i.title,
+                "note": i.note,
+                "read": i.read,
+                "created": i.created,
+                "read_at": i.read_at,
+            }
+            for i in items
+        ],
+    }
+
+
 @app.get("/calendar", dependencies=[Depends(require_token)])
 def calendar() -> dict:
     """List upcoming events (within the configured horizon) and the current time."""
