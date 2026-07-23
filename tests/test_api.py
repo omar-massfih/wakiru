@@ -115,6 +115,24 @@ def test_people_shape_lists_people(client) -> None:
     } <= person.keys()
 
 
+def test_subscriptions_shape_lists_with_rollup(client) -> None:
+    import assistant.api as api
+    from assistant.subscriptions import store as sstore
+
+    c = client(None)
+    app_settings = api.get_settings()
+    sstore.create_subscription(
+        app_settings, "Spotify", amount="129", currency="NOK", cadence="monthly"
+    )
+
+    body = c.get("/subscriptions").json()
+    assert body["total"] == 1
+    assert body["monthly_totals"]["NOK"] == 129.0
+    sub = body["subscriptions"][0]
+    assert sub["name"] == "Spotify"
+    assert {"id", "name", "amount", "currency", "cadence", "renews_on", "next_renewal", "notes"} <= sub.keys()
+
+
 def test_reading_shape_lists_unread(client) -> None:
     import assistant.api as api
     from assistant.reading import store as rstore

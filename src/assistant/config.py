@@ -387,6 +387,14 @@ class Settings(BaseSettings):
     # Cap on how many unread items list_reading returns per call.
     reading_max_open: int = 50
 
+    # --- Subscriptions / bills ---
+    # Master switch: track recurring charges (amount, cadence, renewal date),
+    # expose the subscription tools, and fire a renewal reminder before each
+    # charge. Off by default.
+    enable_subscriptions: bool = False
+    # Fire a renewal reminder this many days before a subscription renews.
+    subscriptions_renewal_lead_days: int = 3
+
     # --- Weather ---
     # Master switch: fetch a short forecast off the reply path and inject it
     # into each turn's context and the daily briefing. OFF by default — it
@@ -630,6 +638,11 @@ class Settings(BaseSettings):
     def reading_db_path(self) -> Path:
         """SQLite file holding the read-it-later list."""
         return self.memory_path / "reading.db"
+
+    @property
+    def subscriptions_db_path(self) -> Path:
+        """SQLite file holding tracked subscriptions + their renewal fired ledger."""
+        return self.memory_path / "subscriptions.db"
 
     @property
     def docs_db_path(self) -> Path:

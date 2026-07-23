@@ -46,6 +46,7 @@ from .mail.client import MailDisabledError
 from .memory import consolidate_memory, store
 from .people.reminders import run_birthday_reminders
 from .sleep import run_sleep
+from .subscriptions.reminders import run_subscription_reminders
 from .tasks import store as tasks_store
 from .tasks.reminders import run_task_reminders
 
@@ -76,6 +77,7 @@ def _reminder_tick_once() -> None:
     run_reminders(get_settings(), _agent())
     run_task_reminders(get_settings(), _agent())
     run_birthday_reminders(get_settings(), _agent())
+    run_subscription_reminders(get_settings(), _agent())
     # The daily briefing rides the same tick; its own ledger makes it
     # exactly-once per day and a cheap no-op every other pass.
     run_briefing(get_settings(), agent=_agent())
@@ -516,13 +518,14 @@ def reminders_run() -> dict:
 
     The in-process ticker calls this same logic on a cadence; this endpoint lets it
     also be driven manually or from external cron. Idempotent via the dedupe ledger.
-    Fires calendar-event, due-task, and birthday reminders.
+    Fires calendar-event, due-task, birthday, and subscription-renewal reminders.
     """
     settings = get_settings()
     fired = (
         run_reminders(settings, _agent())
         + run_task_reminders(settings, _agent())
         + run_birthday_reminders(settings, _agent())
+        + run_subscription_reminders(settings, _agent())
     )
     return {"count": len(fired), "fired": fired}
 
@@ -792,6 +795,37 @@ def people_list() -> dict:
                 "notes": p.notes,
             }
             for p in items
+        ],
+    }
+
+
+@app.get("/subscriptions", dependencies=[Depends(require_token)])
+def subscriptions_list() -> dict:
+    """List tracked subscriptions with each next renewal and the monthly-spend rollup."""
+    from datetime import date
+
+    from .subscriptions import store as sub_store
+    from .subscriptions.context import monthly_totals
+    from .subscriptions.store import next_renewal
+
+    settings = get_settings()
+    items = sub_store.list_subscriptions(settings)
+    today = date.today()
+    return {
+        "total": len(items),
+        "monthly_totals": monthly_totals(items),
+        "subscriptions": [
+            {
+                "id": s.id,
+                "name": s.name,
+                "amount": s.amount,
+                "currency": s.currency,
+                "cadence": s.cadence,
+                "renews_on": s.renews_on,
+                "next_renewal": (nr.isoformat() if (nr := next_renewal(s, today)) else ""),
+                "notes": s.notes,
+            }
+            for s in items
         ],
     }
 

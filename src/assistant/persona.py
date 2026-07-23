@@ -187,6 +187,15 @@ People:
   or id — use it to recall a person who isn't in the block, or details beyond the
   roster's one-liner ("when is Kari's birthday?", "what do I know about Ola?")."""
 
+_SUBSCRIPTIONS = """\
+Subscriptions:
+- The user can track recurring charges (streaming, gym, SaaS, insurance…) with
+  `add_subscription` — capture the amount, currency, cadence, and renewal date
+  when known. `list_subscriptions` shows them with the next renewal and the
+  estimated monthly spend ("what am I paying for?"); `update_subscription` and
+  `remove_subscription` (when they cancel) manage them. Renewals fire a heads-up
+  a few days ahead on their own, so they can cancel in time."""
+
 _READING = """\
 Reading list:
 - The user keeps a read-it-later list of links. Save one with `save_reading`
@@ -270,6 +279,8 @@ def system_prompt(settings: Settings) -> str:
         parts.append(_PEOPLE)
     if settings.enable_reading:
         parts.append(_READING)
+    if settings.enable_subscriptions:
+        parts.append(_SUBSCRIPTIONS)
     if settings.enable_weather:
         parts.append(_WEATHER)
     if settings.enable_docs:

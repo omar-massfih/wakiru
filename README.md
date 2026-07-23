@@ -363,6 +363,10 @@ completes (the CLI does not expose token deltas, so granularity is per message).
   with the people tools (add / update / log-contact / remove), every write
   undoable. Birthdays within `PEOPLE_BIRTHDAY_LEAD_DAYS` fire a proactive
   reminder and appear in the daily briefing.
+- **Subscriptions / bills** — with `ENABLE_SUBSCRIPTIONS=true`, track recurring
+  charges (amount, cadence, renewal date); "what am I paying for?" lists them
+  with an estimated monthly-spend rollup, and each renewal fires a heads-up a few
+  days ahead (exactly-once via the fired ledger) so nothing surprises you.
 - **Reading list (read-it-later)** — with `ENABLE_READING=true`, a place to
   save links to get back to: "save this for later" stores it, "what's on my
   reading list?" lists the unread ones, and the assistant can mark them read or

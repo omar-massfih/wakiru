@@ -15,6 +15,7 @@ from .memory import _memory_tools
 from .people import _people_tools
 from .reading import _reading_tools
 from .reminders import _reminder_tools
+from .subscriptions import _subscription_tools
 from .tasks import _task_tools
 from .undo import _undo_tools
 from .wake import _wake_tools
@@ -70,6 +71,8 @@ def available_tools(settings: Settings, mode: str = "chat") -> list[ToolSpec]:
         tools += _people_tools()
     if settings.enable_reading:
         tools += _reading_tools()
+    if settings.enable_subscriptions:
+        tools += _subscription_tools()
     if settings.enable_weather:
         tools += _weather_tools()
     if settings.enable_reminders:
@@ -123,6 +126,9 @@ def available_tools(settings: Settings, mode: str = "chat") -> list[ToolSpec]:
                 # Reading-list writes are chat-only too — nothing a background
                 # wake should be saving or pruning on its own.
                 "save_reading", "mark_read", "remove_reading",
+                # Subscription writes are chat-only; the heartbeat only fires
+                # renewal reminders, it does not edit what's tracked.
+                "add_subscription", "update_subscription", "remove_subscription",
             )
         ]
         if settings.email_triage_max_actions > 0:
