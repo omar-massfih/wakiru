@@ -90,6 +90,14 @@ from .ledgers import (
     record_task_write,
     task_write_rows,
 )
+from .lists import (
+    create_list_item,
+    delete_list_item,
+    ensure_lists_schema,
+    get_list_item,
+    list_list_items,
+    set_list_item_done,
+)
 from .mail import ensure_mail_schema, mail_audit_rows, record_mail_audit
 from .memory import (
     bump_recall,
@@ -187,6 +195,7 @@ __all__ = [
     "complete_task",
     "connect",
     "create_event",
+    "create_list_item",
     "create_person",
     "create_reading_item",
     "create_subscription",
@@ -194,6 +203,7 @@ __all__ = [
     "delete_document",
     "delete_event",
     "delete_habit_entry",
+    "delete_list_item",
     "delete_note",
     "delete_person",
     "delete_reading_item",
@@ -210,6 +220,7 @@ __all__ = [
     "ensure_graph_schema",
     "ensure_habits_schema",
     "ensure_kv_schema",
+    "ensure_lists_schema",
     "ensure_mail_schema",
     "ensure_memory_schema",
     "ensure_mutes_schema",
@@ -226,6 +237,7 @@ __all__ = [
     "get_document",
     "get_event",
     "get_habit_entry",
+    "get_list_item",
     "get_person",
     "get_reading_item",
     "get_stats",
@@ -243,6 +255,7 @@ __all__ = [
     "list_documents",
     "list_events",
     "list_habit_entries",
+    "list_list_items",
     "list_memory_entries",
     "list_mutes",
     "list_notes",
@@ -288,6 +301,7 @@ __all__ = [
     "search_chunks",
     "search_memory_index",
     "set_caldav_meta",
+    "set_list_item_done",
     "set_mute",
     "set_salience",
     "sync_graph_note",

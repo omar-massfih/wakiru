@@ -387,6 +387,13 @@ class Settings(BaseSettings):
     # Cap on how many unread items list_reading returns per call.
     reading_max_open: int = 50
 
+    # --- Named checklists (shopping / errands / packing) ---
+    # Master switch: keep named checklists distinct from dated tasks and expose
+    # the list tools (add / show / check off / remove). Off by default.
+    # Tool-only — not injected into every turn; the model reaches it with
+    # show_list when the user asks.
+    enable_lists: bool = False
+
     # --- Health / habits log ---
     # Master switch: keep an append log of habits / health metrics (workouts,
     # sleep, weight, steps…) and expose the habit tools (log + summarize streaks
@@ -654,6 +661,11 @@ class Settings(BaseSettings):
     def reading_db_path(self) -> Path:
         """SQLite file holding the read-it-later list."""
         return self.memory_path / "reading.db"
+
+    @property
+    def lists_db_path(self) -> Path:
+        """SQLite file holding the named checklists."""
+        return self.memory_path / "lists.db"
 
     @property
     def habits_db_path(self) -> Path:

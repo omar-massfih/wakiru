@@ -878,6 +878,35 @@ def reading_list(include_read: bool = False) -> dict:
     }
 
 
+@app.get("/lists", dependencies=[Depends(require_token)])
+def checklists(include_done: bool = False) -> dict:
+    """Every named checklist with its items — open only by default."""
+    from .lists import store as lists_store
+
+    settings = get_settings()
+    names = lists_store.list_names(settings)
+    return {
+        "total": len(names),
+        "lists": [
+            {
+                "name": name,
+                "open": open_count,
+                "items": [
+                    {
+                        "id": e.id,
+                        "item": e.item,
+                        "done": e.done,
+                        "created": e.created,
+                        "done_at": e.done_at,
+                    }
+                    for e in lists_store.list_items(settings, name, include_done=include_done)
+                ],
+            }
+            for name, open_count in names
+        ],
+    }
+
+
 @app.get("/calendar", dependencies=[Depends(require_token)])
 def calendar() -> dict:
     """List upcoming events (within the configured horizon) and the current time."""

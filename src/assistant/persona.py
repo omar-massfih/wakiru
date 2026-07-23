@@ -221,6 +221,16 @@ Reading list:
   one, `remove_reading` to drop it. It is not shown each turn — reach for
   `list_reading` when it's relevant."""
 
+_LISTS = """\
+Lists:
+- The user keeps named checklists (shopping, errands, packing …) separate from
+  dated tasks. `add_to_list` adds one or more items ("put milk on the shopping
+  list" — a list is created the first time it's named); `show_list` shows one
+  list, or all of them when no name is given; `check_off_item` when something
+  is bought or done; `remove_from_list` deletes a mis-added item. Checked-off
+  items leave the visible list, so "clear the list" usually means checking
+  everything off. Not shown each turn — reach for `show_list` when relevant."""
+
 _REMINDERS = """\
 Reminder nudges:
 - When the user asks to be reminded of something at a specific time ("remind
@@ -300,6 +310,8 @@ def system_prompt(settings: Settings) -> str:
         parts.append(_PEOPLE)
     if settings.enable_reading:
         parts.append(_READING)
+    if settings.enable_lists:
+        parts.append(_LISTS)
     if settings.enable_habits:
         parts.append(_HABITS)
     if settings.enable_subscriptions:
