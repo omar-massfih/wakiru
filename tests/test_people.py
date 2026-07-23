@@ -122,6 +122,24 @@ def test_remove_op(settings) -> None:
     assert store.list_people(settings) == []
 
 
+def test_find_person_tool(settings) -> None:
+    from assistant.tools import ToolContext, tool_map
+
+    store.create_person(
+        settings, "Kari", relationship="sister", cadence_days=14, notes="likes hiking"
+    )
+    spec = tool_map(settings)["find_person"]
+    ctx = ToolContext(settings=settings)
+    out = spec.run(ctx, query="kari")
+    assert "Kari — sister" in out
+    assert "every 14 days" in out
+    assert "likes hiking" in out
+    # Unknown name and ambiguity are handled, not guessed.
+    assert "No person found" in spec.run(ctx, query="nobody")
+    store.create_person(settings, "Kari Hansen")
+    assert "Multiple people match" in spec.run(ctx, query="Kari")
+
+
 # --- undo ------------------------------------------------------------------- #
 
 

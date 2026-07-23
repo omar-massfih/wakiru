@@ -159,6 +159,38 @@ def attention_lines(settings: Settings, current: datetime) -> list[str]:
     return lines
 
 
+def _birthday_countdown(days: int) -> str:
+    if days == 0:
+        return "today"
+    if days == 1:
+        return "tomorrow"
+    return f"in {days} days"
+
+
+def describe_person(settings: Settings, person: Person, current: datetime | None = None) -> str:
+    """A person's full stored detail, for the find_person lookup tool — more than
+    the one-line roster entry: cadence, last contact, birthday, notes, and id."""
+    current = current or now(settings)
+    header = person.name + (f" — {person.relationship}" if person.relationship else "")
+    lines = [header]
+    if person.cadence_days > 0:
+        lines.append(f"  keep-in-touch: every {person.cadence_days} days")
+    gap = contact_gap_days(person, current)
+    if gap is not None:
+        overdue = " (overdue)" if is_overdue(person, current) else ""
+        lines.append(f"  last contact: {person.last_contact[:10]} ({gap}d ago){overdue}")
+    elif person.cadence_days > 0:
+        lines.append("  last contact: none logged")
+    if person.birthday:
+        days = days_until_birthday(person, current)
+        when = f" ({_birthday_countdown(days)})" if days is not None else ""
+        lines.append(f"  birthday: {person.birthday}{when}")
+    if person.notes:
+        lines.append(f"  notes: {person.notes}")
+    lines.append(f"  id: {person.id}")
+    return "\n".join(lines)
+
+
 def briefing_people(settings: Settings | None = None) -> str:
     """The people section for the daily briefing — birthdays and overdue
     contacts only (nothing when none), so the digest stays about what's due."""

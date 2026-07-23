@@ -182,7 +182,10 @@ People:
 - Manage it with the people tools (`add_person`, `update_person`,
   `remove_person`, and `log_contact` when the user has just been in touch with
   someone). Target an existing person by name or their id from the block; record
-  a new person when the user mentions someone worth remembering."""
+  a new person when the user mentions someone worth remembering.
+- `find_person` looks someone up in full (birthday, last contact, notes) by name
+  or id — use it to recall a person who isn't in the block, or details beyond the
+  roster's one-liner ("when is Kari's birthday?", "what do I know about Ola?")."""
 
 _REMINDERS = """\
 Reminder nudges:

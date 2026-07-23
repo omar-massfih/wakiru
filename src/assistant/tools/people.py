@@ -11,9 +11,34 @@ def _person_op(ctx: ToolContext, op: dict) -> str:
     return result or _NO_MATCH
 
 
+def _find_person(ctx: ToolContext, **args: object) -> str:
+    from ..people import store as people_store
+    from ..people.context import describe_person
+
+    query = str(args.get("query", "")).strip()
+    if not query:
+        return "Tool failed: a name or id is required."
+    matches = people_store.find_people(ctx.settings, query)
+    if not matches:
+        return f"No person found matching {query!r}."
+    if len(matches) > 1:
+        names = ", ".join(f"{m.name} (id {m.id})" for m in matches[:6])
+        return f"Multiple people match {query!r}: {names}. Look one up by exact id."
+    return describe_person(ctx.settings, matches[0])
+
+
 def _people_tools() -> list[ToolSpec]:
     _ref = "Exact person id from the People block, or their name"
     return [
+        ToolSpec(
+            "find_person",
+            "Look up a person's full stored details (relationship, keep-in-touch "
+            "cadence, last contact, birthday, notes) by name or id. Use it when "
+            "you need to recall someone who may not be in the People block, or "
+            "details beyond the one-line roster entry.",
+            _params({"query": ("string", "The person's name or id")}, ["query"]),
+            _find_person,
+        ),
         ToolSpec(
             "add_person",
             "Record a person the user knows — a friend, family member, "
