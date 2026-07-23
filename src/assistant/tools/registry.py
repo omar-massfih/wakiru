@@ -18,6 +18,7 @@ from .tasks import _task_tools
 from .undo import _undo_tools
 from .wake import _wake_tools
 from .watches import _watch_tools
+from .weather import _weather_tools
 
 _MAIL_MUTATING = frozenset(
     {"reply_email", "archive_email", "mark_email_read", "label_email"}
@@ -66,6 +67,8 @@ def available_tools(settings: Settings, mode: str = "chat") -> list[ToolSpec]:
         tools += _task_tools()
     if settings.enable_people:
         tools += _people_tools()
+    if settings.enable_weather:
+        tools += _weather_tools()
     if settings.enable_reminders:
         tools += _reminder_tools()
     if settings.enable_write_confirmation and (
@@ -107,6 +110,9 @@ def available_tools(settings: Settings, mode: str = "chat") -> list[ToolSpec]:
                 "send_email", "send_reply", "undo",
                 "ingest_attachment", "summarize_document",
                 "read_url", "ingest_url",
+                # On-demand weather does a network fetch; like the web tools it
+                # is chat-only — a background wake must not fetch arbitrary places.
+                "get_weather",
                 # People writes are chat-only: a background wake surfaces who is
                 # due (see heartbeat) and composes outreach, but does not mutate
                 # the CRM unattended.

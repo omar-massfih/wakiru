@@ -5,7 +5,7 @@ to return a canned Open-Meteo payload, matching how the mail-snapshot tests fake
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -45,7 +45,7 @@ def settings(tmp_path) -> Settings:
 
 @pytest.fixture(autouse=True)
 def _no_network(monkeypatch) -> None:
-    monkeypatch.setattr(weather, "_fetch", lambda s, lat, lon: _PAYLOAD)
+    monkeypatch.setattr(weather, "_fetch", lambda s, lat, lon, days=1: _PAYLOAD)
 
 
 def test_render_covers_now_and_today(settings) -> None:
@@ -129,6 +129,52 @@ def test_stale_snapshot_withheld(settings, monkeypatch) -> None:
     later = now(settings) + timedelta(hours=weather._MAX_AGE_HOURS + 1)
     monkeypatch.setattr(weather, "now", lambda s: later)
     assert weather.current(settings) == ""
+
+
+_MULTI_DAY = {
+    "current": _PAYLOAD["current"],
+    "daily": {
+        "time": ["2026-07-23", "2026-07-24", "2026-07-25"],
+        "temperature_2m_max": [11.0, 13.0, 10.0],
+        "temperature_2m_min": [4.0, 6.0, 5.0],
+        "precipitation_probability_max": [60, 20, 80],
+        "weather_code": [3, 1, 61],
+    },
+}
+
+
+def test_forecast_for_geocodes_and_renders_multi_day(settings, monkeypatch) -> None:
+    monkeypatch.setattr(weather, "_geocode", lambda s, name: (60.39, 5.32))
+    monkeypatch.setattr(weather, "_fetch", lambda s, lat, lon, days=1: _MULTI_DAY)
+    out = weather.forecast_for(settings, "Bergen", days=3)
+    assert out.startswith("Weather for Bergen:")
+    assert "Now: 9.0°C" in out
+    weekday = datetime.strptime("2026-07-24", "%Y-%m-%d").strftime("%a")
+    assert f"{weekday} 2026-07-24: 6.0–13.0°C" in out  # weekday label rendered
+    assert "80% precip" in out
+
+
+def test_forecast_for_unresolved_location(settings, monkeypatch) -> None:
+    monkeypatch.setattr(weather, "_geocode", lambda s, name: None)
+    assert weather.forecast_for(settings, "Nowheresville") is None
+
+
+def test_get_weather_tool(settings, monkeypatch) -> None:
+    from assistant.tools import ToolContext, tool_map
+
+    settings = settings.model_copy(update={"enable_weather": True})
+    monkeypatch.setattr(weather, "_geocode", lambda s, name: (60.39, 5.32))
+    monkeypatch.setattr(weather, "_fetch", lambda s, lat, lon, days=1: _MULTI_DAY)
+    spec = tool_map(settings)["get_weather"]
+    result = spec.run(ToolContext(settings=settings), location="Bergen", days="2")
+    assert "Weather for Bergen:" in result
+
+
+def test_get_weather_absent_when_weather_off(settings) -> None:
+    from assistant.tools import tool_map
+
+    off = settings.model_copy(update={"enable_weather": False})
+    assert "get_weather" not in tool_map(off)
 
 
 def test_maybe_refresh_respects_cadence(settings, monkeypatch) -> None:

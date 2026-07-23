@@ -242,13 +242,13 @@ def _save(settings: Settings, text: str, fetched_at: datetime) -> None:
     tmp.replace(target)
 
 
-def _fetch(settings: Settings, lat: float, lon: float) -> dict:
+def _fetch(settings: Settings, lat: float, lon: float, days: int = 1) -> dict:
     temp_unit, wind_unit, _, _ = _units(settings)
     params = (
         f"latitude={lat}&longitude={lon}"
         "&current=temperature_2m,apparent_temperature,precipitation,weather_code,wind_speed_10m"
         "&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max,weather_code"
-        f"&timezone=auto&forecast_days=1&temperature_unit={temp_unit}"
+        f"&timezone=auto&forecast_days={days}&temperature_unit={temp_unit}"
         f"&wind_speed_unit={wind_unit}"
     )
     url = f"{_FORECAST_URL}?{params}"
@@ -258,27 +258,43 @@ def _fetch(settings: Settings, lat: float, lon: float) -> dict:
         return json.loads(response.read().decode("utf-8"))
 
 
+def _now_line(settings: Settings, current: dict) -> str:
+    """The "Now: …" current-conditions line, or ``""`` if no reading."""
+    _, _, temp_sym, wind_sym = _units(settings)
+    temp = current.get("temperature_2m")
+    if temp is None:
+        return ""
+    feels = current.get("apparent_temperature")
+    cond = _describe_code(current.get("weather_code"))
+    wind = current.get("wind_speed_10m")
+    line = f"Now: {temp}{temp_sym}"
+    if feels is not None and feels != temp:
+        line += f" (feels {feels}{temp_sym})"
+    if cond:
+        line += f", {cond}"
+    if wind is not None:
+        line += f", wind {wind} {wind_sym}"
+    return line
+
+
+def _weekday(date: str) -> str:
+    """"Mon" from a YYYY-MM-DD date, or the raw string if unparseable."""
+    try:
+        return datetime.strptime(date, "%Y-%m-%d").strftime("%a")
+    except (TypeError, ValueError):
+        return date
+
+
 def _render(settings: Settings, data: dict) -> str:
     """Turn the Open-Meteo payload into one or two plain-text lines."""
-    _, _, temp_sym, wind_sym = _units(settings)
+    _, _, temp_sym, _ = _units(settings)
     lines: list[str] = []
     label = settings.weather_location_name.strip()
     if label:
         lines.append(f"Location: {label}")
 
-    current = data.get("current") or {}
-    temp = current.get("temperature_2m")
-    if temp is not None:
-        feels = current.get("apparent_temperature")
-        cond = _describe_code(current.get("weather_code"))
-        wind = current.get("wind_speed_10m")
-        now_line = f"Now: {temp}{temp_sym}"
-        if feels is not None and feels != temp:
-            now_line += f" (feels {feels}{temp_sym})"
-        if cond:
-            now_line += f", {cond}"
-        if wind is not None:
-            now_line += f", wind {wind} {wind_sym}"
+    now_line = _now_line(settings, data.get("current") or {})
+    if now_line:
         lines.append(now_line)
 
     daily = data.get("daily") or {}
@@ -299,6 +315,56 @@ def _render(settings: Settings, data: dict) -> str:
         lines.append(day_line)
 
     return "\n".join(lines)
+
+
+def _render_forecast(settings: Settings, name: str, data: dict, days: int) -> str:
+    """A multi-day forecast for an on-demand location query (the get_weather tool)."""
+    _, _, temp_sym, _ = _units(settings)
+    lines = [f"Weather for {name}:"]
+    now_line = _now_line(settings, data.get("current") or {})
+    if now_line:
+        lines.append(now_line)
+
+    daily = data.get("daily") or {}
+    times = daily.get("time") or []
+    tmax = daily.get("temperature_2m_max") or []
+    tmin = daily.get("temperature_2m_min") or []
+    codes = daily.get("weather_code") or []
+    pops = daily.get("precipitation_probability_max") or []
+    for i in range(min(days, len(times))):
+        if i >= len(tmin) or i >= len(tmax):
+            continue
+        line = f"{_weekday(times[i])} {times[i]}: {tmin[i]}–{tmax[i]}{temp_sym}"
+        cond = _describe_code(codes[i]) if i < len(codes) else ""
+        if cond:
+            line += f", {cond}"
+        if i < len(pops) and pops[i] is not None:
+            line += f", {pops[i]}% precip"
+        lines.append(line)
+
+    return "\n".join(lines)
+
+
+def forecast_for(settings: Settings, location_name: str, days: int = 1) -> str | None:
+    """An on-demand forecast for a named place — geocode, fetch, render.
+
+    Distinct from the injected home snapshot: it resolves an *arbitrary* place
+    (not cached against the configured home) and can span several days. Network
+    I/O, so chat-only (never a background wake). ``None`` on any failure.
+    """
+    name = location_name.strip()
+    if not name:
+        return None
+    coords = _geocode(settings, name)
+    if coords is None:
+        return None
+    days = max(1, min(days, 7))
+    try:
+        data = _fetch(settings, *coords, days=days)
+    except Exception:
+        logger.exception("weather: on-demand fetch for %r failed", name)
+        return None
+    return _render_forecast(settings, name, data, days)
 
 
 def refresh(settings: Settings) -> str | None:

@@ -168,7 +168,9 @@ Weather:
   conditions and today's forecast for the user's location. Use it to answer
   "what's the weather?" and to add a practical touch ("bring a jacket", "rain
   at pickup time") — it is a snapshot fetched at that time, not a live reading,
-  and only covers the configured location."""
+  and only covers the configured location.
+- For weather anywhere else — another city, or a multi-day outlook — call
+  `get_weather` with the place name."""
 
 _PEOPLE = """\
 People:
