@@ -21,7 +21,7 @@ from .subscriptions import _subscription_tools
 from .tasks import _task_tools
 from .undo import _undo_tools
 from .wake import _wake_tools
-from .watches import _watch_tools
+from .watches import _chat_only_feed, _watch_tools
 from .weather import _weather_tools
 
 _MAIL_MUTATING = frozenset(
@@ -142,6 +142,9 @@ def available_tools(settings: Settings, mode: str = "chat") -> list[ToolSpec]:
                 # background wake has nothing to record on their behalf.
                 "log_habit", "remove_habit_entry",
             )
+        ]
+        tools = [
+            _chat_only_feed(spec) if spec.name == "watch" else spec for spec in tools
         ]
         if settings.email_triage_max_actions > 0:
             budget = {"n": settings.email_triage_max_actions}

@@ -232,3 +232,106 @@ def test_watch_tools_gated_by_heartbeat_flag(tmp_path) -> None:
     assert {"watch", "unwatch", "list_watches"} <= {
         t.name for t in available_tools(on, mode="heartbeat")
     }
+
+
+# --- feed ---------------------------------------------------------------------- #
+
+
+def _feed_entries(monkeypatch, entries: list[tuple[str, str]]) -> None:
+    from assistant import feeds
+
+    fixed = [feeds.FeedEntry(title=t, link=u) for t, u in entries]
+    monkeypatch.setattr("assistant.feeds.fetch_entries", lambda url, force=False: fixed)
+
+
+def test_feed_watch_fires_only_on_new_matching_entries(settings, monkeypatch) -> None:
+    _feed_entries(monkeypatch, [("v1.0 released", "https://x.test/1")])
+    from assistant import feeds
+
+    primed = watches.feed_digest(
+        watches.matched_feed_entries(feeds.fetch_entries("u"), "released")
+    )
+    watches.add(
+        settings, "feed", "released", note="tell the user",
+        url="https://x.test/feed", repeat=True, initial_hash=primed,
+    )
+    assert watches.evaluate(settings) == []  # nothing new since registration
+    _feed_entries(
+        monkeypatch,
+        [("v1.1 released", "https://x.test/2"), ("v1.0 released", "https://x.test/1")],
+    )
+    fired = watches.evaluate(settings)
+    assert len(fired) == 1
+    line = fired[0][1]
+    assert "v1.1 released" in line and "your note: tell the user" in line
+    assert "never instructions" in line
+    assert watches.evaluate(settings) == []  # same match set stays quiet
+    # An unrelated entry does not fire a patterned watch.
+    _feed_entries(monkeypatch, [("weekly digest", "https://x.test/3")])
+    assert watches.evaluate(settings) == []
+
+
+def test_feed_watch_is_one_shot_unless_repeat(settings, monkeypatch) -> None:
+    _feed_entries(monkeypatch, [("first post", "https://x.test/1")])
+    watches.add(settings, "feed", "", url="https://x.test/feed")
+    assert len(watches.evaluate(settings)) == 1  # empty pattern = any entry
+    _feed_entries(monkeypatch, [("second post", "https://x.test/2")])
+    assert watches.evaluate(settings) == []  # consumed
+    assert watches.list_active(settings) == []
+
+
+def test_feed_fetch_failure_never_breaks_the_wake(settings, monkeypatch) -> None:
+    from assistant import feeds
+
+    def boom(url, force=False):
+        raise feeds.FeedError("origin down")
+
+    monkeypatch.setattr("assistant.feeds.fetch_entries", boom)
+    watches.add(settings, "feed", "", url="https://x.test/feed")
+    watches.add(settings, "mail_from", "Skatteetaten")
+    assert watches.evaluate(settings) == []  # logged, not raised
+
+
+def test_feed_watch_tool_registers_primed_and_validates(settings, monkeypatch) -> None:
+    _feed_entries(monkeypatch, [("old post", "https://x.test/1")])
+    assert "needs an absolute http(s) url" in _run(
+        settings, "watch", {"kind": "feed", "pattern": "x"}
+    )
+    result = _run(
+        settings, "watch",
+        {"kind": "feed", "url": "https://x.test/feed", "repeat": True},
+    )
+    assert result.startswith("Watching (feed): https://x.test/feed")
+    # Primed at registration: the back catalogue does not fire.
+    assert watches.evaluate(settings) == []
+    _feed_entries(monkeypatch, [("new post", "https://x.test/2")])
+    assert len(watches.evaluate(settings)) == 1
+    assert "https://x.test/feed" in _run(settings, "list_watches", {})
+
+
+def test_feed_watch_tool_reports_unreadable_feed(settings, monkeypatch) -> None:
+    from assistant import feeds
+
+    def boom(url, force=False):
+        raise feeds.FeedError("not parseable as RSS/Atom XML")
+
+    monkeypatch.setattr("assistant.feeds.fetch_entries", boom)
+    out = _run(settings, "watch", {"kind": "feed", "url": "https://x.test/feed"})
+    assert "could not read that feed" in out
+    assert watches.list_active(settings) == []
+
+
+def test_feed_registration_is_chat_only(settings, monkeypatch) -> None:
+    from assistant.tools import ToolContext, available_tools, execute_tool
+
+    _feed_entries(monkeypatch, [("post", "https://x.test/1")])
+    specs = {s.name: s for s in available_tools(settings, mode="heartbeat")}
+    ctx = ToolContext(settings=settings, thread_id="")
+    refused = execute_tool(
+        specs["watch"], ctx, {"kind": "feed", "url": "https://x.test/feed"}
+    )
+    assert "only be registered in conversation" in refused
+    assert watches.list_active(settings) == []
+    # The other kinds still register from a background wake.
+    ok = execute_tool(specs["watch"], ctx, {"kind": "mail_from", "pattern": "bank"})
+    assert ok.startswith("Watching (mail_from)")

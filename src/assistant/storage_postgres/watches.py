@@ -30,9 +30,15 @@ def ensure_watches_schema(settings: Settings) -> None:
               expires_at TEXT NOT NULL DEFAULT '',
               last_match_hash TEXT NOT NULL DEFAULT '',
               created_at TEXT NOT NULL,
-              status TEXT NOT NULL DEFAULT 'active'
+              status TEXT NOT NULL DEFAULT 'active',
+              url TEXT NOT NULL DEFAULT ''
             )
             """
+        )
+        # Tables created before a column existed need it added in place.
+        conn.execute(
+            "ALTER TABLE assistant_watches"
+            " ADD COLUMN IF NOT EXISTS url TEXT NOT NULL DEFAULT ''"
         )
     _schema_mark(settings, "watches")
 
@@ -48,6 +54,7 @@ def _from_row(row: dict):
         lead_minutes=int(row.get("lead_minutes") or 0),
         repeat=bool(row.get("repeat")),
         fire_at=str(row.get("fire_at") or ""),
+        url=str(row.get("url") or ""),
         expires_at=str(row.get("expires_at") or ""),
         last_match_hash=str(row.get("last_match_hash") or ""),
         created_at=str(row.get("created_at") or ""),
@@ -60,9 +67,9 @@ def add_watch(settings: Settings, watch) -> None:
     with connect(settings) as conn:
         conn.execute(
             "INSERT INTO assistant_watches"
-            " (id, kind, pattern, note, lead_minutes, repeat, fire_at,"
+            " (id, kind, pattern, note, lead_minutes, repeat, fire_at, url,"
             "  expires_at, last_match_hash, created_at, status)"
-            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, '', %s, 'active')",
+            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'active')",
             (
                 watch.id,
                 watch.kind,
@@ -71,7 +78,9 @@ def add_watch(settings: Settings, watch) -> None:
                 watch.lead_minutes,
                 int(watch.repeat),
                 watch.fire_at,
+                watch.url,
                 watch.expires_at,
+                watch.last_match_hash,
                 watch.created_at,
             ),
         )

@@ -386,7 +386,7 @@ def gather_situation(
     if active_watches:
         info.append("Watches you have set (drop stale ones with unwatch):")
         info += [
-            f"  - [{w.kind}] {w.pattern or 'user silence'}"
+            f"  - [{w.kind}] {w.url or w.pattern or 'user silence'}"
             + (f" — {w.note}" if w.note else "")
             + f" (id {w.id})"
             for w in active_watches[:8]
