@@ -378,6 +378,12 @@ completes (the CLI does not expose token deltas, so granularity is per message).
   charges (amount, cadence, renewal date); "what am I paying for?" lists them
   with an estimated monthly-spend rollup, and each renewal fires a heads-up a few
   days ahead (exactly-once via the fired ledger) so nothing surprises you.
+- **Expense log** — with `ENABLE_EXPENSES=true`, log one-off spending as it
+  happens ("250 kr on groceries") with `log_expense`; `expense_summary` rolls
+  any month up per currency and category, `remove_expense` fixes a mis-log, and
+  on the 1st the daily briefing opens with last month's rollup. The complement
+  of subscriptions: that's what recurs, this is where the money actually went.
+  `GET /expenses` inspects the log.
 - **Reading list (read-it-later)** — with `ENABLE_READING=true`, a place to
   save links to get back to: "save this for later" stores it, "what's on my
   reading list?" lists the unread ones, and the assistant can mark them read or

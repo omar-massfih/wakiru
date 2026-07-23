@@ -41,6 +41,13 @@ from .docs import (
     reindex_documents,
     search_chunks,
 )
+from .expenses import (
+    delete_expense_entry,
+    ensure_expenses_schema,
+    get_expense_entry,
+    list_expense_entries,
+    log_expense_entry,
+)
 from .followups import (
     add_followup,
     cancel_followup,
@@ -211,6 +218,7 @@ __all__ = [
     "create_trip",
     "delete_document",
     "delete_event",
+    "delete_expense_entry",
     "delete_habit_entry",
     "delete_list_item",
     "delete_note",
@@ -224,6 +232,7 @@ __all__ = [
     "enabled",
     "ensure_calendar_schema",
     "ensure_docs_schema",
+    "ensure_expenses_schema",
     "ensure_fired_schema",
     "ensure_followups_schema",
     "ensure_goals_schema",
@@ -247,6 +256,7 @@ __all__ = [
     "find_note",
     "get_document",
     "get_event",
+    "get_expense_entry",
     "get_habit_entry",
     "get_list_item",
     "get_person",
@@ -266,6 +276,7 @@ __all__ = [
     "list_active_watches",
     "list_documents",
     "list_events",
+    "list_expense_entries",
     "list_habit_entries",
     "list_list_items",
     "list_memory_entries",
@@ -278,6 +289,7 @@ __all__ = [
     "list_subscriptions",
     "list_tasks",
     "list_trips",
+    "log_expense_entry",
     "log_habit_entry",
     "mail_audit_rows",
     "mark_calendar_writes_undone",

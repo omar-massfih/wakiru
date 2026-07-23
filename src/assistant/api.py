@@ -830,6 +830,32 @@ def subscriptions_list() -> dict:
     }
 
 
+@app.get("/expenses", dependencies=[Depends(require_token)])
+def expenses_list(month: str = "", category: str = "") -> dict:
+    """Expense-log entries, filterable with ``?month=YYYY-MM`` / ``?category=<name>``."""
+    from .expenses import context as expense_context
+    from .expenses import store as expense_store
+
+    settings = get_settings()
+    entries = expense_store.list_entries(settings, month=month, category=category)
+    return {
+        "categories": expense_store.category_names(settings),
+        "totals": expense_context.totals_by_currency(entries),
+        "total": len(entries),
+        "entries": [
+            {
+                "id": e.id,
+                "amount": e.amount,
+                "currency": e.currency,
+                "category": e.category,
+                "note": e.note,
+                "spent_on": e.spent_on,
+            }
+            for e in entries
+        ],
+    }
+
+
 @app.get("/habits", dependencies=[Depends(require_token)])
 def habits_list(habit: str = "") -> dict:
     """Habit-log overview, or a single habit's entries with ``?habit=<name>``."""

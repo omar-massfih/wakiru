@@ -9,6 +9,7 @@ from .calendar import _calendar_tools
 from .code import _code_tools
 from .docs import _docs_tools, _web_ingest_tools, _web_tools
 from .email import _email_tools, _mail_mutated
+from .expenses import _expense_tools
 from .followups import _followup_tools
 from .goals import _goal_tools
 from .habits import _habit_tools
@@ -82,6 +83,8 @@ def available_tools(settings: Settings, mode: str = "chat") -> list[ToolSpec]:
         tools += _habit_tools()
     if settings.enable_subscriptions:
         tools += _subscription_tools()
+    if settings.enable_expenses:
+        tools += _expense_tools()
     if settings.enable_weather:
         tools += _weather_tools()
     if settings.enable_reminders:
@@ -147,6 +150,9 @@ def available_tools(settings: Settings, mode: str = "chat") -> list[ToolSpec]:
                 # Habit writes are chat-only — the user logs what they did; a
                 # background wake has nothing to record on their behalf.
                 "log_habit", "remove_habit_entry",
+                # Expense writes likewise — only the user knows what they
+                # spent; expense_summary stays readable for rollup questions.
+                "log_expense", "remove_expense",
             )
         ]
         tools = [

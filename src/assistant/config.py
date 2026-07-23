@@ -409,6 +409,13 @@ class Settings(BaseSettings):
     # and trends). Off by default. Tool-only — not injected into every turn.
     enable_habits: bool = False
 
+    # --- Expense log ---
+    # Master switch: keep an append log of one-off spending (amount, currency,
+    # category, date) and expose the expense tools (log + monthly rollup by
+    # category). The briefing opens each month with last month's rollup. Off by
+    # default. Tool-only — not injected into every turn.
+    enable_expenses: bool = False
+
     # --- Subscriptions / bills ---
     # Master switch: track recurring charges (amount, cadence, renewal date),
     # expose the subscription tools, and fire a renewal reminder before each
@@ -685,6 +692,11 @@ class Settings(BaseSettings):
     def habits_db_path(self) -> Path:
         """SQLite file holding the health / habits log."""
         return self.memory_path / "habits.db"
+
+    @property
+    def expenses_db_path(self) -> Path:
+        """SQLite file holding the expense log."""
+        return self.memory_path / "expenses.db"
 
     @property
     def subscriptions_db_path(self) -> Path:

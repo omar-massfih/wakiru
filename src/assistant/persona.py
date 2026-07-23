@@ -213,6 +213,16 @@ Subscriptions:
   `remove_subscription` (when they cancel) manage them. Renewals fire a heads-up
   a few days ahead on their own, so they can cancel in time."""
 
+_EXPENSES = """\
+Expenses:
+- The user can log one-off spending as it happens ("250 kr on groceries",
+  "bought train tickets, 89"). Record it with `log_expense` — amount required,
+  plus the currency, a short category, and a note when given. `expense_summary`
+  rolls a month up by category ("what did I spend this month?"); pass YYYY-MM
+  for an earlier month. `remove_expense` fixes a mis-log. Distinct from
+  subscriptions (recurring charges): this is where the money actually went. The
+  monthly briefing opens with last month's rollup on the 1st."""
+
 _READING = """\
 Reading list:
 - The user keeps a read-it-later list of links. Save one with `save_reading`
@@ -326,6 +336,8 @@ def system_prompt(settings: Settings) -> str:
         parts.append(_HABITS)
     if settings.enable_subscriptions:
         parts.append(_SUBSCRIPTIONS)
+    if settings.enable_expenses:
+        parts.append(_EXPENSES)
     if settings.enable_weather:
         parts.append(_WEATHER)
     if settings.enable_docs:

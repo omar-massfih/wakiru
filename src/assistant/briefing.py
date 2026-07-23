@@ -71,6 +71,16 @@ def build_briefing(settings: Settings) -> str:
                 parts.append(block)
         except Exception:
             logger.exception("briefing: people section failed; skipping it")
+    if settings.enable_expenses:
+        # Non-empty only on the 1st (last month's rollup), so it costs the
+        # briefing nothing the rest of the month.
+        try:
+            from .expenses.context import briefing_expenses
+
+            if block := briefing_expenses(settings, now(settings).date()):
+                parts.append(block)
+        except Exception:
+            logger.exception("briefing: expenses section failed; skipping it")
     if settings.enable_email:
         # Imported lazily so the briefing works with the mail extra not installed.
         try:
