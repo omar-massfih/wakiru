@@ -350,6 +350,12 @@ completes (the CLI does not expose token deltas, so granularity is per message).
 
 - **Daily briefing** — one digest per day (agenda + due tasks + unread mail) pushed
   through the reminder channels at `BRIEFING_TIME`; `POST /briefing/run` on demand.
+- **Weekly review** — with `ENABLE_WEEKLY_REVIEW=true`, one look-back +
+  week-ahead digest per week (tasks completed, habit streaks, and spending from
+  the last seven days; calendar, due tasks, trips, birthdays, and subscription
+  renewals for the next seven), due at `WEEKLY_REVIEW_DAY` + `WEEKLY_REVIEW_TIME`
+  (default Sunday 17:00), exactly once per ISO week; `POST /weekly-review/run`
+  on demand.
 - **Personalization** — durable memories tagged `profile` (working hours, locations,
   quiet hours, tone) are injected every turn, and quiet hours (a stated
   preference, else `QUIET_HOURS_DEFAULT`) hold reminders/briefings until morning.

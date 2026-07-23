@@ -49,6 +49,7 @@ from .sleep import run_sleep
 from .subscriptions.reminders import run_subscription_reminders
 from .tasks import store as tasks_store
 from .tasks.reminders import run_task_reminders
+from .weekly_review import run_weekly_review
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +82,8 @@ def _reminder_tick_once() -> None:
     # The daily briefing rides the same tick; its own ledger makes it
     # exactly-once per day and a cheap no-op every other pass.
     run_briefing(get_settings(), agent=_agent())
+    # The weekly review too — exactly-once per ISO week via its own ledger.
+    run_weekly_review(get_settings(), agent=_agent())
     # The unread-mail snapshot rides along too, on its own (slower)
     # cadence — a no-op tick when email is off or the snapshot is fresh.
     mail_snapshot.maybe_refresh(get_settings())
@@ -552,6 +555,16 @@ def briefing_run() -> dict:
     reports it was already sent rather than pushing a duplicate.
     """
     return run_briefing(get_settings(), force=True, agent=_agent())
+
+
+@app.post("/weekly-review/run", dependencies=[Depends(require_token)])
+def weekly_review_run() -> dict:
+    """Send this week's review now (even if the scheduled moment hasn't passed).
+
+    Idempotent per ISO week via the fired ledger: a second call the same week
+    reports it was already sent rather than pushing a duplicate.
+    """
+    return run_weekly_review(get_settings(), force=True, agent=_agent())
 
 
 @app.post("/heartbeat/run", dependencies=[Depends(require_token)])

@@ -515,6 +515,17 @@ class Settings(BaseSettings):
     # ("what was that reminder about?" works). No extra LLM cost.
     enable_proactive_loop_in: bool = True
 
+    # --- Weekly review ---
+    # Push one look-back + week-ahead digest per week (completed tasks, habit
+    # streaks, last week's spending; calendar, due tasks, trips, birthdays,
+    # renewals for the next seven days) through the reminder channels.
+    enable_weekly_review: bool = False
+    # Local weekday (mon..sun) + wall-clock time (HH:MM, in TIMEZONE) the
+    # review becomes due. The ticker fires it on the first tick at/after that
+    # moment in the same ISO week, exactly once per week.
+    weekly_review_day: str = "sun"
+    weekly_review_time: str = "17:00"
+
     # --- Heartbeat (deliberative proactivity) ---
     # Periodically let the model itself review the situation (due followups,
     # briefing, mail changes, contact staleness — or nothing at all) and
