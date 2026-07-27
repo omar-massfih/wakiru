@@ -18,10 +18,13 @@ from assistant.config import Settings
 
 @pytest.fixture
 def settings(tmp_path) -> Settings:
+    # Heartbeat off by default here: these exercise the template composition
+    # path. The delegation tests flip enable_heartbeat=True explicitly.
     return Settings(
         memory_dir=str(tmp_path / "memory"),
         enable_briefing=True,
         enable_email=False,
+        enable_heartbeat=False,
     )
 
 

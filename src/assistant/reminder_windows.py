@@ -40,6 +40,46 @@ def repeat_slot(remaining: timedelta, repeat_minutes: int) -> int:
     return math.floor(remaining.total_seconds() / 60 / repeat_minutes) * repeat_minutes
 
 
+def next_band_change(
+    remaining: timedelta,
+    leads: list[int],
+    repeat: int,
+    *,
+    repeat_floor: timedelta,
+) -> timedelta | None:
+    """How long from now until the item's next reminder band opens, or ``None``.
+
+    The heartbeat's wake scheduler uses this to pull the next wake to the
+    moment a new band opens — a lead window's start, the at-start nudge, or the
+    next repeat slot — so the base cadence doesn't make reminders late. Only
+    *future* openings count (``> 0``); a band already open is the current
+    wake's to claim. Nudged one minute past the exact boundary so the wake
+    lands inside the new band, not on its edge.
+    """
+    nudge = timedelta(minutes=1)
+    if repeat > 0:
+        if remaining <= repeat_floor:
+            return None
+        opening = remaining - timedelta(minutes=max(leads, default=0))
+        if opening > timedelta(0):
+            return opening
+        # Inside the window: the next repeat slot opens when the countdown
+        # drops below the current slot's boundary.
+        boundary = remaining - timedelta(minutes=repeat_slot(remaining, repeat))
+        change = boundary if boundary > timedelta(0) else boundary + timedelta(minutes=repeat)
+        change += nudge
+        return change if remaining - change > repeat_floor else None
+    openings = [
+        remaining - timedelta(minutes=lead)
+        for lead in leads
+        if remaining > timedelta(minutes=lead)
+    ]
+    if remaining > timedelta(0):
+        # The at-start band opens just after the item begins.
+        openings.append(remaining + nudge)
+    return min(openings, default=None)
+
+
 def due_slots(
     remaining: timedelta,
     leads: list[int],

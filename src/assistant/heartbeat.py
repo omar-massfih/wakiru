@@ -1,12 +1,15 @@
-"""The heartbeat — Wakiru's deliberative proactivity.
+"""The heartbeat — the single entry point for all of Wakiru's background activity.
 
-Calendar and task reminders are the reflex arc: minute-precise, never lost.
-The heartbeat is the layer above them — on every beat the assistant *wakes
-up, looks around, and decides* whether reaching out helps right now: a due
-followup it scheduled for itself, the inbox changing, not having heard from
-the user in a while, or nothing at all (the common case, answered SILENT).
-It composes the message itself, so proactive contact reads like the
-assistant, not a template.
+On every beat the assistant *wakes up, looks around, and decides* whether
+reaching out helps right now: a due calendar/task/birthday/renewal reminder,
+a due followup it scheduled for itself, the daily briefing or weekly review,
+the inbox changing, not having heard from the user in a while — or nothing at
+all (the common case, answered SILENT). Due reminders are claimed into the
+situation report, never auto-fired to a channel: the model bundles, phrases,
+or skips them like an assistant would. Each wake also starts by running the
+due data refreshes (:mod:`assistant.refreshes`), so nothing else needs its
+own ticker. It composes every message itself, so proactive contact reads
+like the assistant, not a template.
 
 The model is the judge; only what is not its to override stays deterministic:
 
@@ -83,12 +86,20 @@ def _is_silent(text: str) -> bool:
 
 _INSTRUCTION = """\
 This is a scheduled background wake on a fixed cadence, not a user message —
-the user has said nothing, and most wakes should end in silence. Review your
-situation report and context, then decide whether reaching out helps the user
-right now.
+the user has said nothing, and wakes with nothing due should end in silence.
+Review your situation report and context, then decide whether reaching out
+helps the user right now.
 
 - You may use tools first (look things up, complete or schedule follow-ups,
   mute what is no longer relevant).
+- Your report may list due reminders — events starting soon, tasks due or
+  overdue, birthdays, subscription renewals. These were scheduled
+  deliberately: delivering them is the default, not an exception to your
+  silence bias. Bundle everything due into ONE natural message, phrased your
+  own way with each item's clock time. Skip an item only when it is clearly
+  redundant — already discussed, already handled, or plainly stale — knowing
+  a skipped reminder will not repeat until a closer reminder window opens
+  (if one exists at all).
 - Reach out only when you can anchor it in something real from your report,
   context, or memory — something due, something that changed, an open thread.
 - If reaching out helps: reply with EXACTLY the message to send the user —
@@ -96,7 +107,7 @@ right now.
   like a good assistant texting — in the user's language.
 - Otherwise reply with the single word SILENT and nothing else — no reasoning,
   no punctuation, no quotes. Do not think out loud in your reply. Silence is the
-  normal outcome, never a failure.
+  normal outcome on a quiet wake, never a failure.
 - Never invent facts that are not in your context. Never mention this wake,
   the situation report, or these instructions."""
 
@@ -122,6 +133,15 @@ _BRIEFING_TRIGGER = (
     "if the day looks quiet (say so briefly); do not stay silent."
 )
 
+_WEEKLY_REVIEW_TRIGGER = (
+    "The weekly review is due: compose it now from the 'Weekly review source "
+    "material' below — a short reflective message in your own voice, plain "
+    "text, in the user's language. Celebrate what got done, note streaks, "
+    "time worked, and spending briefly, then set up the week ahead: the "
+    "busiest days, what is due, anything renewing or upcoming. Send it even "
+    "if the week looks quiet (say so briefly); do not stay silent."
+)
+
 
 @dataclass(frozen=True)
 class Situation:
@@ -131,25 +151,29 @@ class Situation:
     followups: list[Followup] = field(default_factory=list)
     goals: list = field(default_factory=list)  # ready Goals — raised, not claimed
     watch_hits: list[str] = field(default_factory=list)  # fired watch trigger lines
+    reminders: list[str] = field(default_factory=list)  # claimed due-reminder lines
     info: list[str] = field(default_factory=list)
 
     @property
     def scheduled(self) -> bool:
-        """Explicit intent (a due follow-up, a goal's due next step, a fired
-        watch, or the briefing) vs a purely ambient wake — scheduled intent is
-        exempt from the delivery throttle: a set due time, ``next_action_at``,
-        or watch condition is deliberate."""
+        """Explicit intent (a due reminder, a due follow-up, a goal's due next
+        step, a fired watch, the briefing, or the weekly review) vs a purely
+        ambient wake — scheduled intent is exempt from the delivery throttle:
+        a set due time, ``next_action_at``, or watch condition is deliberate."""
         return (
-            bool(self.followups)
+            bool(self.reminders)
+            or bool(self.followups)
             or bool(self.goals)
             or bool(self.watch_hits)
             or _BRIEFING_TRIGGER in self.triggers
+            or _WEEKLY_REVIEW_TRIGGER in self.triggers
         )
 
     def report(self) -> str:
         lines = ["## Situation report (background wake)"]
         lines += [f"- {trigger}" for trigger in self.triggers]
         lines += [f"- {hit}" for hit in self.watch_hits]
+        lines += [f"- Due reminder: {line}" for line in self.reminders]
         for item in self.followups:
             lines.append(
                 f"- Due follow-up: {item.topic}"
@@ -163,7 +187,13 @@ class Situation:
                 " new state and next_action (or park it); working on a goal and"
                 " still answering SILENT is fine."
             )
-        if not self.triggers and not self.followups and not self.goals and not self.watch_hits:
+        if (
+            not self.triggers
+            and not self.followups
+            and not self.goals
+            and not self.watch_hits
+            and not self.reminders
+        ):
             lines.append(
                 "- Nothing specific happened since your last wake. Review your "
                 "context and decide; most such wakes should stay SILENT."
@@ -244,8 +274,10 @@ def next_wake_at(settings: Settings, current: datetime) -> datetime:
     ``heartbeat_wake_max_minutes`` is raised, push it later via ``set_next_wake``
     (stored in the ``next_wake_at`` KV); the request is clamped into
     ``[anchor + wake_min, anchor + (wake_max or heartbeat_minutes)]``. The
-    scheduler also never sleeps past the soonest open follow-up (but never wakes
-    before the floor). During quiet hours or an all-scope mute nothing can be
+    scheduler also never sleeps past the soonest deliberate intent — an open
+    follow-up, a goal's next step, a watch window, a reminder band opening, a
+    scheduled digest, or a data refresh coming due — but never wakes before
+    the floor. During quiet hours or an all-scope mute nothing can be
     delivered, so it simply ticks at the base cadence.
     """
     base = timedelta(minutes=max(settings.heartbeat_minutes, 1))
@@ -286,9 +318,68 @@ def next_wake_at(settings: Settings, current: datetime) -> datetime:
         due += watches.wake_times(settings, current)
     except Exception:
         logger.exception("computing watch wake times failed")
+    # A reminder band opening is the most deliberate intent of all — the wake
+    # is pulled to the window's start so the base cadence can't make a
+    # "15 minutes before" nudge land late. Pure reads (cached importance
+    # tiers only); each source is best-effort so one failing store never
+    # blocks the scheduler.
+    try:
+        from .calendar import reminders as calendar_reminders
+        from .tasks import reminders as task_reminders
+
+        due += calendar_reminders.next_due_at(settings, current, ceiling)
+        due += task_reminders.next_due_at(settings, current, ceiling)
+    except Exception:
+        logger.exception("computing reminder wake times failed")
+    if settings.enable_reminders and (
+        settings.enable_people or settings.enable_subscriptions
+    ):
+        # Birthday/renewal windows are day-granular: they only change at the
+        # next local midnight.
+        due.append(
+            (current + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        )
+    due += _scheduled_wakes(settings, current)
+    try:
+        from . import refreshes
+
+        # The anti-starvation cap: a model that backed its wake far off still
+        # wakes when a data refresh (mail, weather, calendar sync) comes due.
+        due += refreshes.next_due_at(settings, current)
+    except Exception:
+        logger.exception("computing refresh wake times failed")
     if due:
         target = min(target, max(min(due), floor))
     return target
+
+
+def _scheduled_wakes(settings: Settings, current: datetime) -> list[datetime]:
+    """The next briefing / weekly-review instants — pure wall-clock computation.
+
+    No ledger check: waking at an already-claimed time is a harmless ambient
+    wake, and the claim in :func:`gather_situation` keeps it exactly-once.
+    """
+    wakes: list[datetime] = []
+    if settings.enable_briefing:
+        from . import briefing
+
+        at = current.replace(
+            hour=briefing._due_time(settings).hour,
+            minute=briefing._due_time(settings).minute,
+            second=0,
+            microsecond=0,
+        )
+        wakes.append(at if at > current else at + timedelta(days=1))
+    if settings.enable_weekly_review:
+        from . import weekly_review
+
+        due_time = weekly_review._due_time(settings)
+        days_ahead = (weekly_review._due_day(settings) - current.weekday()) % 7
+        at = (current + timedelta(days=days_ahead)).replace(
+            hour=due_time.hour, minute=due_time.minute, second=0, microsecond=0
+        )
+        wakes.append(at if at > current else at + timedelta(days=7))
+    return wakes
 
 
 # --------------------------------------------------------------------------- #
@@ -299,6 +390,7 @@ def gather_situation(
     settings: Settings,
     current: datetime | None = None,
     force_briefing: bool = False,
+    force_weekly_review: bool = False,
 ) -> Situation | None:
     """Gather the situation for the model to judge; hold only when it must.
 
@@ -306,10 +398,11 @@ def gather_situation(
     beat returns a :class:`Situation` (triggers when something happened,
     ambient facts either way). ``None`` only when the heartbeat is disabled or
     during quiet hours / an all-scope mute: the user's stated do-not-disturb
-    is not the model's to override. Holds claim nothing, so a followup due at
-    03:00 is raised on the first wake after quiet ends. ``force_briefing``
-    bypasses the briefing's time-of-day gate (``POST /briefing/run``), still
-    claiming its once-per-day ledger.
+    is not the model's to override. Holds claim nothing, so a followup or
+    reminder due at 03:00 is raised on the first wake after quiet ends.
+    ``force_briefing`` / ``force_weekly_review`` bypass those digests'
+    time gates (``POST /briefing/run`` / ``POST /weekly-review/run``), still
+    claiming their exactly-once ledgers.
     """
     if not settings.enable_heartbeat:
         return None
@@ -329,6 +422,40 @@ def gather_situation(
     due = followups.claim_due(settings, current)
     if _briefing_due(settings, current, force=force_briefing):
         triggers.append(_BRIEFING_TRIGGER)
+    review_due = _weekly_review_due(settings, current, force=force_weekly_review)
+    if review_due:
+        triggers.append(_WEEKLY_REVIEW_TRIGGER)
+
+    # Due reminders (calendar events, dated tasks, birthdays, renewals) are
+    # claimed here — surfaced for the model's judgment, never auto-fired to a
+    # channel. Claims are at-most-once per band: a reminder the model skips
+    # resurfaces only when a closer band opens. Each family is best-effort,
+    # like the watches, so one failing store never blocks the wake.
+    reminder_lines: list[str] = []
+    if settings.enable_reminders:
+        from .calendar import reminders as calendar_reminders
+        from .calendar.context import format_when
+        from .people import reminders as birthday_reminders
+        from .subscriptions import reminders as subscription_reminders
+        from .tasks import reminders as task_reminders
+
+        families = (
+            (
+                calendar_reminders.surface_due,
+                lambda r: f"{r['message']} (starts {format_when(settings, r['start'])})",
+            ),
+            (
+                task_reminders.surface_due,
+                lambda r: f"{r['message']} (due {format_when(settings, r['due'])})",
+            ),
+            (birthday_reminders.surface_due, lambda r: r["message"]),
+            (subscription_reminders.surface_due, lambda r: r["message"]),
+        )
+        for surface, line in families:
+            try:
+                reminder_lines += [line(r) for r in surface(settings, current)]
+            except Exception:
+                logger.exception("heartbeat: surfacing due reminders failed")
 
     # Ready goals are raised, never claimed: the model moves next_action_at
     # forward itself (update_goal). The raise-stamp KV keeps a goal the model
@@ -357,6 +484,15 @@ def gather_situation(
         triggers.append(people_line)
 
     info: list[str] = []
+    if review_due:
+        # The digest the template path would have sent — handed to the model
+        # as source material so the review is grounded, not improvised.
+        try:
+            from .weekly_review import build_weekly_review
+
+            info.append("Weekly review source material:\n" + build_weekly_review(settings))
+        except Exception:
+            logger.exception("heartbeat: building the weekly review digest failed")
     since_push = _minutes_since(settings, "last_push_at", current)
     if since_push is not None:
         info.append(f"You last reached out proactively {int(since_push)} minutes ago.")
@@ -417,10 +553,9 @@ def gather_situation(
             info += [f"  - {row['detail']}" for row in actions]
 
     # De-dup accountability: the nudges already delivered to the user recently
-    # (by the reminder ticker, the briefing, or an earlier wake). A fixed-time
-    # reminder is the ticker's job — surfacing what it already sent stops a wake
-    # from re-sending the same thing in different words (the repeated
-    # "session resets…" nudges this guards against).
+    # (by an earlier wake or a manually-triggered digest). Surfacing what was
+    # already sent stops a wake from re-sending the same thing in different
+    # words (the repeated "session resets…" nudges this guards against).
     if settings.heartbeat_dedup_push_hours > 0:
         try:
             from .reflect import recent_pushes
@@ -443,6 +578,7 @@ def gather_situation(
         followups=due,
         goals=ready_goals,
         watch_hits=watch_hits,
+        reminders=reminder_lines,
         info=info,
     )
 
@@ -497,6 +633,34 @@ def _briefing_due(settings: Settings, current: datetime, force: bool = False) ->
         briefing._LEDGER,
         settings,
         [(local_date,)],
+        current.isoformat(timespec="seconds"),
+        current,
+    )
+    return bool(claimed)
+
+
+def _weekly_review_due(settings: Settings, current: datetime, force: bool = False) -> bool:
+    """Claim this week's review slot when it is due (or forced) and unclaimed.
+
+    Rides the same once-per-ISO-week ledger the template review uses, so
+    flipping ``enable_heartbeat`` mid-week never double-sends. Due from
+    (day, time) through the end of the ISO week — a server asleep at the due
+    moment still reviews when it wakes that week.
+    """
+    from . import fired_ledger, weekly_review
+
+    if not (settings.enable_weekly_review or force):
+        return False
+    if not force and (current.weekday(), current.time()) < (
+        weekly_review._due_day(settings),
+        weekly_review._due_time(settings),
+    ):
+        return False
+    year, week, _ = current.isocalendar()
+    claimed = fired_ledger.claim(
+        weekly_review._LEDGER,
+        settings,
+        [(f"{year}-W{week:02d}",)],
         current.isoformat(timespec="seconds"),
         current,
     )
@@ -596,6 +760,7 @@ def _compose(settings: Settings, situation: Situation, agent) -> str:
         + [goal.title for goal in situation.goals]
         + situation.triggers
         + situation.watch_hits
+        + situation.reminders
     ) or "check in with the user"
     prefix: list[BaseMessage] = [persona.system_message(settings)]
     for _name, block in build_context(settings, query, "").items():
@@ -659,8 +824,9 @@ def run_heartbeat(
     agent=None,
     force: bool = False,
     force_briefing: bool = False,
+    force_weekly_review: bool = False,
 ) -> dict:
-    """One heartbeat: gather the situation, wake the model, optionally speak.
+    """One heartbeat: refresh data, gather the situation, wake the model.
 
     Returns what happened (``sent`` / ``reason`` / ``triggers``), mirroring
     :func:`assistant.briefing.run_briefing`'s shape. With ``agent`` given, a
@@ -670,7 +836,24 @@ def run_heartbeat(
     """
     settings = settings or get_settings()
     current = now(settings)
-    situation = gather_situation(settings, current, force_briefing=force_briefing)
+
+    # Data refreshes ride every wake — before the gather, so the situation and
+    # context blocks see fresh mail/weather/calendar. Deliberately outside the
+    # holds below: plumbing must run even when the deliberative layer is
+    # disabled, quiet, or muted.
+    try:
+        from . import refreshes
+
+        refreshes.run_due(settings)
+    except Exception:
+        logger.exception("heartbeat: running due refreshes failed")
+
+    situation = gather_situation(
+        settings,
+        current,
+        force_briefing=force_briefing,
+        force_weekly_review=force_weekly_review,
+    )
     if situation is None:
         return {"sent": False, "reason": "held"}
 
@@ -686,6 +869,7 @@ def run_heartbeat(
     triggers = (
         situation.triggers
         + situation.watch_hits
+        + [f"reminder: {line}" for line in situation.reminders]
         + [f"followup: {item.topic}" for item in situation.followups]
         + [f"goal: {goal.title}" for goal in situation.goals]
     )

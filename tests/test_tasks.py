@@ -388,7 +388,7 @@ def test_undo_nothing_recent(settings) -> None:
 def test_reminder_fires_within_lead(settings) -> None:
     settings = settings.model_copy(update={"reminder_lead_minutes": [60]})
     store.create_task(settings, "submit form", due=_iso_in(settings, minutes=30))
-    fired = reminders.run_task_reminders(settings)
+    fired = reminders.surface_due(settings)
     assert len(fired) == 1
     assert fired[0]["title"] == "submit form"
     # Exact minutes drift with wall-clock; just assert the essentials.
@@ -399,14 +399,14 @@ def test_reminder_fires_within_lead(settings) -> None:
 def test_reminder_outside_lead_not_fired(settings) -> None:
     settings = settings.model_copy(update={"reminder_lead_minutes": [60]})
     store.create_task(settings, "later", due=_iso_in(settings, hours=5))
-    assert reminders.run_task_reminders(settings) == []
+    assert reminders.surface_due(settings) == []
 
 
 def test_reminder_fires_once_then_deduped(settings) -> None:
     settings = settings.model_copy(update={"reminder_lead_minutes": [60]})
     store.create_task(settings, "submit form", due=_iso_in(settings, minutes=30))
-    assert len(reminders.run_task_reminders(settings)) == 1
-    assert reminders.run_task_reminders(settings) == []  # already claimed
+    assert len(reminders.surface_due(settings)) == 1
+    assert reminders.surface_due(settings) == []  # already claimed
 
 
 def test_reminder_ignores_undated_and_done(settings) -> None:
@@ -414,7 +414,7 @@ def test_reminder_ignores_undated_and_done(settings) -> None:
     store.create_task(settings, "undated")  # no due
     done = store.create_task(settings, "done soon", due=_iso_in(settings, minutes=10))
     store.complete_task(settings, done.id)  # completed → not open
-    assert reminders.run_task_reminders(settings) == []
+    assert reminders.surface_due(settings) == []
 
 
 def test_repeat_nags_overdue_then_stops(settings, monkeypatch) -> None:
@@ -432,7 +432,7 @@ def test_repeat_nags_overdue_then_stops(settings, monkeypatch) -> None:
     messages: list[str] = []
     for step in range(0, 61, 15):
         monkeypatch.setattr(reminders, "now", lambda s, t=base + timedelta(minutes=step): t)
-        messages += [r["message"] for r in reminders.run_task_reminders(settings)]
+        messages += [r["message"] for r in reminders.surface_due(settings)]
 
     # Nudges at due-15, due, then overdue every 15 min up to the 30-min window;
     # the due+45 step is past reminder_overdue_max_minutes, so it stays silent.
@@ -459,7 +459,7 @@ def test_repeat_overdue_capped_by_nudge_count(settings, monkeypatch) -> None:
     overdue: list[str] = []
     for step in (15, 30, 45):  # 15, 30, then 45 min past due
         monkeypatch.setattr(reminders, "now", lambda s, t=base + timedelta(minutes=step): t)
-        overdue += [r["message"] for r in reminders.run_task_reminders(settings)]
+        overdue += [r["message"] for r in reminders.surface_due(settings)]
     # Cap = 2 * 15 min = 30 min, so +15 and +30 fire but +45 is silent.
     assert len(overdue) == 2
 
@@ -490,7 +490,7 @@ def test_notify_only_reminder_does_not_nag_overdue(settings, monkeypatch) -> Non
     messages: list[str] = []
     for step in (0, 15, 30):  # at due, then 15 and 30 min overdue
         monkeypatch.setattr(reminders, "now", lambda s, t=base + timedelta(minutes=step): t)
-        messages += [r["message"] for r in reminders.run_task_reminders(settings)]
+        messages += [r["message"] for r in reminders.surface_due(settings)]
     # Fires once at its time, then stays quiet — a normal repeat-mode task would
     # keep nagging overdue here (see test_repeat_nags_overdue_then_stops).
     assert len(messages) == 1
@@ -506,11 +506,11 @@ def test_repeat_overdue_stops_once_done(settings, monkeypatch) -> None:
     )
 
     monkeypatch.setattr(reminders, "now", lambda s: base + timedelta(minutes=30))
-    assert len(reminders.run_task_reminders(settings)) == 1  # overdue nag fires
+    assert len(reminders.surface_due(settings)) == 1  # overdue nag fires
 
     store.complete_task(settings, task.id)
     monkeypatch.setattr(reminders, "now", lambda s: base + timedelta(minutes=45))
-    assert reminders.run_task_reminders(settings) == []  # done → no longer listed
+    assert reminders.surface_due(settings) == []  # done → no longer listed
 
 
 def test_undo_arbiter_reverts_most_recent_across_ledgers(settings) -> None:

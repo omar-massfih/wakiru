@@ -23,7 +23,7 @@ from .context import (
     resolve_tz,
     upcoming_events,
 )
-from .reminders import due_reminders, run_reminders
+from .reminders import due_reminders, surface_due
 from .store import Event
 from .undo import undo_latest
 
@@ -35,8 +35,8 @@ __all__ = [
     "now",
     "overlapping_events",
     "resolve_tz",
-    "run_reminders",
     "store",
+    "surface_due",
     "undo_latest",
     "upcoming_events",
 ]

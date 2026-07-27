@@ -1,9 +1,9 @@
-"""Reminder tests — due computation, the dedupe ledger, pruning, and delivery.
+"""Reminder tests — due computation, the claim-once ledger, pruning, and wake pull.
 
-Everything runs for real (plain SQLite + stdlib datetime); faked are the
-outbound webhook POST and the model composition (stubbed to its deterministic
-fallback — compose_push's own behavior lives in test_compose.py), so these
-stay fast and offline.
+Everything runs for real (plain SQLite + stdlib datetime). Reminders no longer
+deliver anything themselves: ``surface_due`` claims the due bands and hands
+them to the heartbeat's situation report (delivery lives in test_heartbeat.py
+/ test_notify.py), so there is nothing to fake here.
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ import pytest
 from assistant import fired_ledger
 from assistant.calendar import context, reminders, store
 from assistant.config import Settings
+from assistant.reminder_windows import START_GRACE, next_band_change
 
 
 @pytest.fixture
@@ -25,15 +26,6 @@ def settings(tmp_path) -> Settings:
         reminder_importance_enabled=False,  # uniform-lead semantics under test
         enable_reminders=True,
         reminder_lead_minutes=[60],
-        reminder_webhook_url=None,  # no push; run_reminders still computes + records
-    )
-
-
-@pytest.fixture(autouse=True)
-def _compose_fallback(monkeypatch) -> None:
-    """Stand-in composer: behaves like a failed model (returns the fallback)."""
-    monkeypatch.setattr(
-        "assistant.compose.compose_push", lambda s, **kw: kw["fallback"]
     )
 
 
@@ -52,37 +44,37 @@ def _ledger_rows(settings: Settings) -> list[dict]:
 # --- due computation ------------------------------------------------------ #
 
 
-def test_fires_within_lead(settings) -> None:
+def test_surfaces_within_lead(settings) -> None:
     _event_in(settings, "Dentist", minutes=30)
-    fired = reminders.run_reminders(settings)
-    assert len(fired) == 1
-    assert fired[0]["title"] == "Dentist"
+    surfaced = reminders.surface_due(settings)
+    assert len(surfaced) == 1
+    assert surfaced[0]["title"] == "Dentist"
     # Phrasing varies (see assistant.phrasing); the essentials must be there.
-    assert "Dentist" in fired[0]["message"]
-    assert "30 min" in fired[0]["message"]
-    assert fired[0]["lead_minutes"] == 60
+    assert "Dentist" in surfaced[0]["message"]
+    assert "30 min" in surfaced[0]["message"]
+    assert surfaced[0]["lead_minutes"] == 60
 
 
-def test_event_outside_lead_not_fired(settings) -> None:
+def test_event_outside_lead_not_surfaced(settings) -> None:
     _event_in(settings, "Far off", hours=5)  # beyond the 60-min lead
-    assert reminders.run_reminders(settings) == []
+    assert reminders.surface_due(settings) == []
 
 
-def test_past_event_not_fired(settings) -> None:
+def test_past_event_not_surfaced(settings) -> None:
     _event_in(settings, "Missed", minutes=-10)  # beyond START_GRACE
-    assert reminders.run_reminders(settings) == []
+    assert reminders.surface_due(settings) == []
 
 
-def test_at_start_nudge_fires_once(settings) -> None:
-    # The moment the user asked to be reminded at gets its own push: an event
-    # that just started (the ticker lands a little late) fires the at-start
+def test_at_start_nudge_surfaces_once(settings) -> None:
+    # The moment the user asked to be reminded at gets its own band: an event
+    # that just started (the wake lands a little late) surfaces the at-start
     # band, keyed as lead 0, exactly once.
     _event_in(settings, "Standup", minutes=-1)
-    fired = reminders.run_reminders(settings)
-    assert len(fired) == 1
-    assert fired[0]["lead_minutes"] == 0
-    assert "now" in fired[0]["message"]
-    assert reminders.run_reminders(settings) == []  # claimed; later ticks silent
+    surfaced = reminders.surface_due(settings)
+    assert len(surfaced) == 1
+    assert surfaced[0]["lead_minutes"] == 0
+    assert "now" in surfaced[0]["message"]
+    assert reminders.surface_due(settings) == []  # claimed; later wakes silent
 
 
 # --- dedupe ledger -------------------------------------------------------- #
@@ -90,20 +82,20 @@ def test_at_start_nudge_fires_once(settings) -> None:
 
 def test_dedupe_second_run_is_silent(settings) -> None:
     _event_in(settings, "Standup", minutes=15)
-    assert len(reminders.run_reminders(settings)) == 1
-    assert reminders.run_reminders(settings) == []  # already fired
+    assert len(reminders.surface_due(settings)) == 1
+    assert reminders.surface_due(settings) == []  # already claimed
     assert len(_ledger_rows(settings)) == 1
 
 
-def test_recurring_event_fires_per_occurrence(settings) -> None:
+def test_recurring_event_surfaces_per_occurrence(settings) -> None:
     # A daily series whose today-occurrence is 30 min out (DTSTART a few days back).
     occ_time = context.now(settings) + timedelta(minutes=30)
     dtstart = (occ_time - timedelta(days=3)).isoformat(timespec="seconds")
     store.create_event(settings, title="Standup", start=dtstart, rrule="FREQ=DAILY")
 
-    fired = reminders.run_reminders(settings)
-    assert len(fired) == 1 and fired[0]["title"] == "Standup"
-    assert reminders.run_reminders(settings) == []  # this occurrence already fired
+    surfaced = reminders.surface_due(settings)
+    assert len(surfaced) == 1 and surfaced[0]["title"] == "Standup"
+    assert reminders.surface_due(settings) == []  # this occurrence already claimed
 
     # Tomorrow's occurrence has a distinct start, so it is an unclaimed ledger key.
     upcoming = reminders.due_reminders(settings, current=context.now(settings) + timedelta(days=1))
@@ -112,18 +104,18 @@ def test_recurring_event_fires_per_occurrence(settings) -> None:
     assert upcoming[0]["start"] not in fired_starts
 
 
-def test_reschedule_fires_again(settings) -> None:
+def test_reschedule_surfaces_again(settings) -> None:
     event = _event_in(settings, "Call", minutes=20)
-    assert len(reminders.run_reminders(settings)) == 1
+    assert len(reminders.surface_due(settings)) == 1
 
     new_start = (context.now(settings) + timedelta(minutes=45)).isoformat(timespec="minutes")
     store.update_event(settings, event.id, start=new_start)
-    fired = reminders.run_reminders(settings)  # new start => new ledger key
-    assert len(fired) == 1
-    assert fired[0]["start"] == new_start
+    surfaced = reminders.surface_due(settings)  # new start => new ledger key
+    assert len(surfaced) == 1
+    assert surfaced[0]["start"] == new_start
 
 
-def test_multiple_leads_fire_only_open_window(tmp_path) -> None:
+def test_multiple_leads_surface_only_open_window(tmp_path) -> None:
     settings = Settings(
         memory_dir=str(tmp_path / "memory"),
         timezone="Europe/Oslo",
@@ -131,9 +123,9 @@ def test_multiple_leads_fire_only_open_window(tmp_path) -> None:
         reminder_lead_minutes=[1440, 60],  # a day before, and an hour before
     )
     _event_in(settings, "Flight", hours=12)  # inside the day window, outside the hour one
-    fired = reminders.run_reminders(settings)
-    assert len(fired) == 1
-    assert fired[0]["lead_minutes"] == 1440
+    surfaced = reminders.surface_due(settings)
+    assert len(surfaced) == 1
+    assert surfaced[0]["lead_minutes"] == 1440
 
 
 def test_ledger_prunes_old_rows(settings) -> None:
@@ -144,187 +136,38 @@ def test_ledger_prunes_old_rows(settings) -> None:
             " VALUES ('stale', 'x', 60, ?)",
             (old,),
         )
-    reminders.run_reminders(settings)  # prunes before firing
+    reminders.surface_due(settings)  # prunes before claiming
     assert all(r["event_id"] != "stale" for r in _ledger_rows(settings))
 
 
 def test_disabled_is_noop(tmp_path) -> None:
     settings = Settings(memory_dir=str(tmp_path / "memory"), enable_reminders=False)
     _event_in(settings, "Whatever", minutes=10)
-    assert reminders.run_reminders(settings) == []
+    assert reminders.surface_due(settings) == []
 
 
-# --- delivery ------------------------------------------------------------- #
-
-
-class _FakeResponse:
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
-        return False
-
-
-def test_webhook_delivery(tmp_path, monkeypatch) -> None:
-    settings = Settings(
-        memory_dir=str(tmp_path / "memory"),
-        timezone="Europe/Oslo",
-        reminder_importance_enabled=False,  # uniform-lead semantics under test
-        reminder_lead_minutes=[60],
-        reminder_webhook_url="https://ntfy.example/topic",
-    )
-    _event_in(settings, "Dentist", minutes=30)
-
-    calls: list[dict] = []
-
-    def fake_urlopen(request, timeout=None):
-        calls.append(
-            {
-                "url": request.full_url,
-                "body": request.data.decode("utf-8"),
-                "title": request.headers.get("Title"),
-            }
-        )
-        return _FakeResponse()
-
-    monkeypatch.setattr("assistant.notify.urllib.request.urlopen", fake_urlopen)
-
-    fired = reminders.run_reminders(settings)
-    assert len(fired) == 1
-    assert len(calls) == 1
-    assert calls[0]["url"] == "https://ntfy.example/topic"
-    # One batched push; with composition falling back, its body is the template.
-    assert calls[0]["body"] == fired[0]["message"]
-    assert "Dentist" in calls[0]["body"] and "30 min" in calls[0]["body"]
-    assert calls[0]["title"] == "Reminder"
-
-
-def test_no_webhook_url_skips_post(settings, monkeypatch) -> None:
-    _event_in(settings, "Dentist", minutes=30)
-    monkeypatch.setattr(
-        "assistant.notify.urllib.request.urlopen",
-        lambda *a, **k: pytest.fail("must not POST when no webhook URL is set"),
-    )
-    fired = reminders.run_reminders(settings)  # webhook unset in the fixture
-    assert len(fired) == 1  # still computed + returned
-
-
-def test_non_latin1_title_still_delivers(tmp_path, monkeypatch) -> None:
-    # urllib encodes headers as Latin-1; an emoji title used to raise inside the
-    # ledger transaction and wedge every reminder until the event passed. The
-    # push title is a fixed "Reminder" now, but the emoji still rides in the
-    # body and the claim must survive delivery.
-    settings = Settings(
-        memory_dir=str(tmp_path / "memory"),
-        timezone="Europe/Oslo",
-        reminder_importance_enabled=False,  # uniform-lead semantics under test
-        reminder_lead_minutes=[60],
-        reminder_webhook_url="https://ntfy.example/topic",
-    )
-    _event_in(settings, "Trening 💪", minutes=30)
-
-    calls: list[dict] = []
-
-    def fake_urlopen(request, timeout=None):
-        title = request.headers.get("Title")
-        title.encode("latin-1")  # what http.client does; must not raise
-        calls.append({"title": title, "body": request.data.decode("utf-8")})
-        return _FakeResponse()
-
-    monkeypatch.setattr("assistant.notify.urllib.request.urlopen", fake_urlopen)
-
-    fired = reminders.run_reminders(settings)
-    assert len(fired) == 1
-    assert len(_ledger_rows(settings)) == 1
-    assert len(calls) == 1
-    assert "Trening 💪" in calls[0]["body"]
-
-
-def test_latin1_title_passes_through_unencoded(tmp_path, monkeypatch) -> None:
-    from assistant.notify import _header_value
-
-    assert _header_value("Møte på jobb") == "Møte på jobb"  # Latin-1-safe as-is
-
-
-def test_delivery_crash_keeps_claim(settings, monkeypatch) -> None:
-    # Delivery runs outside the ledger transaction and guarded: a push that
-    # blows up must not roll back the claims (which would make the tick
-    # re-fail forever).
-    _event_in(settings, "First", minutes=10)
-    _event_in(settings, "Second", minutes=20)
-
-    def boom(settings_, reminder):
-        raise UnicodeEncodeError("latin-1", "x", 0, 1, "boom")
-
-    monkeypatch.setattr(reminders, "deliver_reminder", boom)
-
-    fired = reminders.run_reminders(settings)
-    assert {r["title"] for r in fired} == {"First", "Second"}
-    assert len(_ledger_rows(settings)) == 2  # both claims survived the crash
-    assert reminders.run_reminders(settings) == []  # and are not re-fired
-
-
-def test_undelivered_reminder_logs_warning_and_keeps_claim(settings, monkeypatch, caplog) -> None:
-    # No channel configured (or an expired token, etc.) makes deliver_reminder
-    # return False without raising — that must not be a silent no-op: it needs
-    # a log trace, and the claim must still stand (no infinite re-fire).
-    _event_in(settings, "Dentist", minutes=30)
-    monkeypatch.setattr(reminders, "deliver_reminder", lambda settings_, reminder: False)
-
-    with caplog.at_level("WARNING", logger="assistant.fired_ledger"):
-        fired = reminders.run_reminders(settings)
-    assert len(fired) == 1
-    assert any("no delivery channel accepted it" in r.message for r in caplog.records)
-    assert len(_ledger_rows(settings)) == 1  # claim survived
-    assert reminders.run_reminders(settings) == []  # not re-fired
-
-
-def test_batch_composes_one_push_covering_all_due(settings, monkeypatch) -> None:
-    # Several due reminders become ONE composed push; the model gets the
-    # template lines as facts and the joined templates as fallback.
-    _event_in(settings, "First", minutes=10)
-    _event_in(settings, "Second", minutes=20)
-
-    composed: dict = {}
-
-    def fake_compose(s, **kwargs):
-        composed.update(kwargs)
-        return "Snart: First (10 min) og Second (20 min)."
-
-    monkeypatch.setattr("assistant.compose.compose_push", fake_compose)
-    pushes: list[dict] = []
-    monkeypatch.setattr(reminders, "deliver_reminder", lambda s, r, **kw: pushes.append(r) or True)
-
-    fired = reminders.run_reminders(settings)
-    assert {r["title"] for r in fired} == {"First", "Second"}
-    assert len(pushes) == 1
-    assert pushes[0]["message"] == "Snart: First (10 min) og Second (20 min)."
-    assert "First" in composed["facts"] and "Second" in composed["facts"]
-    assert all(r["message"] in composed["fallback"] for r in fired)
-
-
-def test_event_inside_several_lead_windows_fires_once(tmp_path) -> None:
+def test_event_inside_several_lead_windows_surfaces_once(tmp_path) -> None:
     settings = Settings(
         memory_dir=str(tmp_path / "memory"),
         timezone="Europe/Oslo",
         reminder_importance_enabled=False,  # uniform-lead semantics under test
         reminder_lead_minutes=[1440, 60],
     )
-    # Booked half an hour ahead: inside BOTH windows -> one push, not two
-    # identical "in 30 min" messages.
+    # Booked half an hour ahead: inside BOTH windows -> one reminder, not two
+    # identical "in 30 min" lines.
     _event_in(settings, "Flight", minutes=30)
-    fired = reminders.run_reminders(settings)
-    assert len(fired) == 1
-    assert fired[0]["lead_minutes"] == 60  # reported at the tightest lead
-    # Both leads are claimed together, so no later tick can fire a duplicate.
+    surfaced = reminders.surface_due(settings)
+    assert len(surfaced) == 1
+    assert surfaced[0]["lead_minutes"] == 60  # reported at the tightest lead
+    # Both leads are claimed together, so no later wake can surface a duplicate.
     assert {r["lead_minutes"] for r in _ledger_rows(settings)} == {60, 1440}
-    assert reminders.run_reminders(settings) == []
+    assert reminders.surface_due(settings) == []
 
 
 # --- repeat mode ---------------------------------------------------------- #
 
 
-def test_repeat_fires_each_band_until_start(tmp_path, monkeypatch) -> None:
+def test_repeat_surfaces_each_band_until_start(tmp_path, monkeypatch) -> None:
     settings = Settings(
         memory_dir=str(tmp_path / "memory"),
         timezone="Europe/Oslo",
@@ -339,8 +182,10 @@ def test_repeat_fires_each_band_until_start(tmp_path, monkeypatch) -> None:
     messages: list[str] = []
     # Walk wall-clock from 60 min out to the start in 15-min steps.
     for step in range(0, 61, 15):
-        monkeypatch.setattr(reminders, "now", lambda s, t=base + timedelta(minutes=step): t)
-        messages += [r["message"] for r in reminders.run_reminders(settings)]
+        messages += [
+            r["message"]
+            for r in reminders.surface_due(settings, current=base + timedelta(minutes=step))
+        ]
 
     # One nudge per 15-min band: 60, 45, 30, 15, 0 min out.
     assert len(messages) == 5
@@ -350,7 +195,7 @@ def test_repeat_fires_each_band_until_start(tmp_path, monkeypatch) -> None:
     assert {r["lead_minutes"] for r in _ledger_rows(settings)} == {60, 45, 30, 15, 0}
 
 
-def test_repeat_same_band_is_idempotent(tmp_path, monkeypatch) -> None:
+def test_repeat_same_band_is_idempotent(tmp_path) -> None:
     settings = Settings(
         memory_dir=str(tmp_path / "memory"),
         timezone="Europe/Oslo",
@@ -362,12 +207,11 @@ def test_repeat_same_band_is_idempotent(tmp_path, monkeypatch) -> None:
     start = (base + timedelta(minutes=40)).isoformat(timespec="seconds")
     store.create_event(settings, title="Call", start=start)
 
-    monkeypatch.setattr(reminders, "now", lambda s: base)
-    assert len(reminders.run_reminders(settings)) == 1  # remaining 40 -> slot 30
-    assert reminders.run_reminders(settings) == []  # same band, already claimed
+    assert len(reminders.surface_due(settings, current=base)) == 1  # remaining 40 -> slot 30
+    assert reminders.surface_due(settings, current=base) == []  # same band, already claimed
 
 
-def test_repeat_silent_after_start(tmp_path, monkeypatch) -> None:
+def test_repeat_silent_after_start(tmp_path) -> None:
     settings = Settings(
         memory_dir=str(tmp_path / "memory"),
         timezone="Europe/Oslo",
@@ -379,11 +223,11 @@ def test_repeat_silent_after_start(tmp_path, monkeypatch) -> None:
     start = (base + timedelta(minutes=10)).isoformat(timespec="seconds")
     store.create_event(settings, title="Gone", start=start)
 
-    monkeypatch.setattr(reminders, "now", lambda s: base + timedelta(minutes=25))
-    assert reminders.run_reminders(settings) == []  # 15 min past start -> nothing
+    # 15 min past start -> nothing.
+    assert reminders.surface_due(settings, current=base + timedelta(minutes=25)) == []
 
 
-def test_repeat_at_start_band_fires_once(tmp_path, monkeypatch) -> None:
+def test_repeat_at_start_band_surfaces_once(tmp_path) -> None:
     settings = Settings(
         memory_dir=str(tmp_path / "memory"),
         timezone="Europe/Oslo",
@@ -395,19 +239,17 @@ def test_repeat_at_start_band_fires_once(tmp_path, monkeypatch) -> None:
     start = (base + timedelta(minutes=10)).isoformat(timespec="seconds")
     store.create_event(settings, title="Kickoff", start=start)
 
-    # The tick lands 40s after the start (ticker jitter): one "starting now".
-    monkeypatch.setattr(reminders, "now", lambda s: base + timedelta(minutes=10, seconds=40))
-    fired = reminders.run_reminders(settings)
-    assert len(fired) == 1
-    assert "now" in fired[0]["message"]
-    # Next tick, still inside the grace window: the band is claimed, no repeat.
-    monkeypatch.setattr(reminders, "now", lambda s: base + timedelta(minutes=11, seconds=40))
-    assert reminders.run_reminders(settings) == []
+    # The wake lands 40s after the start (loop jitter): one "starting now".
+    surfaced = reminders.surface_due(settings, current=base + timedelta(minutes=10, seconds=40))
+    assert len(surfaced) == 1
+    assert "now" in surfaced[0]["message"]
+    # Next wake, still inside the grace window: the band is claimed, no repeat.
+    assert reminders.surface_due(settings, current=base + timedelta(minutes=11, seconds=40)) == []
 
 
-def test_repeat_skip_occurrence_stops_remaining_nudges(tmp_path, monkeypatch) -> None:
+def test_repeat_skip_occurrence_stops_remaining_nudges(tmp_path) -> None:
     # Regression for the "I'm sick today" incident: after "Exercise in 30 min"
-    # fired, skipping today's occurrence (what the agent does when the user
+    # surfaced, skipping today's occurrence (what the agent does when the user
     # declines) must silence the rest of the countdown — the ledger only
     # dedupes, it must not keep the schedule alive past the EXDATE.
     from assistant.calendar import ops
@@ -424,22 +266,19 @@ def test_repeat_skip_occurrence_stops_remaining_nudges(tmp_path, monkeypatch) ->
     dtstart = (occ - timedelta(days=3)).isoformat(timespec="seconds")
     event = store.create_event(settings, title="Exercise", start=dtstart, rrule="FREQ=DAILY")
 
-    monkeypatch.setattr(reminders, "now", lambda s: base)
-    fired = reminders.run_reminders(settings)
-    assert len(fired) == 1
-    assert "Exercise" in fired[0]["message"] and "30 min" in fired[0]["message"]
+    surfaced = reminders.surface_due(settings, current=base)
+    assert len(surfaced) == 1
+    assert "Exercise" in surfaced[0]["message"] and "30 min" in surfaced[0]["message"]
 
     assert ops.apply_op(
         settings, {"op": "skip", "id": event.id, "occurrence": occ.isoformat()}
     ) is not None
     for step in (14, 25, 29):  # the "in 14 min" nudge and every later band
-        monkeypatch.setattr(reminders, "now", lambda s, t=base + timedelta(minutes=30 - step): t)
-        assert reminders.run_reminders(settings) == []
+        current = base + timedelta(minutes=30 - step)
+        assert reminders.surface_due(settings, current=current) == []
 
     # Tomorrow's occurrence is untouched and nudges normally.
-    tomorrow = base + timedelta(days=1)
-    monkeypatch.setattr(reminders, "now", lambda s: tomorrow)
-    refired = reminders.run_reminders(settings)
+    refired = reminders.surface_due(settings, current=base + timedelta(days=1))
     assert len(refired) == 1
     assert "Exercise" in refired[0]["message"] and "30 min" in refired[0]["message"]
 
@@ -455,57 +294,8 @@ def test_ledger_prune_compares_instants_not_strings(settings) -> None:
             " VALUES ('fresh', 'x', 60, ?)",
             (fresh_other_offset.isoformat(timespec="seconds"),),
         )
-    reminders.run_reminders(settings)  # prunes before firing
+    reminders.surface_due(settings)  # prunes before claiming
     assert any(r["event_id"] == "fresh" for r in _ledger_rows(settings))
-
-
-# --- proactive loop-in ------------------------------------------------------ #
-
-
-class _RecordingAgent:
-    def __init__(self) -> None:
-        self.recorded: list[tuple[str, str]] = []
-
-    def update_state(self, config, update, as_node=None) -> None:
-        self.recorded.append(
-            (config["configurable"]["thread_id"], update["messages"][0].content)
-        )
-
-
-def test_delivered_reminder_is_recorded_on_threads(settings, monkeypatch) -> None:
-    settings.telegram_bot_token = "tok"
-    settings.telegram_allowed_chat_ids = [7]
-    monkeypatch.setattr(reminders, "deliver_reminder", lambda s, r, **kw: True)
-    _event_in(settings, "Dentist", minutes=30)
-    agent = _RecordingAgent()
-    fired = reminders.run_reminders(settings, agent)
-    assert len(fired) == 1
-    # Recorded verbatim as delivered, ⏰ prefix included.
-    assert agent.recorded == [("telegram:7", f"⏰ {fired[0]['message']}")]
-
-
-def test_no_agent_records_nothing(settings) -> None:
-    _event_in(settings, "Dentist", minutes=30)
-    assert len(reminders.run_reminders(settings)) == 1  # delivery path unchanged
-
-
-def test_delivered_reminder_also_records_on_slack_threads(settings, monkeypatch) -> None:
-    from assistant import threads
-
-    settings.telegram_bot_token = "tok"
-    settings.telegram_allowed_chat_ids = [7]
-    settings.slack_bot_token = "xoxb-tok"
-    settings.slack_notify_channel = "C9"
-    # A Slack conversation in the notify channel has spoken to the assistant.
-    threads.touch(settings, "slack:C9:U1")
-
-    monkeypatch.setattr(reminders, "deliver_reminder", lambda s, r, **kw: True)
-    _event_in(settings, "Dentist", minutes=30)
-    agent = _RecordingAgent()
-    fired = reminders.run_reminders(settings, agent)
-    pushed = f"⏰ {fired[0]['message']}"
-    assert ("telegram:7", pushed) in agent.recorded
-    assert ("slack:C9:U1", pushed) in agent.recorded
 
 
 # --- importance tiers ------------------------------------------------------ #
@@ -530,30 +320,30 @@ def _stub_tiers(monkeypatch, verdicts: dict[str, str]) -> None:
     )
 
 
-def test_critical_event_fires_days_ahead(tiered_settings, monkeypatch) -> None:
+def test_critical_event_surfaces_days_ahead(tiered_settings, monkeypatch) -> None:
     event = _event_in(tiered_settings, "Legetime hos Dr. Berg", hours=36)
     _stub_tiers(monkeypatch, {event.id: "critical"})
-    fired = reminders.run_reminders(tiered_settings)
-    assert len(fired) == 1
-    assert fired[0]["tier"] == "critical"
-    assert fired[0]["lead_minutes"] == 2880  # the 2-day window is open
-    assert "2 days" in fired[0]["message"]
-    assert reminders.run_reminders(tiered_settings) == []  # ledger holds
+    surfaced = reminders.surface_due(tiered_settings)
+    assert len(surfaced) == 1
+    assert surfaced[0]["tier"] == "critical"
+    assert surfaced[0]["lead_minutes"] == 2880  # the 2-day window is open
+    assert "2 days" in surfaced[0]["message"]
+    assert reminders.surface_due(tiered_settings) == []  # ledger holds
 
 
 def test_normal_event_silent_days_ahead(tiered_settings, monkeypatch) -> None:
     event = _event_in(tiered_settings, "Coffee with Anna", hours=36)
     _stub_tiers(monkeypatch, {event.id: "normal"})
-    assert reminders.run_reminders(tiered_settings) == []
+    assert reminders.surface_due(tiered_settings) == []
 
 
-def test_normal_event_fires_inside_short_lead(tiered_settings, monkeypatch) -> None:
+def test_normal_event_surfaces_inside_short_lead(tiered_settings, monkeypatch) -> None:
     event = _event_in(tiered_settings, "Coffee with Anna", minutes=10)
     _stub_tiers(monkeypatch, {event.id: "normal"})
-    fired = reminders.run_reminders(tiered_settings)
-    assert len(fired) == 1
-    assert fired[0]["tier"] == "normal"
-    assert fired[0]["lead_minutes"] == 15
+    surfaced = reminders.surface_due(tiered_settings)
+    assert len(surfaced) == 1
+    assert surfaced[0]["tier"] == "normal"
+    assert surfaced[0]["lead_minutes"] == 15
 
 
 def test_flag_off_ignores_criticality(tmp_path) -> None:
@@ -564,7 +354,7 @@ def test_flag_off_ignores_criticality(tmp_path) -> None:
         reminder_lead_minutes=[15],
     )
     _event_in(settings, "Legetime", hours=36)  # would be critical if classified
-    assert reminders.run_reminders(settings) == []
+    assert reminders.surface_due(settings) == []
 
 
 def test_classifier_crash_degrades_to_normal_leads(tiered_settings, monkeypatch) -> None:
@@ -575,6 +365,103 @@ def test_classifier_crash_degrades_to_normal_leads(tiered_settings, monkeypatch)
 
     monkeypatch.setattr(importance, "tiers_for", boom)
     _event_in(tiered_settings, "Legetime", minutes=10)  # inside the normal lead
-    fired = reminders.run_reminders(tiered_settings)
-    assert len(fired) == 1  # reminders never blocked by classification
-    assert fired[0]["tier"] == "normal"
+    surfaced = reminders.surface_due(tiered_settings)
+    assert len(surfaced) == 1  # reminders never blocked by classification
+    assert surfaced[0]["tier"] == "normal"
+
+
+# --- wake scheduling (next_band_change / next_due_at) ---------------------- #
+
+
+def test_next_band_change_lead_mode() -> None:
+    # 90 min out with a 60-min lead: the band opens in 30 min.
+    change = next_band_change(
+        timedelta(minutes=90), [60], 0, repeat_floor=timedelta(0)
+    )
+    assert change == timedelta(minutes=30)
+    # Already inside the lead: the only future opening is the at-start nudge.
+    change = next_band_change(
+        timedelta(minutes=30), [60], 0, repeat_floor=timedelta(0)
+    )
+    assert change == timedelta(minutes=31)  # start + the 1-min nudge
+    # Started and past grace: nothing left.
+    assert (
+        next_band_change(timedelta(minutes=-10), [60], 0, repeat_floor=timedelta(0))
+        is None
+    )
+
+
+def test_next_band_change_picks_soonest_lead() -> None:
+    # 20h out: the 1440-min band is already open (not a future opening); the
+    # next opening is the 60-min band, 19h from now.
+    change = next_band_change(
+        timedelta(hours=20), [1440, 60], 0, repeat_floor=timedelta(0)
+    )
+    assert change == timedelta(hours=19)
+
+
+def test_next_band_change_repeat_mode() -> None:
+    # 40 min out, 60-min window, 15-min repeat: currently in slot 30; the next
+    # band (slot 15... boundary at remaining=30) opens in 10 min + nudge.
+    change = next_band_change(
+        timedelta(minutes=40), [60], 15, repeat_floor=-START_GRACE
+    )
+    assert change == timedelta(minutes=11)
+    # Ahead of the window: the opening is the first candidate.
+    change = next_band_change(
+        timedelta(minutes=90), [60], 15, repeat_floor=-START_GRACE
+    )
+    assert change == timedelta(minutes=30)
+    # Past the floor: nothing left.
+    assert (
+        next_band_change(timedelta(minutes=-20), [60], 15, repeat_floor=-START_GRACE)
+        is None
+    )
+
+
+def test_calendar_next_due_at_pulls_to_window_opening(settings) -> None:
+    current = context.now(settings)
+    _event_in(settings, "Dentist", minutes=90)  # 60-min lead opens in ~30 min
+    openings = reminders.next_due_at(settings, current, current + timedelta(hours=2))
+    assert len(openings) == 1
+    lateness = openings[0] - (current + timedelta(minutes=30))
+    assert abs(lateness) < timedelta(seconds=5)
+
+
+def test_calendar_next_due_at_respects_horizon(settings) -> None:
+    current = context.now(settings)
+    _event_in(settings, "Dentist", minutes=90)
+    # The opening (~30 min out) is beyond a 10-min horizon.
+    assert reminders.next_due_at(settings, current, current + timedelta(minutes=10)) == []
+
+
+def test_calendar_next_due_at_uses_cached_tier_only(tiered_settings, monkeypatch) -> None:
+    from assistant.calendar import importance
+
+    event = _event_in(tiered_settings, "Legetime", hours=36)
+    monkeypatch.setattr(
+        importance,
+        "_classify_llm",
+        lambda *a, **k: pytest.fail("next_due_at must never classify"),
+    )
+    current = context.now(tiered_settings)
+    # Unclassified: treated as normal (15-min lead), far outside the horizon.
+    assert (
+        reminders.next_due_at(tiered_settings, current, current + timedelta(hours=13))
+        == []
+    )
+    # Once cached as critical, the 1440-min band opening (~12h out) pulls a wake.
+    with importance._connect(tiered_settings) as conn:
+        conn.execute(
+            "INSERT INTO event_importance (event_id, title_hash, tier, source, updated)"
+            " VALUES (?, ?, 'critical', 'llm', ?)",
+            (
+                event.id,
+                importance._title_hash("Legetime"),
+                current.isoformat(timespec="seconds"),
+            ),
+        )
+    openings = reminders.next_due_at(tiered_settings, current, current + timedelta(hours=13))
+    assert len(openings) == 1
+    lateness = openings[0] - (current + timedelta(hours=12))
+    assert abs(lateness) < timedelta(seconds=5)

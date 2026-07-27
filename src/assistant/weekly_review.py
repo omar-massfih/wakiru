@@ -5,11 +5,13 @@ question a Sunday evening raises: what happened last week (tasks completed,
 habit streaks, spending) and what is coming in the next seven days (calendar,
 due tasks, trips, birthdays, subscription renewals). Same architecture as
 :mod:`assistant.briefing`: no data model of its own — the subsystem read paths
-are assembled into a digest, the model composes the push in Wakiru's voice
-(:func:`assistant.compose.compose_push`, digest as fallback), delivery goes
-through :func:`assistant.notify.deliver_reminder`, and a fired ledger keyed on
-the ISO week makes the ticker and the manual ``POST /weekly-review/run``
-exactly-once together.
+are assembled into a digest, and with the heartbeat enabled the review is one
+of its wake triggers (the model composes it from the digest as source
+material). Without the heartbeat, the model composes the push here in Wakiru's
+voice (:func:`assistant.compose.compose_push`, digest as fallback) and
+delivery goes through :func:`assistant.notify.deliver_reminder`. Either way a
+fired ledger keyed on the ISO week makes the heartbeat and the manual
+``POST /weekly-review/run`` exactly-once together.
 
 The review becomes *due* at ``weekly_review_day`` + ``weekly_review_time``
 (local wall clock) and fires on the first call at or after that moment in the
@@ -286,11 +288,21 @@ def run_weekly_review(
         return {"sent": False, "reason": "disabled"}
 
     current = now(settings)
-    if not force:
+    if not force and (current.weekday(), current.time()) < (
+        _due_day(settings), _due_time(settings)
+    ):
         # Due from (day, time) through the end of the ISO week — a server
         # asleep at the due moment still reviews when it wakes that week.
-        if (current.weekday(), current.time()) < (_due_day(settings), _due_time(settings)):
-            return {"sent": False, "reason": "not due yet"}
+        return {"sent": False, "reason": "not due yet"}
+
+    if settings.enable_heartbeat:
+        from .heartbeat import run_heartbeat
+
+        return run_heartbeat(
+            settings, agent=agent, force=force, force_weekly_review=force
+        )
+
+    if not force:
         # Quiet hours and an all-scope mute hold the review (nothing is
         # claimed) until the first tick after they end, like the briefing.
         from .memory.profile import in_quiet_hours

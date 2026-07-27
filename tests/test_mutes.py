@@ -88,18 +88,18 @@ def test_muted_event_fires_nothing_until_mute_expires(settings, monkeypatch) -> 
     event = store.create_event(settings, title="Exercise", start=start)
 
     monkeypatch.setattr(calendar_reminders, "now", lambda s: base)
-    assert len(calendar_reminders.run_reminders(settings)) == 1  # first nudge lands
+    assert len(calendar_reminders.surface_due(settings)) == 1  # first nudge lands
 
     # "I'm sick today" -> the agent mutes the event for half an hour.
     mutes.set_mute(settings, "event", event.id, base + timedelta(minutes=35), current=base)
     monkeypatch.setattr(calendar_reminders, "now", lambda s: base + timedelta(minutes=15))
-    assert calendar_reminders.run_reminders(settings) == []  # band held, not claimed
+    assert calendar_reminders.surface_due(settings) == []  # band held, not claimed
     monkeypatch.setattr(calendar_reminders, "now", lambda s: base + timedelta(minutes=30))
-    assert calendar_reminders.run_reminders(settings) == []
+    assert calendar_reminders.surface_due(settings) == []
 
     # Mute expired mid-window: the remaining band fires normally.
     monkeypatch.setattr(calendar_reminders, "now", lambda s: base + timedelta(minutes=45))
-    fired = calendar_reminders.run_reminders(settings)
+    fired = calendar_reminders.surface_due(settings)
     assert len(fired) == 1
     assert "Exercise" in fired[0]["message"] and "15 min" in fired[0]["message"]
 
@@ -111,7 +111,7 @@ def test_mute_holds_only_its_event(settings, monkeypatch) -> None:
     mutes.set_mute(settings, "event", muted.id, base + timedelta(hours=1), current=base)
 
     monkeypatch.setattr(calendar_reminders, "now", lambda s: base)
-    fired = calendar_reminders.run_reminders(settings)
+    fired = calendar_reminders.surface_due(settings)
     assert [r["title"] for r in fired] == ["Dentist"]
 
 
@@ -121,9 +121,9 @@ def test_unmute_resumes_nudges(settings, monkeypatch) -> None:
     mutes.set_mute(settings, "event", event.id, base + timedelta(hours=1), current=base)
 
     monkeypatch.setattr(calendar_reminders, "now", lambda s: base)
-    assert calendar_reminders.run_reminders(settings) == []
+    assert calendar_reminders.surface_due(settings) == []
     mutes.clear_mute(settings, "event", event.id)
-    assert len(calendar_reminders.run_reminders(settings)) == 1
+    assert len(calendar_reminders.surface_due(settings)) == 1
 
 
 # --- task reminders hold ------------------------------------------------------ #
@@ -135,11 +135,11 @@ def test_muted_task_stops_nagging(settings, monkeypatch) -> None:
     task = tasks_store.create_task(settings, "Pay bill", due=due)
 
     monkeypatch.setattr(task_reminders, "now", lambda s: base)
-    assert len(task_reminders.run_task_reminders(settings)) == 1
+    assert len(task_reminders.surface_due(settings)) == 1
 
     mutes.set_mute(settings, "task", task.id, base + timedelta(hours=2), current=base)
     monkeypatch.setattr(task_reminders, "now", lambda s: base + timedelta(minutes=15))
-    assert task_reminders.run_task_reminders(settings) == []
+    assert task_reminders.surface_due(settings) == []
 
 
 # --- the all scope holds everything ------------------------------------------- #
@@ -154,12 +154,17 @@ def test_all_mute_holds_calendar_tasks_and_briefing(settings, monkeypatch) -> No
 
     monkeypatch.setattr(calendar_reminders, "now", lambda s: base)
     monkeypatch.setattr(task_reminders, "now", lambda s: base)
-    assert calendar_reminders.run_reminders(settings) == []
-    assert task_reminders.run_task_reminders(settings) == []
+    assert calendar_reminders.surface_due(settings) == []
+    assert task_reminders.surface_due(settings) == []
 
     settings.enable_briefing = True
     monkeypatch.setattr(briefing, "now", lambda s: base.replace(hour=8, minute=0))
     monkeypatch.setattr(
         briefing, "deliver_reminder", lambda s, r: pytest.fail("must not deliver while muted")
     )
+    # With the heartbeat on (the default) the briefing delegates into it, and
+    # the all-scope mute holds the wake before anything is claimed.
+    assert briefing.run_briefing(settings) == {"sent": False, "reason": "held"}
+    # The template path (heartbeat off) reports the mute explicitly.
+    settings.enable_heartbeat = False
     assert briefing.run_briefing(settings) == {"sent": False, "reason": "muted"}

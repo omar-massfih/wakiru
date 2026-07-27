@@ -3,21 +3,45 @@
 from __future__ import annotations
 
 import pytest
-from fastapi.testclient import TestClient
 from langchain_core.language_models.fake_chat_models import FakeListChatModel
 from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage
 
-from assistant.api import app
 from assistant.codex_runner import build_command
 from assistant.config import Settings
 from assistant.llm import ChatGptChatModel, CodexChatModel, build_model
 
 
-def test_health() -> None:
-    client = TestClient(app)
-    resp = client.get("/health")
-    assert resp.status_code == 200
-    assert resp.json() == {"status": "ok"}
+def test_health_endpoint_serves_liveness() -> None:
+    # The daemon's one HTTP remnant: a bare, unauthenticated /health for
+    # container liveness probes. Bind the handler on an ephemeral port and hit it.
+    import threading
+    import urllib.error
+    import urllib.request
+    from http.server import ThreadingHTTPServer
+
+    from assistant.daemon import _HealthHandler
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _HealthHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        port = server.server_address[1]
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=5) as resp:
+            assert resp.status == 200
+            assert b'"status"' in resp.read()
+        # Anything else is a 404.
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            urllib.request.urlopen(f"http://127.0.0.1:{port}/nope", timeout=5)
+        assert exc.value.code == 404
+    finally:
+        server.shutdown()
+
+
+def test_health_server_disabled_on_nonpositive_port() -> None:
+    # health_port <= 0 disables the endpoint entirely (no thread, no bind).
+    from assistant.daemon import _start_health_server
+
+    assert _start_health_server(0) is None
+    assert _start_health_server(-1) is None
 
 
 def test_agent_graph_compiles(tmp_path) -> None:

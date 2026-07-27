@@ -435,6 +435,7 @@ def _build_openai(settings: Settings) -> BaseChatModel:
         temperature=0,
         max_tokens=settings.llm_max_tokens,
         timeout=settings.llm_timeout,
+        reasoning_effort=settings.llm_reasoning_effort,
     )
 
 

@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from . import store
 from .context import attention_lines, briefing_people, people_context
-from .reminders import due_birthday_reminders, run_birthday_reminders
+from .reminders import due_birthday_reminders, surface_due
 from .store import Person
 
 __all__ = [
@@ -28,6 +28,6 @@ __all__ = [
     "briefing_people",
     "due_birthday_reminders",
     "people_context",
-    "run_birthday_reminders",
     "store",
+    "surface_due",
 ]

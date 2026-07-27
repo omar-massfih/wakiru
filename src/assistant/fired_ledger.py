@@ -2,7 +2,7 @@
 
 Calendar reminders, task reminders, and the daily briefing each need the same
 guarantee: a push claimed once is never pushed again, even when the in-process
-ticker and a manual endpoint race. Each used to carry its own copy of the
+heartbeat and a manual endpoint race. Each used to carry its own copy of the
 open/prune/claim SQLite boilerplate; this module is the single driver, the
 same way :mod:`assistant.write_ledger` is for the undo ledgers.
 
@@ -23,7 +23,6 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
 
 from .config import Settings, postgres_backend
 from .sqlite_util import open_db, transaction
@@ -134,101 +133,52 @@ def claim(
     return newly
 
 
-def fire_due(
+def claim_due(
     spec: FiredLedgerSpec,
     settings: Settings,
-    agent: Any,
     due: list[dict],
     *,
     current: datetime,
     kind: str,
     key_fields: tuple[str, str],
     pg_claim: str,
-    instruction: str,
-    fact_line: Callable[[dict], str],
-    deliver: Callable[[Settings, dict], bool],
-    log_label: str,
 ) -> list[dict]:
-    """Claim every ``due`` reminder exactly once and push the claimed batch.
+    """Claim every ``due`` reminder band exactly once; return what was claimed.
 
-    The pipeline calendar and task reminders share: quiet-hours hold → mute
-    filter → exactly-once claim → one composed push → working-memory record.
-    Each due dict carries ``title``, ``message``, ``covered_leads``, and the two
-    ``key_fields`` (its id and its instant) that key the dedupe ledger together
-    with each covered lead. ``pg_claim`` names the :mod:`assistant.storage_postgres`
-    adapter, resolved at call time so test monkeypatches on that module keep
-    working; ``deliver`` is passed in so callers keep their patchable module
-    attribute. Best-effort and idempotent, so an in-process ticker and a manual
-    trigger can both drive it safely. Quiet hours are the callers' job — they
-    must hold *before* the due list is computed.
+    The claim path calendar and task reminders share: mute filter →
+    exactly-once claim. Each due dict carries ``title``, ``message``,
+    ``covered_leads``, and the two ``key_fields`` (its id and its instant) that
+    key the dedupe ledger together with each covered lead. ``pg_claim`` names
+    the :mod:`assistant.storage_postgres` adapter, resolved at call time so
+    test monkeypatches on that module keep working. A claimed band means
+    "handed to the heartbeat's judgment this wake" — delivery is the
+    heartbeat's decision, not this ledger's. Idempotent, so a scheduled wake
+    and a manual trigger can both drive it safely. Quiet hours are the
+    callers' job — they must hold *before* the due list is computed.
     """
     # Honor active mutes (the agent's "stop nudging me about this" switch):
-    # filtered before the claim, so nudges resume on the first tick after a
+    # filtered before the claim, so nudges resume on the first wake after a
     # mute expires. Deferred import: this low-level ledger must not pull the
-    # compose/delivery stack (and its package cycles) in at import time.
+    # rest of the assistant stack (and its package cycles) in at import time.
     from .mutes import filter_muted
 
     due = filter_muted(settings, due, current, kind)
     fired_at = current.isoformat(timespec="seconds")
 
-    # Claim first, commit, deliver after: delivery is network I/O (webhook POST,
-    # a Telegram send per chat) and must not run inside the ledger's write
-    # transaction, where it would hold SQLite's single writer slot past other
-    # writers' busy timeouts. The cost is at-most-once delivery: a claimed
-    # reminder whose push fails is not retried.
     if storage_postgres := postgres_backend(settings):
-        sent = getattr(storage_postgres, pg_claim)(settings, due, fired_at, current)
-    else:
-        # Claim every lead window each reminder is currently inside, so the
-        # larger leads can't fire a duplicate nudge on a later tick; a reminder
-        # is sent when any of its windows was newly claimed.
-        keys = [
-            (*(reminder[field] for field in key_fields), lead)
-            for reminder in due
-            for lead in reminder["covered_leads"]
-        ]
-        owner = [
-            index
-            for index, reminder in enumerate(due)
-            for _ in reminder["covered_leads"]
-        ]
-        claimed = claim(spec, settings, keys, fired_at, current)
-        sent = [due[index] for index in sorted({owner[key_index] for key_index in claimed})]
-
-    if not sent:
-        return sent
-
-    # One push per batch, composed by the model in the assistant's own voice
-    # (memory and agenda ride in); the deterministic template text every
-    # reminder already carries is the fallback, so a model failure degrades to
-    # exactly the old behavior and never loses the nudge.
-    from .compose import compose_push
-    from .proactive import record_push
-
-    text = compose_push(
-        settings,
-        instruction=instruction,
-        facts="\n".join(fact_line(reminder) for reminder in sent),
-        query=" ".join(reminder["title"] for reminder in sent),
-        fallback="\n".join(reminder["message"] for reminder in sent),
-    )
-    try:
-        delivered = deliver(settings, {"title": "Reminder", "message": text})
-    except Exception:
-        # The claim is already committed; delivery is best-effort by design.
-        logger.exception("%s delivery failed: %s", log_label, text)
-        return sent
-    if delivered:
-        # Recorded with the same ⏰ prefix the chat channels show, so the
-        # thread's history matches what the user actually saw.
-        record_push(agent, settings, f"⏰ {text}")
-        logger.info("fired %d %s(s): %s", len(sent), log_label, text)
-    else:
-        # Claim stands even if no channel is configured — retrying every tick
-        # would rebuild a push that can never land (the same tradeoff
-        # briefing.py/heartbeat.py make on their equivalent branch).
-        logger.warning(
-            "%s claimed %d but no delivery channel accepted it: %s",
-            log_label, len(sent), text,
-        )
-    return sent
+        return getattr(storage_postgres, pg_claim)(settings, due, fired_at, current)
+    # Claim every lead window each reminder is currently inside, so the
+    # larger leads can't surface a duplicate on a later wake; a reminder
+    # is surfaced when any of its windows was newly claimed.
+    keys = [
+        (*(reminder[field] for field in key_fields), lead)
+        for reminder in due
+        for lead in reminder["covered_leads"]
+    ]
+    owner = [
+        index
+        for index, reminder in enumerate(due)
+        for _ in reminder["covered_leads"]
+    ]
+    claimed = claim(spec, settings, keys, fired_at, current)
+    return [due[index] for index in sorted({owner[key_index] for key_index in claimed})]

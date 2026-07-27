@@ -14,7 +14,6 @@ from assistant.config import Settings
 def test_settings_are_isolated_from_the_real_environment() -> None:
     settings = Settings()
     assert settings.telegram_bot_token is None
-    assert settings.api_token is None
     assert settings.llm_api_key is None
     assert settings.slack_bot_token is None
     assert settings.slack_signing_secret is None
@@ -25,9 +24,9 @@ def test_settings_are_isolated_from_the_real_environment() -> None:
 
 def test_explicit_values_still_apply() -> None:
     # Isolation must not break a test's ability to configure Settings directly.
-    settings = Settings(telegram_bot_token="tok", api_token="sekrit")
+    settings = Settings(telegram_bot_token="tok", slack_bot_token="xoxb-tok")
     assert settings.telegram_bot_token == "tok"
-    assert settings.api_token == "sekrit"
+    assert settings.slack_bot_token == "xoxb-tok"
 
 
 def test_defaults_keep_the_conservative_posture() -> None:

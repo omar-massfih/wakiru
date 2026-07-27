@@ -1,20 +1,17 @@
-"""Slack channel — Events API and Socket Mode bridges, over the shared chat core.
+"""Slack channel — a Socket Mode bridge over the shared chat core.
 
-Two transports feed the same :func:`handle_event` core:
-
-* **Events API** (stdlib-only, ``urllib`` + ``hmac``): Slack pushes events to
-  ``POST /slack/events`` (wired in :mod:`assistant.api`) — needs a public HTTPS
-  URL.
-* **Socket Mode** (:func:`start_socket_mode`, via ``slack-sdk``'s builtin
-  websocket client): the app opens an outbound websocket, so it works behind
-  NAT with no public URL, like Telegram's long polling. Enabled by setting
-  ``slack_app_token`` (an xapp- token with ``connections:write``).
+**Socket Mode** (:func:`start_socket_mode`, via ``slack-sdk``'s builtin
+websocket client) feeds the :func:`handle_event` core: the app opens an
+outbound websocket, so it works behind NAT with no public URL, like
+Telegram's long polling — the daemon serves no inbound HTTP. Enabled by
+setting ``slack_app_token`` (an xapp- token with ``connections:write``)
+together with ``slack_bot_token``.
 
 Security, in layers:
 
-* **Signature.** Every callback carries an HMAC of its raw body, keyed by the
-  app's signing secret. :func:`verify_signature` checks it in constant time and
-  rejects stale timestamps, so a replayed or forged request never reaches the model.
+* **Signature.** :func:`verify_signature` (constant-time HMAC + stale-timestamp
+  rejection) remains for any front-end that still receives raw Events API
+  callbacks; Socket Mode authenticates on the websocket itself.
 * **Allowlist.** Only user ids in ``slack_allowed_user_ids`` are answered. Empty
   means *nobody* — there is no pairing handshake here, so an unconfigured
   allowlist fails closed rather than answering the whole workspace.

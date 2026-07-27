@@ -293,12 +293,9 @@ def test_postgres_reminder_ledgers_delegate(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr(storage_postgres, "claim_calendar_reminders", lambda _settings, due, fired_at, current: due)
     monkeypatch.setattr(storage_postgres, "claim_task_reminders", lambda _settings, due, fired_at, current: due)
     monkeypatch.setattr(storage_postgres, "list_mutes", lambda _settings: [])
-    monkeypatch.setattr("assistant.compose.compose_push", lambda s, **kw: kw["fallback"])
-    monkeypatch.setattr(calendar_reminders, "deliver_reminder", lambda _settings, reminder: None)
-    monkeypatch.setattr(task_reminders, "deliver_reminder", lambda _settings, reminder: None)
 
-    assert calendar_reminders.run_reminders(settings)[0]["message"] == "event"
-    assert task_reminders.run_task_reminders(settings)[0]["message"] == "task"
+    assert calendar_reminders.surface_due(settings)[0]["message"] == "event"
+    assert task_reminders.surface_due(settings)[0]["message"] == "task"
 
 
 

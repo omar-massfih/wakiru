@@ -29,6 +29,7 @@ def settings(tmp_path) -> Settings:
         memory_dir=str(tmp_path / "memory"),
         timezone="Europe/Oslo",
         enable_worklog=True,
+        enable_heartbeat=False,  # test the template weekly-review path
     )
 
 

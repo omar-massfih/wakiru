@@ -18,10 +18,13 @@ from assistant.config import Settings
 
 @pytest.fixture
 def settings(tmp_path) -> Settings:
+    # Heartbeat off by default here: these exercise the template composition
+    # path. The delegation test flips enable_heartbeat=True explicitly.
     return Settings(
         memory_dir=str(tmp_path / "memory"),
         enable_weekly_review=True,
         enable_email=False,
+        enable_heartbeat=False,
     )
 
 
@@ -168,7 +171,10 @@ def test_expenses_and_subscriptions_ride_in(settings, delivered, monkeypatch) ->
     assert "Spotify" in message
 
 
-def test_goals_and_reading_backlog_ride_in(settings, delivered, monkeypatch) -> None:
+def test_goals_and_reading_backlog_ride_in(settings, monkeypatch) -> None:
+    # The standing-goals section rides in only with the heartbeat on — which is
+    # also what makes run_weekly_review delegate to the model — so assert on the
+    # assembled digest directly (the heartbeat feeds it in as source material).
     settings.enable_heartbeat = True
     settings.enable_reading = True
     from assistant import goals
@@ -179,14 +185,13 @@ def test_goals_and_reading_backlog_ride_in(settings, delivered, monkeypatch) -> 
     reading_store.create_item(settings, "https://example.com/a", title="Deep article")
     done = reading_store.create_item(settings, "https://example.com/b", title="Skim piece")
     reading_store.mark_read(settings, done.id)
-    assert weekly_review.run_weekly_review(settings)["sent"]
-    message = delivered[0]["message"]
-    assert "Standing goals" in message
-    assert "Plan the summer trip" in message
-    assert "waiting on ferry prices" in message
-    assert "Reading list" in message
-    assert "Backlog: 1 unread" in message and "Deep article" in message
-    assert "Skim piece" not in message  # already read — only counted
+    digest = weekly_review.build_weekly_review(settings)
+    assert "Standing goals" in digest
+    assert "Plan the summer trip" in digest
+    assert "waiting on ferry prices" in digest
+    assert "Reading list" in digest
+    assert "Backlog: 1 unread" in digest and "Deep article" in digest
+    assert "Skim piece" not in digest  # already read — only counted
 
 
 def test_compose_failure_falls_back_to_the_verbatim_digest(

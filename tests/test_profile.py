@@ -117,12 +117,15 @@ def test_unparseable_default_fails_open(settings) -> None:
 
 
 def test_reminders_held_during_quiet_hours(settings, monkeypatch) -> None:
+    # The quiet-hours hold lives in the heartbeat now: gather_situation returns
+    # None before any reminder is computed or claimed, so a window surviving
+    # the night surfaces on the first wake after quiet ends.
+    from assistant import heartbeat
     from assistant.calendar import reminders as cal_reminders
 
+    settings.enable_heartbeat = True
     _note(settings, "Quiet hours 22:00 to 07:00", tags=["profile"])
-    frozen = _at(23)
-    monkeypatch.setattr(cal_reminders, "now", lambda s: frozen)
     monkeypatch.setattr(
         cal_reminders, "due_reminders", lambda s, c: pytest.fail("must hold during quiet hours")
     )
-    assert cal_reminders.run_reminders(settings) == []
+    assert heartbeat.gather_situation(settings, _at(23)) is None

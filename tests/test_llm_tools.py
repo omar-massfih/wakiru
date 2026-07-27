@@ -166,13 +166,15 @@ def test_tool_schemas_stay_small() -> None:
     # (Raised from 9k when the mailbox-management tools landed — reply/archive/
     # mark-read/label plus the gated send_reply — from 12k for find_free_time,
     # task recurrence, and attachment ingestion, from 13k for the timed-
-    # reminder guidance in add_task / schedule_followup, and from 14k for
-    # save_note.)
+    # reminder guidance in add_task / schedule_followup, from 14k for
+    # save_note, and from 15k once the heartbeat became default-on and its
+    # tools — schedule_followup, the goal/watch verbs, set_next_wake — ride
+    # in every chat turn's registry.)
     schemas = [
         s.to_openai_tool()
         for s in available_tools(Settings(enable_email=True, enable_email_send=True))
     ]
-    assert len(json.dumps(schemas)) < 15_000
+    assert len(json.dumps(schemas)) < 22_000
 
 
 # --- streaming hold-and-flush -------------------------------------------------- #

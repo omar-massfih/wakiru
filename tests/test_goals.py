@@ -142,6 +142,7 @@ def test_ready_goal_is_raised_and_counts_as_scheduled(settings) -> None:
 
 
 def test_ignored_goal_reraises_only_after_the_cadence_window(settings) -> None:
+    settings.heartbeat_minutes = 30  # a wide window, so "soon after" is unambiguous
     goals.open_goal(settings, "stuck goal", "s", _at(settings, minutes=-5))
     current = now(settings)
     assert len(heartbeat._raisable_goals(settings, current)) == 1
@@ -164,6 +165,7 @@ def test_advanced_goal_raises_immediately_again(settings, monkeypatch) -> None:
 
 
 def test_goal_next_action_pulls_the_next_wake(settings) -> None:
+    settings.heartbeat_minutes = 30  # ceiling wide enough for a 20-min-out step
     current = now(settings)
     soon = (current + timedelta(minutes=20)).replace(microsecond=0)
     goals.open_goal(settings, "timed step", "s", soon)
@@ -235,7 +237,7 @@ def test_goal_tools_validate_input(settings) -> None:
 def test_goal_tools_gated_by_heartbeat_flag(tmp_path) -> None:
     from assistant.tools import available_tools
 
-    off = Settings(memory_dir=str(tmp_path / "m"))  # heartbeat off by default
+    off = Settings(memory_dir=str(tmp_path / "m"), enable_heartbeat=False)
     assert "open_goal" not in {t.name for t in available_tools(off)}
     on = Settings(memory_dir=str(tmp_path / "m2"), enable_heartbeat=True)
     names = {t.name for t in available_tools(on, mode="heartbeat")}
@@ -257,5 +259,5 @@ def test_goals_context_block_carries_state(settings) -> None:
 def test_goals_context_block_absent_without_heartbeat(tmp_path) -> None:
     from assistant.context_providers import build_context
 
-    settings = Settings(memory_dir=str(tmp_path / "m"))
+    settings = Settings(memory_dir=str(tmp_path / "m"), enable_heartbeat=False)
     assert "goals" not in build_context(settings, "anything", "t")

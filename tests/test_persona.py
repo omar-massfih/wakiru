@@ -60,7 +60,12 @@ def test_capability_sections_follow_their_flags() -> None:
     assert "Calendar:" in on and "Tasks:" in on and "Documents:" in on
 
     off = persona.system_prompt(
-        _settings(enable_calendar=False, enable_tasks=False, enable_docs=False)
+        _settings(
+            enable_calendar=False,
+            enable_tasks=False,
+            enable_docs=False,
+            enable_heartbeat=False,  # its section references the calendar/task tools
+        )
     )
     assert "Calendar:" not in off and "Tasks:" not in off and "Documents:" not in off
     assert "create_event" not in off and "add_task" not in off

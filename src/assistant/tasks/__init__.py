@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from . import store
 from .context import open_tasks, render_tasks, tasks_context
-from .reminders import due_task_reminders, run_task_reminders
+from .reminders import due_task_reminders, surface_due
 from .store import Task
 
 __all__ = [
@@ -25,7 +25,7 @@ __all__ = [
     "due_task_reminders",
     "open_tasks",
     "render_tasks",
-    "run_task_reminders",
     "store",
+    "surface_due",
     "tasks_context",
 ]

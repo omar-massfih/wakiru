@@ -453,9 +453,11 @@ def get_updates(token: str, offset: int | None) -> list[dict]:
     return result if isinstance(result, list) else []
 
 
-# Slash commands the bot advertises (via setMyCommands). Only /reset is
-# answered locally; the rest map to natural-language turns the model answers
-# itself, from its own context and memory (_COMMAND_PROMPTS below).
+# Slash commands the bot advertises (via setMyCommands). /reset and the admin
+# commands (_ADMIN_COMMANDS below — the on-demand background jobs that used to
+# be REST endpoints) are answered locally; the rest map to natural-language
+# turns the model answers itself, from its own context and memory
+# (_COMMAND_PROMPTS below).
 _COMMANDS = [
     ("start", "Show what I can do"),
     ("help", "Show what I can do"),
@@ -464,6 +466,11 @@ _COMMANDS = [
     ("tasks", "Show your open to-do list"),
     ("calendar", "Show upcoming events"),
     ("email", "Show unread mail (if email is enabled)"),
+    ("heartbeat", "Run one heartbeat wake now"),
+    ("briefing", "Send today's briefing now"),
+    ("review", "Send this week's review now"),
+    ("sync", "Sync external calendars now"),
+    ("sleep", "Run the nightly memory pass now"),
 ]
 
 _COMMAND_PROMPTS = {
@@ -473,6 +480,68 @@ _COMMAND_PROMPTS = {
     "calendar": "What's coming up on my calendar?",
     "email": "Any unread mail?",
     "memory": "What do you remember about me?",
+}
+
+
+def _admin_heartbeat(agent, settings: Settings) -> str:
+    from .heartbeat import run_heartbeat
+
+    result = run_heartbeat(settings, agent=agent, force=True)
+    if result.get("sent"):
+        return "Heartbeat ran — message on its way."
+    return f"Heartbeat ran — nothing to send ({result.get('reason', 'silent')})."
+
+
+def _admin_briefing(agent, settings: Settings) -> str:
+    from .briefing import run_briefing
+
+    result = run_briefing(settings, force=True, agent=agent)
+    if result.get("sent"):
+        return "Briefing on its way."
+    return f"No briefing sent ({result.get('reason', 'unknown')})."
+
+
+def _admin_review(agent, settings: Settings) -> str:
+    from .weekly_review import run_weekly_review
+
+    result = run_weekly_review(settings, force=True, agent=agent)
+    if result.get("sent"):
+        return "Weekly review on its way."
+    return f"No review sent ({result.get('reason', 'unknown')})."
+
+
+def _admin_sync(agent, settings: Settings) -> str:
+    from .calendar import remote as calendar_remote
+    from .calendar import sync as calendar_sync
+    from .refreshes import caldav_once
+
+    parts = []
+    if settings.calendar_ics_urls:
+        calendar_sync.pull_feeds(settings)
+        parts.append("feeds pulled")
+    if calendar_remote.is_configured(settings):
+        caldav_once(settings)
+        parts.append("CalDAV synced")
+    return "Calendar sync done" + (f" ({', '.join(parts)})." if parts else " — nothing configured.")
+
+
+def _admin_sleep(agent, settings: Settings) -> str:
+    from .sleep import run_sleep
+
+    run_sleep(settings, agent, force=True)
+    return "Nightly memory pass ran."
+
+
+# The on-demand background jobs — each idempotent via its own ledger, so a
+# repeated command is safe. Anything a job decides to *send* (a briefing, a
+# heartbeat push) arrives through the normal proactive channels; the return
+# value here is only the operator acknowledgement.
+_ADMIN_COMMANDS: dict[str, Callable[..., str]] = {
+    "heartbeat": _admin_heartbeat,
+    "briefing": _admin_briefing,
+    "review": _admin_review,
+    "sync": _admin_sync,
+    "sleep": _admin_sleep,
 }
 
 
@@ -623,13 +692,24 @@ def handle_update(
 
     thread_id = f"telegram:{chat_id}"
 
-    # Slash commands: only /reset is answered locally (it must work even when
-    # the model or the checkpointed history is broken). Every other command
-    # becomes a natural-language turn the model answers itself.
+    # Slash commands: /reset and the admin commands are answered locally
+    # (/reset must work even when the model or the checkpointed history is
+    # broken; the admin commands are deterministic job triggers). Every other
+    # command becomes a natural-language turn the model answers itself.
     if text.startswith("/"):
         parts = text[1:].split()
-        if (parts[0].split("@")[0].lower() if parts else "") == "reset":
+        command = parts[0].split("@")[0].lower() if parts else ""
+        if command == "reset":
             send_message(token, chat_id, _reset_reply(agent, thread_id))
+            return None
+        if (admin := _ADMIN_COMMANDS.get(command)) is not None:
+            try:
+                with _typing(token, chat_id):
+                    reply = admin(agent, settings)
+            except Exception:
+                logger.exception("admin command /%s failed", command)
+                reply = f"Couldn't run /{command} — check the server logs."
+            send_message(token, chat_id, reply)
             return None
         text = _command_turn(text)
 

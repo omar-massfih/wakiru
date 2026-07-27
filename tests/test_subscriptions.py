@@ -12,7 +12,7 @@ from assistant.calendar import context as cal_context
 from assistant.config import Settings
 from assistant.subscriptions import store
 from assistant.subscriptions.context import monthly_totals
-from assistant.subscriptions.reminders import run_subscription_reminders
+from assistant.subscriptions.reminders import surface_due
 from assistant.subscriptions.store import monthly_amount, next_renewal
 from assistant.tools import ToolContext, tool_map
 
@@ -95,35 +95,23 @@ def test_update_and_remove_tools(settings) -> None:
 # --- renewal reminders ------------------------------------------------------ #
 
 
-@pytest.fixture
-def _delivery(monkeypatch):
-    sent: list[dict] = []
-    monkeypatch.setattr("assistant.compose.compose_push", lambda s, **kw: kw["fallback"])
-    monkeypatch.setattr(
-        "assistant.subscriptions.reminders.deliver_reminder",
-        lambda s, r: bool(sent.append(r)) or True,
-    )
-    monkeypatch.setattr("assistant.proactive.record_push", lambda *a, **k: None)
-    return sent
-
-
-def test_renewal_reminder_fires_once(settings, _delivery) -> None:
+def test_renewal_reminder_surfaces_once(settings) -> None:
     soon = (cal_context.now(settings).date() + timedelta(days=2)).isoformat()
     store.create_subscription(settings, "Spotify", amount="129", currency="NOK", cadence="monthly", renews_on=soon)
-    sent = run_subscription_reminders(settings)
-    assert len(sent) == 1
-    assert "Spotify" in _delivery[0]["message"]
-    assert run_subscription_reminders(settings) == []  # exactly-once
+    surfaced = surface_due(settings)
+    assert len(surfaced) == 1
+    assert "Spotify" in surfaced[0]["message"]
+    assert surface_due(settings) == []  # exactly-once
 
 
-def test_renewal_outside_lead_window(settings, _delivery) -> None:
+def test_renewal_outside_lead_window(settings) -> None:
     far = (cal_context.now(settings).date() + timedelta(days=20)).isoformat()
     store.create_subscription(settings, "Gym", cadence="monthly", renews_on=far)
-    assert run_subscription_reminders(settings) == []
+    assert surface_due(settings) == []
 
 
-def test_renewal_reminders_respect_switches(settings, _delivery) -> None:
+def test_renewal_reminders_respect_switches(settings) -> None:
     soon = (cal_context.now(settings).date() + timedelta(days=1)).isoformat()
     store.create_subscription(settings, "X", cadence="monthly", renews_on=soon)
-    assert run_subscription_reminders(settings.model_copy(update={"enable_reminders": False})) == []
-    assert run_subscription_reminders(settings.model_copy(update={"enable_subscriptions": False})) == []
+    assert surface_due(settings.model_copy(update={"enable_reminders": False})) == []
+    assert surface_due(settings.model_copy(update={"enable_subscriptions": False})) == []

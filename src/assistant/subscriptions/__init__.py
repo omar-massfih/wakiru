@@ -10,12 +10,12 @@ schedule needs no upkeep. Low-stakes writes, so no undo ledger.
 from __future__ import annotations
 
 from . import store
-from .reminders import due_renewal_reminders, run_subscription_reminders
+from .reminders import due_renewal_reminders, surface_due
 from .store import Subscription
 
 __all__ = [
     "Subscription",
     "due_renewal_reminders",
-    "run_subscription_reminders",
     "store",
+    "surface_due",
 ]

@@ -3,8 +3,9 @@
 A local calendar write always lands first; the CalDAV push is a best-effort
 second step (see :func:`assistant.calendar.ops._push_caldav`). When that push
 fails — the server is down, or an ``If-Match`` precondition lost a race — the
-intent is parked here so the background reconcile (:mod:`assistant.api`) can
-retry it. The queue lives in its own table so it survives the local row's
+intent is parked here so the background reconcile (the daemon's CalDAV refresh,
+:func:`assistant.refreshes.caldav_once`) can retry it. The queue lives in its
+own table so it survives the local row's
 deletion: a failed *cancel* removes the event locally but the remote ``DELETE``
 still has to happen, and the href/etag/ical snapshot needed to retry is here.
 

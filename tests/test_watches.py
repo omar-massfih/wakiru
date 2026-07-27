@@ -226,7 +226,7 @@ def test_watch_tool_validates_input(settings) -> None:
 def test_watch_tools_gated_by_heartbeat_flag(tmp_path) -> None:
     from assistant.tools import available_tools
 
-    off = Settings(memory_dir=str(tmp_path / "m"))
+    off = Settings(memory_dir=str(tmp_path / "m"), enable_heartbeat=False)
     assert "watch" not in {t.name for t in available_tools(off)}
     on = Settings(memory_dir=str(tmp_path / "m2"), enable_heartbeat=True)
     assert {"watch", "unwatch", "list_watches"} <= {

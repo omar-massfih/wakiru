@@ -1,12 +1,10 @@
 """Proactive birthday reminders for people in the CRM.
 
-Fires one heads-up per person per year when their birthday enters the
-``people_birthday_lead_days`` window — so the user has time to plan — even
-without the heartbeat enabled (that layer surfaces birthdays too, for a model to
-act on; this is the deterministic reminder-channel path). Exactly-once via the
-shared fired ledger keyed on ``(person_id, occurrence-date)``, pushed through the
-same delivery path calendar and task reminders use. Best-effort and idempotent,
-so the in-process ticker and a manual ``POST /reminders/run`` can both drive it.
+Surfaces one heads-up per person per year when their birthday enters the
+``people_birthday_lead_days`` window — so the user has time to plan — into the
+heartbeat's situation report, where the model judges what to say. Exactly-once
+via the shared fired ledger keyed on ``(person_id, occurrence-date)``, the same
+claim-once discipline calendar and task reminders use.
 """
 
 from __future__ import annotations
@@ -16,7 +14,6 @@ from datetime import datetime, timedelta
 from .. import fired_ledger
 from ..calendar.context import now
 from ..config import Settings, get_settings
-from ..notify import deliver_reminder
 from . import store
 from .context import days_until_birthday
 
@@ -69,22 +66,18 @@ def due_birthday_reminders(settings: Settings, current: datetime) -> list[dict]:
     return due
 
 
-def run_birthday_reminders(settings: Settings | None = None, agent=None) -> list[dict]:
-    """Fire every birthday now entering its lead window, exactly once per year.
+def surface_due(settings: Settings | None = None, current: datetime | None = None) -> list[dict]:
+    """Claim every birthday now entering its lead window, exactly once per year.
 
-    No-op when reminders or people are disabled, during quiet hours, or under an
-    all-scope mute — the same holds the briefing applies (nothing is claimed, so
-    it resumes on the first eligible tick after the hold lifts).
+    Returns the claimed heads-ups for the heartbeat's situation report. No-op
+    when reminders or people are disabled. Quiet hours and all-scope mutes are
+    the caller's hold — the heartbeat gathers nothing during them, so nothing
+    is claimed and the heads-up resumes on the first eligible wake.
     """
     settings = settings or get_settings()
     if not (settings.enable_reminders and settings.enable_people):
         return []
-    current = now(settings)
-    from ..memory.profile import in_quiet_hours
-    from ..mutes import all_muted
-
-    if in_quiet_hours(settings, current) or all_muted(settings, current):
-        return []
+    current = current or now(settings)
 
     due = due_birthday_reminders(settings, current)
     if not due:
@@ -92,35 +85,4 @@ def run_birthday_reminders(settings: Settings | None = None, agent=None) -> list
     fired_at = current.isoformat(timespec="seconds")
     keys = [(r["person_id"], r["occurrence"]) for r in due]
     claimed = fired_ledger.claim(_LEDGER, settings, keys, fired_at, current)
-    sent = [due[i] for i in claimed]
-    if not sent:
-        return []
-
-    # One push per batch, composed in the assistant's own voice; the template
-    # text each carries is the fallback, so a model failure still delivers.
-    from ..compose import compose_push
-    from ..proactive import record_push
-
-    text = compose_push(
-        settings,
-        instruction=(
-            "Compose ONE short, warm heads-up about the upcoming birthday(s) "
-            "below, in your own voice, in the user's language. Mention when each "
-            "is and gently suggest reaching out or planning something. Reply "
-            "with the message only — no preamble, no quotes."
-        ),
-        facts="\n".join(f"- {r['message']}" for r in sent),
-        query=" ".join(r["title"] for r in sent),
-        fallback=" ".join(r["message"] for r in sent),
-    )
-    try:
-        delivered = deliver_reminder(settings, {"title": "Birthday", "message": text})
-    except Exception:
-        # The claim is already committed; delivery is best-effort by design.
-        import logging
-
-        logging.getLogger(__name__).exception("birthday reminder delivery failed")
-        return sent
-    if delivered:
-        record_push(agent, settings, f"⏰ {text}")
-    return sent
+    return [due[i] for i in claimed]

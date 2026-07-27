@@ -37,8 +37,7 @@ RUN useradd --create-home --uid 1000 assistant \
     && chown -R assistant:assistant /app
 USER assistant
 ENV CODEX_HOME=/home/assistant/.codex
-# api.lifespan reads HOST to gate non-loopback serving on API_TOKEN.
-ENV HOST=0.0.0.0
+# The daemon serves only a bare GET /health liveness endpoint on HEALTH_PORT.
 EXPOSE 8000
 
 # /health is unauthenticated, so no token is needed here. No curl dependency:
@@ -47,4 +46,5 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
     CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4)"]
 
 # --no-dev: match the build, or `uv run` re-syncs mypy/ruff/pytest on every start.
-CMD ["uv", "run", "--no-dev", "uvicorn", "assistant.api:app", "--host", "0.0.0.0", "--port", "8000"]
+# The living daemon: background loops + chat channels, no web/REST surface.
+CMD ["uv", "run", "--no-dev", "assistant"]

@@ -10,10 +10,17 @@ that drives `codex exec` and returns its reply — meant to be extended with rea
 ## How it works
 
 ```
-HTTP (/chat)  \
+Telegram bot  \
                ->  LangGraph StateGraph  ->  CodexChatModel  ->  `codex exec` subprocess
-Telegram bot  /
+Slack / CLI   /
 ```
+
+Wakiru runs as a **living daemon**: a long-lived process that is nothing but its
+background loops (the heartbeat that drives reminders, digests, and data
+refreshes; the nightly memory pass) and its chat channels (Telegram, Slack).
+There is no web server and no REST API — the only HTTP is a bare, unauthenticated
+`GET /health` for container liveness probes. What used to be an endpoint is now
+either the heartbeat's own job or a Telegram admin command.
 
 - **`codex_runner.py`** — thin subprocess wrapper around `codex exec` (captures the final message).
 - **`llm.py`** — the **provider abstraction**. `build_model()` selects a LangChain `BaseChatModel`
@@ -36,11 +43,12 @@ Telegram bot  /
   post-reply upkeep (memory learning, summary folding, consolidation), shared by
   every channel so they all behave identically. Calendar/task writes happen through
   the tool loop during the turn.
-- **`api.py`** — FastAPI app: `GET /health`, `POST /chat`, `POST /chat/stream` (SSE),
-  `GET /memory` and `POST /memory/consolidate` for inspecting and consolidating the brain,
-  `GET /calendar`, `GET /tasks` for the to-do list, `POST|GET /documents` (+ `/documents/search`,
-  `/documents/{id}/summarize`) for documents, and `POST /reminders/run` for firing
-  due reminders (events and tasks). Swagger UI stays at `/docs`.
+- **`daemon.py`** — the process entry point (`assistant`): starts the heartbeat
+  loop, the nightly sleep loop, Telegram long-polling, and Slack Socket Mode, then
+  waits on a signal to shut down cleanly. Its only HTTP is a bare `GET /health`
+  liveness endpoint on `HEALTH_PORT`. On-demand jobs that used to be REST
+  endpoints are Telegram admin commands (`/heartbeat`, `/briefing`, `/review`,
+  `/sync`, `/sleep`); everything else is the heartbeat's own job.
 - **`tasks/`** — the to-do list: a store, a read path (open tasks injected each turn), a
   tool-driven write path (add/complete/update/remove), a due-task reminder path, and an undo
   ledger — mirroring the `calendar/` package for work with no fixed time and a done state.
@@ -57,21 +65,20 @@ Telegram bot  /
   `EMAIL_TRIAGE_MAX_ACTIONS` opts in, capped per wake — and **sending** needs a second,
   independent switch (`ENABLE_EMAIL_SEND`) and never happens in the background.
 - **`telegram.py`** — the Telegram channel (see below): a stdlib-only long-polling
-  bridge started alongside the server when a bot token is configured. Everything goes to
+  bridge started by the daemon when a bot token is configured. Everything goes to
   the model — slash commands like `/tasks` or `/memory` become natural turns it answers
-  itself, and `"undo"` makes it call the `undo` tool; only `/reset` (and the pairing
-  handshake) is answered locally, so it works even when the model or history is broken.
+  itself, and `"undo"` makes it call the `undo` tool. Answered locally instead: `/reset`
+  (and the pairing handshake), so it works even when the model or history is broken, and
+  the admin commands (`/heartbeat`, `/briefing`, `/review`, `/sync`, `/sleep`) that trigger
+  the on-demand background jobs.
 - **`cli.py`** — a terminal REPL over the same `chat.py` seam (`assistant-cli`), for chatting
-  without the HTTP server or a bot token; it uses one stable thread so history persists.
-- **`slack.py`** — the Slack channel: an Events API bridge (`POST /slack/events`) authenticated
-  by HMAC signature over the raw body, or — when `SLACK_APP_TOKEN` is set — a Socket Mode
-  websocket that needs no public URL (works behind NAT, like Telegram). Only allowlisted user
-  ids are answered — with no pairing handshake, an empty allowlist fails closed. Reminders can
-  fan out to Slack too. While a turn runs, the incoming message gets an ⏳ reaction as an
-  "I'm on it" signal — grant the app the `reactions:write` scope for this (without it the
+  without a bot token; it uses one stable thread so history persists.
+- **`slack.py`** — the Slack channel: a Socket Mode websocket (needs `SLACK_APP_TOKEN`)
+  that requires no public URL and works behind NAT, like Telegram. Only allowlisted user
+  ids are answered — with no pairing handshake, an empty allowlist fails closed. Proactive
+  pushes can fan out to Slack too. While a turn runs, the incoming message gets an ⏳ reaction
+  as an "I'm on it" signal — grant the app the `reactions:write` scope for this (without it the
   reaction is silently skipped and everything else still works).
-- **`webui.py`** — a single self-contained HTML page at `GET /ui` that streams replies from
-  `/chat/stream`. No build step, no CDN. Prompts for `API_TOKEN` when one is configured.
 
 The assistant's own tools work uniformly across providers: the API-backed providers use
 native function calling, while the Codex provider emulates `bind_tools` over plain text —
@@ -108,7 +115,7 @@ How it learns (`src/assistant/memory/`):
   extraction: Codex sees the exchange *and the memories already relevant to it*, then
   emits `save` / `update` / `forget` ops. Seeing current memory lets it fix
   contradictions in place ("moved from Oslo to Bergen") instead of piling up duplicates.
-- **Consolidation** (`consolidate.py`) — periodically (or via `POST /memory/consolidate`)
+- **Consolidation** (`consolidate.py`) — periodically (riding the nightly sleep pass)
   it decays and prunes old episodes, promotes recurring patterns into semantic/procedural
   memory, merges duplicates, resolves contradictions store-wide, and flushes reinforcement
   counters back into the files. It also keeps long-term memory *finite*: durable notes
@@ -185,11 +192,11 @@ daily briefing) is also recorded into each paired Telegram chat's working memory
 and into Slack conversations living in `SLACK_NOTIFY_CHANNEL`
 (`ENABLE_PROACTIVE_LOOP_IN`, on by default), so the conversation knows what it
 already sent you — "what was that reminder about?" just works, and the assistant
-can follow up on its own nudges. A ticker inside the server (no cron needed)
-checks the calendar every `REMINDER_TICK_SECONDS` and, for each event entering the
-`REMINDER_LEAD_MINUTES` window, pushes one message to `REMINDER_WEBHOOK_URL`. A small
-SQLite ledger guarantees each reminder fires exactly once (a rescheduled event nudges
-again for its new time).
+can follow up on its own nudges. The heartbeat (no cron needed) wakes right when
+an event enters its `REMINDER_LEAD_MINUTES` window, surfaces the due reminder in
+its situation report, and the model decides how to phrase (or bundle) the nudge.
+A small SQLite ledger guarantees each reminder surfaces exactly once (a
+rescheduled event nudges again for its new time).
 
 ```sh
 # Point it at an ntfy topic (install the ntfy app and subscribe to the same topic):
@@ -205,18 +212,17 @@ until you mark them done, bounded by `REMINDER_OVERDUE_MAX_MINUTES` (default 24h
 forgotten task can't chase you dozens of times. A purely informational one-time
 reminder ("remind me the session resets at 14:50") is instead recorded as a
 *notify-only* task: it fires once at its time and never nags overdue. And each
-heartbeat wake is shown what the reminder ticker already pushed
+heartbeat wake is shown what was already pushed recently
 (`HEARTBEAT_DEDUP_PUSH_HOURS`, default 6) so it doesn't re-send the same nudge in
 different words.
 
 Delivery fans out to every configured channel: the webhook (any endpoint that accepts
 a plain POST — ntfy, a Discord/Slack webhook, … — the message is the body, the event
 title the `Title` header) and, when the Telegram channel is set up, every allowed
-Telegram chat. Configure neither and reminders are still computed, just not pushed.
+Telegram chat. Configure neither and the nudge is composed but has nowhere to land.
 
-`POST /reminders/run` runs one pass on demand (handy for testing, and idempotent thanks
-to the ledger). Prefer external cron? Set `REMINDER_TICK_SECONDS=0` to disable the
-built-in ticker and curl that endpoint on a schedule instead.
+The `/heartbeat` Telegram command runs one wake on demand (handy for testing, and
+idempotent thanks to the ledgers).
 
 ## Prerequisites
 
@@ -237,18 +243,22 @@ cp .env.example .env   # optional — all settings have defaults
 
 ## Run
 
+Wakiru is a daemon — start it and talk to it over a chat channel (Telegram/Slack),
+or use the terminal REPL for a quick local chat with no channel at all.
+
 ```sh
-uv run uvicorn assistant.api:app --reload
+# The living daemon: heartbeat + nightly pass + whatever channels are configured.
+# Set TELEGRAM_BOT_TOKEN (or SLACK_APP_TOKEN + SLACK_BOT_TOKEN) in .env first.
+uv run assistant
+
+# Or chat locally in the terminal, no bot token needed:
+uv run assistant-cli
 ```
 
 ```sh
+# The only HTTP surface is a liveness probe:
 curl localhost:8000/health
 # {"status":"ok"}
-
-curl -sX POST localhost:8000/chat \
-  -H 'content-type: application/json' \
-  -d '{"message":"What time is it right now?"}'
-# {"reply":"..."}
 ```
 
 ## Docker
@@ -270,7 +280,7 @@ docker build -t agentic-assistent .
 docker run --rm -p 8000:8000 \
   -v "$HOME/.codex:/home/assistant/.codex" \
   -v "$PWD/memory:/app/memory" \
-  -e API_TOKEN=change-me \
+  -e TELEGRAM_BOT_TOKEN=... \
   agentic-assistent
 
 curl localhost:8000/health
@@ -279,9 +289,9 @@ curl localhost:8000/health
 Notes:
 - Host-mounted `./memory` (and `./models` when using docker-compose) must be writable
   by uid 1000 — the container runs as the non-root `assistant` user.
-- `API_TOKEN` is required in the container: the image binds `0.0.0.0`, and the server
-  refuses to start on a non-loopback bind without a token. Set `ALLOW_UNAUTHENTICATED=1`
-  only if something in front (reverse proxy, VPN) does the authentication.
+- The daemon has no REST surface, so there is no `API_TOKEN`: configure at least one
+  chat channel (`TELEGRAM_BOT_TOKEN`, or `SLACK_APP_TOKEN` + `SLACK_BOT_TOKEN`) so you
+  can reach it. The published `:8000` is only the `/health` liveness endpoint.
 - The default `CODEX_SANDBOX=read-only` is safest in a container. If Codex needs to run shell
   commands and the container can't apply its OS sandbox, either widen the sandbox via
   `-e CODEX_SANDBOX=workspace-write` or give the container the privileges Codex's sandbox needs.
@@ -293,7 +303,8 @@ Notes:
 uv run pytest
 ```
 
-Smoke tests build the graph and hit `/health` without invoking Codex.
+Smoke tests build the graph and exercise the daemon's `/health` liveness
+endpoint without invoking Codex.
 
 The real-embedder recall tests are skipped by default (they load the ~2GB
 embedding model); run them with `REAL_EMBEDDINGS=1 uv run pytest tests/test_recall_real.py`.
@@ -324,37 +335,27 @@ an export artifact instead of the source of truth.
 See `.env.example`. Notably `CODEX_SANDBOX` defaults to `read-only`; widen it deliberately.
 `CODEX_WEB_SEARCH` is similarly off by default; turn it on deliberately too.
 
-Set `API_TOKEN` to require `Authorization: Bearer <token>` on every endpoint except
-`/health`. Unset, the server trusts anyone who can reach the port — fine on the
-default loopback bind, but on any non-loopback bind (the Docker image binds
-`0.0.0.0`) startup fails without a token. `ALLOW_UNAUTHENTICATED=1` overrides the
-refusal for deployments where a reverse proxy or VPN does the authentication.
+The daemon exposes no REST surface, so there is no token to configure — access is
+whoever can message the bot. Lock that down at the channel: Telegram pairs to the
+first chat and ignores the rest (or pin `TELEGRAM_ALLOWED_CHAT_IDS`), and Slack
+answers only `SLACK_ALLOWED_USER_IDS`. `HEALTH_PORT` (default 8000) serves only the
+unauthenticated liveness probe; set it to 0 to disable even that.
 
 ## Using an API-backed provider
 
 Set `LLM_PROVIDER=openai` or `anthropic` and `LLM_API_KEY=<your key>`. Optionally
 override `LLM_MODEL` (defaults: `gpt-4o` for openai, `claude-opus-4-8` for anthropic)
-and, for openai-compatible endpoints, `LLM_BASE_URL`. Unlike the default `codex`
-provider, these support token streaming (see below).
-
-## Streaming
-
-`POST /chat/stream` returns the reply as Server-Sent Events: `data: <text>` frames
-as the model produces the reply, a final `event: done` frame with the `thread_id`,
-and `event: error` if the model fails mid-stream. Post-reply upkeep runs once, after
-the stream closes, exactly as `POST /chat` does. Every provider streams: the `codex`
-provider parses the CLI's `--json` event stream and emits each agent message as it
-completes (the CLI does not expose token deltas, so granularity is per message).
+and, for openai-compatible endpoints, `LLM_BASE_URL`.
 
 ## Newer capabilities
 
 - **Daily briefing** — one digest per day (agenda + due tasks + unread mail) pushed
-  through the reminder channels at `BRIEFING_TIME`; `POST /briefing/run` on demand.
+  through the chat channels at `BRIEFING_TIME`; the `/briefing` Telegram command on demand.
 - **Weekly review** — with `ENABLE_WEEKLY_REVIEW=true`, one look-back +
   week-ahead digest per week (tasks completed, habit streaks, and spending from
   the last seven days; calendar, due tasks, trips, birthdays, and subscription
   renewals for the next seven), due at `WEEKLY_REVIEW_DAY` + `WEEKLY_REVIEW_TIME`
-  (default Sunday 17:00), exactly once per ISO week; `POST /weekly-review/run`
+  (default Sunday 17:00), exactly once per ISO week; the `/review` Telegram command
   on demand.
 - **Personalization** — durable memories tagged `profile` (working hours, locations,
   quiet hours, tone) are injected every turn, and quiet hours (a stated
@@ -364,8 +365,9 @@ completes (the CLI does not expose token deltas, so granularity is per message).
 - **External calendar sync** — `CALENDAR_ICS_URLS` mirrors Google/Outlook/CalDAV
   ICS feeds into the local calendar (read-only, one-way) every
   `CALENDAR_SYNC_MINUTES`; agenda, conflicts, and reminders see the real calendar.
-- **Richer document ingest** — `POST /documents/upload` accepts PDF/DOCX/text
-  files; `POST /documents` can also take a `url` (opt-in, `ENABLE_DOCS_URL_INGEST`).
+- **Richer document ingest** — send a PDF/DOCX/text file to the bot and it is
+  extracted, chunked, and embedded; the model can also read a `url` into the store
+  with its document tools (opt-in, `ENABLE_DOCS_URL_INGEST`).
 - **Voice notes** — with `ENABLE_VOICE=true`, Telegram voice messages are
   transcribed locally (faster-whisper) and answered like typed text.
 - **People / contacts (lightweight CRM)** — with `ENABLE_PEOPLE=true`, a store
@@ -389,7 +391,6 @@ completes (the CLI does not expose token deltas, so granularity is per message).
   any month up per currency and category, `remove_expense` fixes a mis-log, and
   on the 1st the daily briefing opens with last month's rollup. The complement
   of subscriptions: that's what recurs, this is where the money actually went.
-  `GET /expenses` inspects the log.
 - **Work log / time tracking** — with `ENABLE_WORKLOG=true`, track working time
   per project: `start_work` starts the clock ("back to the report" — a running
   timer is stopped and logged first, so switching is one call), `stop_work`
@@ -398,7 +399,6 @@ completes (the CLI does not expose token deltas, so granularity is per message).
   project. While the clock runs a small Work-timer block rides in each turn,
   and the weekly review carries last week's hours per project. The work twin of
   the expense log: that's where the money went, this is where the time went.
-  `GET /worklog` inspects the log.
 - **Reading list (read-it-later)** — with `ENABLE_READING=true`, a place to
   save links to get back to: "save this for later" stores it, "what's on my
   reading list?" lists the unread ones, and the assistant can mark them read or

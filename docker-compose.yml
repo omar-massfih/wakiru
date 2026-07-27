@@ -5,13 +5,14 @@ services:
     container_name: agentic-assistent
     restart: unless-stopped
     ports:
-      - "8000:8000"
+      - "8000:8000"  # the daemon's bare /health liveness endpoint (HEALTH_PORT)
     env_file:
       - .env
       - path: .env.local
         required: false
-    # DATABASE_URL comes from .env.local (Neon); API_TOKEN from .env (required: the
-    # server won't start unauthenticated on 0.0.0.0).
+    # DATABASE_URL comes from .env.local (Neon). The daemon has no REST surface,
+    # so no API_TOKEN is needed; the chat channels (Telegram/Slack) authenticate
+    # via their own allowlists.
     environment:
       STORAGE_BACKEND: postgres
       FASTEMBED_CACHE_PATH: /app/models/fastembed  # persist the ~2GB model across rebuilds

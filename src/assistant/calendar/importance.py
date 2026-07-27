@@ -129,6 +129,31 @@ def _classify_llm(settings: Settings, events: list[Event]) -> dict[str, str]:
     }
 
 
+def cached_tiers(settings: Settings, events: Sequence[Event]) -> dict[str, str]:
+    """The cached tier per event id — no LLM call, misses default to normal.
+
+    For the heartbeat's wake scheduler, which runs every polling slice and must
+    stay a pure read: an unclassified critical event is at worst woken for on
+    the base cadence instead of pulled early, and :func:`tiers_for` grades it
+    on the next actual wake.
+    """
+    tiers: dict[str, str] = {}
+    with _connect(settings) as conn:
+        rows = {
+            row["event_id"]: row
+            for row in conn.execute(
+                "SELECT event_id, title_hash, tier FROM event_importance"
+            )
+        }
+    for event in events:
+        row = rows.get(event.id)
+        if row is not None and row["title_hash"] == _title_hash(event.title):
+            tiers[event.id] = row["tier"]
+        else:
+            tiers[event.id] = TIER_NORMAL
+    return tiers
+
+
 def tiers_for(settings: Settings, events: Sequence[Event]) -> dict[str, str]:
     """The importance tier per event id, classifying cache misses in one call.
 

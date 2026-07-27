@@ -10,7 +10,7 @@ divergence in the tasks twin once silently broke Postgres undo).
 
 The undo discipline is: compute the batch first, mutate the store second,
 claim the ledger rows third — no SQLite connection is held open across the
-``store.*`` mutations (matching :func:`assistant.calendar.reminders.run_reminders`).
+``store.*`` mutations (matching :func:`assistant.calendar.reminders.surface_due`).
 """
 
 from __future__ import annotations

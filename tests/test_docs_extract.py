@@ -1,8 +1,10 @@
-"""Document extraction tests — PDF/DOCX/HTML to text, and the ingest endpoints.
+"""Document extraction tests — PDF/DOCX/HTML to text, and ingest-then-search.
 
 The PDF is handcrafted (offsets computed, so the xref is valid) and the DOCX is
 generated with python-docx, so both real parsers run — no fixtures on disk, no
-network. Embeddings are faked as in test_docs.py.
+network. Embeddings are faked as in test_docs.py. Ingestion is driven through
+the store directly (the daemon has no HTTP surface); the model reaches these
+paths through its document tools.
 """
 
 from __future__ import annotations
@@ -13,11 +15,10 @@ import re
 import zlib
 
 import pytest
-from fastapi.testclient import TestClient
 
-from assistant.api import app
 from assistant.config import Settings
 from assistant.docs import extract
+from assistant.docs import store as docs_store
 
 
 def _tiny_pdf(text: str) -> bytes:
@@ -144,58 +145,22 @@ def _fake_embed(texts, prefix: str = "", settings=None):
 
 
 @pytest.fixture
-def client(tmp_path, monkeypatch) -> TestClient:
-    settings = Settings(memory_dir=str(tmp_path / "memory"), docs_min_similarity=0.1)
-    monkeypatch.setattr("assistant.api.get_settings", lambda: settings)
+def settings(tmp_path, monkeypatch) -> Settings:
     monkeypatch.setattr("assistant.memory.embeddings._embed", _fake_embed)
-    return TestClient(app)
+    return Settings(memory_dir=str(tmp_path / "memory"), docs_min_similarity=0.1)
 
 
-def test_upload_pdf_ingests_and_is_searchable(client) -> None:
-    response = client.post(
-        "/documents/upload",
-        files={"file": ("hello.pdf", _tiny_pdf("The fjord tour starts in Flam"), "application/pdf")},
-    )
-    assert response.status_code == 200
-    body = response.json()
-    assert body["title"] == "hello.pdf" and body["chunks"] >= 1
+def test_pdf_extracts_ingests_and_is_searchable(settings) -> None:
+    # The pipeline a document tool drives: raw bytes → extracted text →
+    # chunked/embedded/stored → recalled by semantic search.
+    text = extract.extract_text("hello.pdf", _tiny_pdf("The fjord tour starts in Flam"))
+    doc = docs_store.add_document(settings, "hello.pdf", text)
+    assert doc.title == "hello.pdf" and doc.chunks >= 1
 
-    found = client.get("/documents/search", params={"q": "fjord tour Flam"}).json()
-    assert found["total"] >= 1 and "fjord" in found["chunks"][0]["text"]
+    found = docs_store.search_chunks(settings, "fjord tour Flam")
+    assert found and "fjord" in found[0].text
 
 
-def test_upload_unreadable_file_is_422(client) -> None:
-    response = client.post(
-        "/documents/upload", files={"file": ("broken.docx", b"junk", "application/msword")}
-    )
-    assert response.status_code == 422
-
-
-def test_documents_requires_exactly_one_of_text_and_url(client) -> None:
-    assert client.post("/documents", json={"title": "x"}).status_code == 422
-    assert (
-        client.post("/documents", json={"title": "x", "text": "hi", "url": "https://e.x"}).status_code
-        == 422
-    )
-
-
-def test_url_ingest_disabled_by_default(client) -> None:
-    response = client.post("/documents", json={"url": "https://example.com"})
-    assert response.status_code == 403
-
-
-def test_url_ingest_fetches_when_enabled(tmp_path, monkeypatch) -> None:
-    settings = Settings(
-        memory_dir=str(tmp_path / "memory"),
-        docs_min_similarity=0.1,
-        enable_docs_url_ingest=True,
-    )
-    monkeypatch.setattr("assistant.api.get_settings", lambda: settings)
-    monkeypatch.setattr("assistant.memory.embeddings._embed", _fake_embed)
-    monkeypatch.setattr(
-        "assistant.api.docs_extract.fetch_url_text",
-        lambda url: ("Example Page", "Prose from the page."),
-    )
-    client = TestClient(app)
-    body = client.post("/documents", json={"url": "https://example.com"}).json()
-    assert body["title"] == "Example Page" and body["chunks"] >= 1
+def test_unreadable_upload_raises_extraction_error(settings) -> None:
+    with pytest.raises(extract.ExtractionError):
+        extract.extract_text("broken.docx", b"junk")

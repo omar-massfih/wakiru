@@ -2,12 +2,13 @@
 
 The task equivalent of :mod:`assistant.calendar.reminders`, but simpler — a task
 has a single ``due`` instant (a recurring task's due rolls forward on
-completion, re-arming these reminders for the next occurrence). On each call
-:func:`run_task_reminders` finds open, dated tasks entering a configured *lead*
-window (:attr:`Settings.reminder_lead_minutes`, shared with the calendar), fires
-each exactly once via a small SQLite dedupe ledger in ``tasks.db``, and pushes it
-through :func:`assistant.notify.deliver_reminder`. Best-effort and idempotent, so
-the in-process ticker and a manual ``POST /reminders/run`` can both drive it.
+completion, re-arming these reminders for the next occurrence). On each
+heartbeat wake :func:`surface_due` finds open, dated tasks entering a
+configured *lead* window (:attr:`Settings.reminder_lead_minutes`, shared with
+the calendar), claims each band exactly once via a small SQLite dedupe ledger
+in ``tasks.db``, and hands it to the heartbeat's situation report — the model
+judges what to say. :func:`next_due_at` tells the wake scheduler when the next
+band opens.
 """
 
 from __future__ import annotations
@@ -18,8 +19,7 @@ from .. import fired_ledger
 from ..calendar.context import now
 from ..calendar.store import parse_dt
 from ..config import Settings, get_settings
-from ..notify import deliver_reminder
-from ..reminder_windows import START_GRACE, due_slots
+from ..reminder_windows import START_GRACE, due_slots, next_band_change
 from . import store
 
 # The dedupe ledger lives in the same ``tasks.db`` file the store uses.
@@ -60,22 +60,9 @@ def due_task_reminders(settings: Settings, current: datetime | None = None) -> l
         if due is None:
             continue
         remaining = due - current
-        if task.notify_only:
-            # A one-time informational nudge: fire the leads and one "now" band,
-            # then go silent — never chase it overdue, whatever the repeat config.
-            overdue_floor = -START_GRACE
-        else:
-            # In repeat mode the nagging continues while overdue, until the task
-            # is done or the overdue window is exhausted — bounded by *both* a
-            # time window and a count of re-nudges, so a forgotten task can't nag
-            # dozens of times before the day is out.
-            overdue_minutes = settings.reminder_overdue_max_minutes
-            if repeat > 0 and settings.reminder_overdue_max_nudges > 0:
-                overdue_minutes = min(
-                    overdue_minutes, settings.reminder_overdue_max_nudges * repeat
-                )
-            overdue_floor = timedelta(minutes=-overdue_minutes)
-        slots = due_slots(remaining, leads, repeat, repeat_floor=overdue_floor)
+        slots = due_slots(
+            remaining, leads, repeat, repeat_floor=_overdue_floor(settings, task, repeat)
+        )
         if not slots:
             continue
         reminders.append(
@@ -93,44 +80,70 @@ def due_task_reminders(settings: Settings, current: datetime | None = None) -> l
     return reminders
 
 
-def run_task_reminders(settings: Settings | None = None, agent=None) -> list[dict]:
-    """Fire every due-task reminder now due, exactly once, and return what was sent.
+def _overdue_floor(settings: Settings, task, repeat: int) -> timedelta:
+    """How far past its due instant a task keeps nagging (as a negative delta)."""
+    if task.notify_only:
+        # A one-time informational nudge: fire the leads and one "now" band,
+        # then go silent — never chase it overdue, whatever the repeat config.
+        return -START_GRACE
+    # In repeat mode the nagging continues while overdue, until the task
+    # is done or the overdue window is exhausted — bounded by *both* a
+    # time window and a count of re-nudges, so a forgotten task can't nag
+    # dozens of times before the day is out.
+    overdue_minutes = settings.reminder_overdue_max_minutes
+    if repeat > 0 and settings.reminder_overdue_max_nudges > 0:
+        overdue_minutes = min(
+            overdue_minutes, settings.reminder_overdue_max_nudges * repeat
+        )
+    return timedelta(minutes=-overdue_minutes)
 
-    Same claim-first / deliver-after discipline (and the same loop-in recording
-    via ``agent``) as :func:`assistant.calendar.reminders.run_reminders` — both
-    are thin wrappers over :func:`assistant.fired_ledger.fire_due`. No-op
-    returning ``[]`` when reminders or tasks are disabled.
+
+def surface_due(settings: Settings | None = None, current: datetime | None = None) -> list[dict]:
+    """Claim every due-task reminder now due, exactly once, for the heartbeat.
+
+    Same claim-once discipline as :func:`assistant.calendar.reminders.surface_due`
+    — both are thin wrappers over :func:`assistant.fired_ledger.claim_due`.
+    No-op returning ``[]`` when reminders or tasks are disabled. Quiet hours
+    are the caller's hold.
     """
     settings = settings or get_settings()
     if not (settings.enable_reminders and settings.enable_tasks):
         return []
 
-    current = now(settings)
-    # Same quiet-hours hold as calendar reminders: nothing is computed or
-    # claimed, so the nag resumes on the first tick after quiet ends (within
-    # the overdue bound).
-    from ..memory.profile import in_quiet_hours
-
-    if in_quiet_hours(settings, current):
-        return []
+    current = current or now(settings)
     due = due_task_reminders(settings, current)
-    return fired_ledger.fire_due(
+    return fired_ledger.claim_due(
         _LEDGER,
         settings,
-        agent,
         due,
         current=current,
         kind="task",
         key_fields=("task_id", "due"),
         pg_claim="claim_task_reminders",
-        instruction=(
-            "Compose ONE short reminder nudge covering every due or overdue "
-            "task below, in your own voice, in the user's language. Include "
-            "each task's due time. Reply with the message only — no preamble, "
-            "no quotes."
-        ),
-        fact_line=lambda r: f"- {r['message']} (due: {r['due']})",
-        # Late-bound so a monkeypatched module-level deliver_reminder is honored.
-        deliver=lambda s, r: deliver_reminder(s, r),
-        log_label="task reminder",
     )
+
+
+def next_due_at(settings: Settings, current: datetime, until: datetime) -> list[datetime]:
+    """When open tasks' next reminder bands open, within ``(current, until]``.
+
+    A pure read for the heartbeat's wake scheduler — the same window math
+    ``due_task_reminders`` uses, including the overdue repeat bands.
+    """
+    if not (settings.enable_reminders and settings.enable_tasks):
+        return []
+    leads = settings.reminder_lead_minutes
+    if not leads:
+        return []
+    repeat = settings.reminder_repeat_minutes
+    openings: list[datetime] = []
+    for task in store.list_tasks(settings):  # open tasks only
+        due = parse_dt(task.due)
+        if due is None:
+            continue
+        change = next_band_change(
+            due - current, leads, repeat,
+            repeat_floor=_overdue_floor(settings, task, repeat),
+        )
+        if change is not None and current + change <= until:
+            openings.append(current + change)
+    return openings

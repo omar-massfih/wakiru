@@ -40,6 +40,9 @@ class Settings(BaseSettings):
     llm_timeout: int = 120
     # Reply-length cap (tokens) for the API-backed providers.
     llm_max_tokens: int = 4096
+    # Reasoning effort ("low"/"medium"/"high") for reasoning-capable openai
+    # models. None => provider default. Ignored by non-reasoning models.
+    llm_reasoning_effort: str | None = None
 
     # --- Codex CLI ---
     codex_bin: str = "codex"
@@ -129,8 +132,8 @@ class Settings(BaseSettings):
     # runs after each turn (in the background) to save/update/forget notes.
     enable_auto_memory: bool = True
     # Personalization: inject durable notes tagged "profile" (working hours,
-    # locations, quiet hours, tone) into every turn, and let the reminder/briefing
-    # tickers honor stated quiet hours. Degrades to a no-op with no such notes.
+    # locations, quiet hours, tone) into every turn, and let the heartbeat
+    # honor stated quiet hours. Degrades to a no-op with no such notes.
     enable_profile: bool = True
     # Default quiet window (local time, "HH:MM-HH:MM") used when no profile note
     # states one. A stated preference in memory always wins. Empty string
@@ -256,7 +259,7 @@ class Settings(BaseSettings):
     # export) mirrored into the local calendar, read-only, on the sync cadence
     # below. Empty => no external sync.
     calendar_ics_urls: list[str] = []
-    # Minutes between feed pulls (the sync rides the reminder ticker). 0 disables
+    # Minutes between feed pulls (the sync rides the heartbeat wake). 0 disables
     # the automatic pull; POST /calendar/sync still works.
     calendar_sync_minutes: int = 15
 
@@ -448,7 +451,7 @@ class Settings(BaseSettings):
     weather_location_name: str = ""
     # "metric" (°C, km/h) or "imperial" (°F, mph).
     weather_units: str = "metric"
-    # Minutes between background forecast refreshes (rides the reminder ticker).
+    # Minutes between background forecast refreshes (rides the heartbeat wake).
     # 0 disables both the refresh and the per-turn weather block.
     weather_refresh_minutes: int = 60
 
@@ -479,7 +482,9 @@ class Settings(BaseSettings):
     write_undo_window_minutes: int = 15
 
     # --- Proactive reminders ---
-    # Master switch: fire proactive reminders ahead of upcoming events.
+    # Master switch: surface due reminders (events, tasks, birthdays, renewals)
+    # into the heartbeat's situation report, where the model decides what to
+    # send. Nothing fires directly to a channel anymore.
     enable_reminders: bool = True
     # Fire a reminder this many minutes before an event. A list, so several leads
     # per event work (e.g. [1440, 60] = a day before and an hour before). With
@@ -493,12 +498,9 @@ class Settings(BaseSettings):
     # Lead schedule for critical events (doctor, flight, exam, deadline …):
     # 2 days, 1 day, 3 hours, 1 hour, 15 minutes before.
     reminder_lead_minutes_critical: list[int] = [2880, 1440, 180, 60, 15]
-    # ntfy topic URL / generic webhook the reminder is POSTed to. None => reminders
-    # are still computed and returned by the endpoint, just not pushed anywhere.
+    # ntfy topic URL / generic webhook heartbeat pushes are POSTed to. None =>
+    # delivery falls to the chat channels (Telegram/Slack) alone.
     reminder_webhook_url: str | None = None
-    # How often the in-process ticker fires run_reminders (seconds). 0 disables the
-    # built-in ticker; POST /reminders/run still works for manual/external triggering.
-    reminder_tick_seconds: int = 60
     # When > 0, repeat reminders every N minutes once an item is inside its lead
     # window, instead of firing each lead once. reminder_lead_minutes then defines
     # only when reminders BEGIN (its max); the repeats fill the countdown until the
@@ -519,9 +521,8 @@ class Settings(BaseSettings):
     # email is on) through the same channels reminders use.
     enable_briefing: bool = False
     # Local wall-clock time (HH:MM, in TIMEZONE) the briefing becomes due. The
-    # ticker fires it on the first tick at/after this time, exactly once per
-    # day. With the heartbeat enabled the model composes the briefing in its
-    # own voice; without it the assembled digest goes out verbatim (no LLM).
+    # heartbeat fires it on the first wake at/after this time, exactly once per
+    # day (with the heartbeat disabled, only POST /briefing/run fires it).
     briefing_time: str = "07:30"
     # Record proactive pushes (reminders, the briefing) into each authorized
     # chat's working memory, so the conversation knows what was already sent
@@ -534,22 +535,26 @@ class Settings(BaseSettings):
     # renewals for the next seven days) through the reminder channels.
     enable_weekly_review: bool = False
     # Local weekday (mon..sun) + wall-clock time (HH:MM, in TIMEZONE) the
-    # review becomes due. The ticker fires it on the first tick at/after that
-    # moment in the same ISO week, exactly once per week.
+    # review becomes due. The heartbeat fires it on the first wake at/after
+    # that moment in the same ISO week, exactly once per week (with the
+    # heartbeat disabled, only POST /weekly-review/run fires it).
     weekly_review_day: str = "sun"
     weekly_review_time: str = "17:00"
 
-    # --- Heartbeat (deliberative proactivity) ---
-    # Periodically let the model itself review the situation (due followups,
-    # briefing, mail changes, contact staleness — or nothing at all) and
-    # decide whether reaching out helps — or stay silent. Reminders keep
-    # running regardless: they are the reflex arc, this is the deliberative
-    # layer. Off by default; also unlocks the schedule_followup tools.
-    enable_heartbeat: bool = False
-    # Minutes between heartbeat wakes. EVERY wake is a model call (only quiet
-    # hours and an all-scope mute hold it), so this is the direct token-cost
-    # dial. 0 disables the ticker (POST /heartbeat/run still works).
-    heartbeat_minutes: int = 30
+    # --- Heartbeat (the single entry point for all background activity) ---
+    # On every wake the model reviews the situation (due reminders, followups,
+    # the briefing / weekly review, mail changes, contact staleness — or
+    # nothing at all) and decides what to send — or stays silent. Turning this
+    # OFF disables ALL proactive scheduling (reminders, digests); only the
+    # manual endpoints fire them then. Also unlocks the schedule_followup tools.
+    enable_heartbeat: bool = True
+    # Minutes between heartbeat wakes — the base cadence and (by default) the
+    # ceiling; due reminders/digests/refreshes pull individual wakes earlier.
+    # EVERY wake is a model call (only quiet hours and an all-scope mute hold
+    # it), so this is the direct token-cost dial: the 5-minute default is
+    # ~288 wakes/day. 0 disables the loop entirely — including the data
+    # refreshes that ride it (POST /heartbeat/run still works).
+    heartbeat_minutes: int = 5
     # Minimum minutes between ambient heartbeat *pushes* (a message the model
     # composed with no due follow-up or briefing behind it), so a chatty model
     # doesn't become a barrage. Bounds delivery, never the model's judgment;
@@ -557,20 +562,22 @@ class Settings(BaseSettings):
     heartbeat_min_gap_minutes: int = 120
     # How many hours of already-delivered nudges (reminders, briefings, prior
     # heartbeat pushes) to show the model each wake as "don't repeat these", so a
-    # wake doesn't re-send — in different words — a reminder the ticker or an
-    # earlier wake already pushed. 0 disables the de-dup context.
+    # wake doesn't re-send — in different words — something an earlier wake
+    # already pushed. 0 disables the de-dup context.
     heartbeat_dedup_push_hours: int = 6
     # Hours of user silence (across all channels) before "we haven't talked in
     # a while" becomes a heartbeat trigger. 0 disables the staleness trigger.
     heartbeat_contact_gap_hours: int = 0
     # Self-pacing: the model can set its own next wake (the set_next_wake tool),
-    # and the scheduler never sleeps past the soonest open follow-up. These clamp
-    # how far a self-set wake may move from HEARTBEAT_MINUTES. The floor keeps a
-    # self-set wake from busy-looping the model; the ceiling caps how long it may
-    # back off — 0 means "no later than the fixed cadence" (the model may only
-    # pull the next wake *earlier*), so raising it (e.g. 360) is what lets the
-    # model save tokens by backing off on quiet days.
-    heartbeat_wake_min_minutes: int = 5
+    # and the scheduler never sleeps past the soonest deliberate intent (an open
+    # follow-up, a reminder band opening, a due refresh). These clamp how far a
+    # self-set wake may move from HEARTBEAT_MINUTES. The floor keeps a
+    # self-set wake from busy-looping the model — and bounds how late a
+    # reminder whose window opens right after a wake can land; the ceiling caps
+    # how long it may back off — 0 means "no later than the fixed cadence" (the
+    # model may only pull the next wake *earlier*), so raising it (e.g. 360) is
+    # what lets the model save tokens by backing off on quiet days.
+    heartbeat_wake_min_minutes: int = 2
     heartbeat_wake_max_minutes: int = 0
 
     # --- Goals (standing multi-step intentions) ---
@@ -633,16 +640,17 @@ class Settings(BaseSettings):
     # very long clip would stall the reply loop.
     voice_max_seconds: int = 600
 
-    # --- Slack channel ---
-    # Bot token (xoxb-…). Set => POST /slack/events accepts Slack Events API
-    # callbacks and each user's DM/channel becomes a persistent conversation.
+    # --- Slack channel (Socket Mode only — the daemon serves no HTTP) ---
+    # Bot token (xoxb-…). Each user's DM/channel becomes a persistent
+    # conversation. Requires slack_app_token too: events arrive over the
+    # Socket Mode websocket.
     slack_bot_token: str | None = None
-    # Signing secret from the Slack app config; every callback's HMAC is verified
-    # against it. Required whenever slack_bot_token is set.
+    # Signing secret from the Slack app config (kept for Socket Mode payload
+    # verification setups that use it).
     slack_signing_secret: str | None = None
-    # App-level token (xapp-…) with connections:write. Set (with slack_bot_token)
-    # => events arrive over a Socket Mode websocket instead of requiring a public
-    # HTTPS URL for POST /slack/events — works behind NAT, like Telegram polling.
+    # App-level token (xapp-…) with connections:write — events arrive over a
+    # Socket Mode websocket, no public HTTPS URL needed (works behind NAT,
+    # like Telegram polling).
     slack_app_token: str | None = None
     # Explicit allowlist of Slack user ids (e.g. ["U0123ABC"]) the bot answers.
     # Empty => the bot answers nobody: unlike Telegram there is no pairing
@@ -651,16 +659,11 @@ class Settings(BaseSettings):
     # Channel id reminders and write-confirmations are pushed to. None => no push.
     slack_notify_channel: str | None = None
 
-    # --- HTTP server ---
-    host: str = "127.0.0.1"
-    port: int = 8000
-    # Bearer token required on every endpoint except /health. None (the default)
-    # keeps the legacy loopback-trust behavior — fine on 127.0.0.1, but set this
-    # before binding to any non-loopback interface (the Docker CMD binds 0.0.0.0).
-    api_token: str | None = None
-    # Escape hatch: without this, startup refuses a non-loopback bind with no
-    # token. Set it only when something in front (proxy, VPN) does the auth.
-    allow_unauthenticated: bool = False
+    # --- Liveness probe ---
+    # Port for the daemon's bare, unauthenticated GET /health endpoint — the
+    # only HTTP the process serves, so container orchestrators can probe it.
+    # 0 disables it.
+    health_port: int = 8000
 
     @property
     def memory_path(self) -> Path:

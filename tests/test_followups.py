@@ -188,7 +188,7 @@ def test_schedule_followup_rejects_bad_or_past_when(settings) -> None:
 def test_followup_tools_gated_by_heartbeat_flag(tmp_path) -> None:
     from assistant.tools import available_tools
 
-    off = Settings(memory_dir=str(tmp_path / "m"))  # heartbeat off by default
+    off = Settings(memory_dir=str(tmp_path / "m"), enable_heartbeat=False)
     assert "schedule_followup" not in {t.name for t in available_tools(off)}
 
 

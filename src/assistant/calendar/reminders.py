@@ -1,19 +1,20 @@
-"""Proactive reminders — the calendar's wall-clock output path.
+"""Proactive reminders — the calendar's signal into the heartbeat.
 
 The read path (:mod:`.context`) and write path (:mod:`.ops`) both only run when the
 user chats. Reminders are the missing third path: unprompted nudges ahead of an
-event ("Dentist in 1 hour"), driven by a wall-clock ticker rather than chat traffic.
+event ("Dentist in 1 hour"), surfaced to the heartbeat's situation report rather
+than fired directly to a channel — the model judges what to say.
 
-:func:`run_reminders` is the entry point. On each call it finds events entering a
-configured *lead* window, fires each one exactly once via a small SQLite dedupe
-ledger, and pushes it through :func:`assistant.notify.deliver_reminder`. Which
-lead windows apply is per event: with importance classification on
+:func:`surface_due` is the entry point. On each heartbeat wake it finds events
+entering a configured *lead* window and claims each band exactly once via a
+small SQLite dedupe ledger; the claimed reminders ride the situation report.
+Which lead windows apply is per event: with importance classification on
 (:attr:`Settings.reminder_importance_enabled`, see :mod:`.importance`), critical
 events (doctor, flight, exam …) get the long multi-day schedule and everything
 else the short :attr:`Settings.reminder_lead_minutes`; with it off, every event
-uses :attr:`Settings.reminder_lead_minutes` uniformly. It is best-effort and
-idempotent, so the in-process ticker and a manual ``POST /reminders/run`` can
-both drive it safely.
+uses :attr:`Settings.reminder_lead_minutes` uniformly. :func:`next_due_at`
+tells the wake scheduler when the next band opens, so the heartbeat cadence
+doesn't make reminders late.
 """
 
 from __future__ import annotations
@@ -23,8 +24,7 @@ from datetime import datetime, timedelta
 
 from .. import fired_ledger
 from ..config import Settings, get_settings
-from ..notify import deliver_reminder
-from ..reminder_windows import START_GRACE, due_slots
+from ..reminder_windows import START_GRACE, due_slots, next_band_change
 from . import importance, recurrence, store
 from .context import now
 
@@ -129,50 +129,75 @@ def due_reminders(settings: Settings, current: datetime | None = None) -> list[d
     return reminders
 
 
-def run_reminders(settings: Settings | None = None, agent=None) -> list[dict]:
-    """Fire every reminder now due, exactly once, and return what was sent.
+def surface_due(settings: Settings | None = None, current: datetime | None = None) -> list[dict]:
+    """Claim every reminder now due, exactly once, and return it for the heartbeat.
 
-    Best-effort and idempotent: each due reminder is claimed with an atomic
-    ``INSERT OR IGNORE`` on the ledger, so a reminder already fired (by an earlier
-    tick or an overlapping manual call) is silently skipped. A rescheduled event
-    fires afresh because the ledger key includes the event's start. No-op returning
-    ``[]`` when ``enable_reminders`` is false. With ``agent`` given, each delivered
-    reminder is also recorded into the authorized chats' working memory (see
-    :mod:`assistant.proactive`), so conversations know what was pushed. The
-    claim→compose→deliver pipeline itself is :func:`assistant.fired_ledger.fire_due`.
+    Idempotent: each due band is claimed with an atomic ``INSERT OR IGNORE`` on
+    the ledger, so a band already surfaced (by an earlier wake or an overlapping
+    manual call) is silently skipped. A rescheduled event surfaces afresh
+    because the ledger key includes the event's start. No-op returning ``[]``
+    when ``enable_reminders`` is false. Quiet hours are the caller's hold —
+    the heartbeat gathers nothing during them, so nothing is claimed.
     """
     settings = settings or get_settings()
     if not settings.enable_reminders:
         return []
 
-    current = now(settings)
-    # Honor stated quiet hours (profile): nothing is computed or claimed, so a
-    # reminder whose window survives the night fires on the first tick after
-    # quiet ends.
-    from ..memory.profile import in_quiet_hours
-
-    if in_quiet_hours(settings, current):
-        return []
+    current = current or now(settings)
     # Compute the due list first, with its own (store) connections, so the ledger
-    # write transaction inside fire_due never overlaps a nested connection to the
+    # write transaction inside claim_due never overlaps a nested connection to the
     # same DB.
     due = due_reminders(settings, current)
-    return fired_ledger.fire_due(
+    return fired_ledger.claim_due(
         _LEDGER,
         settings,
-        agent,
         due,
         current=current,
         kind="event",
         key_fields=("event_id", "start"),
         pg_claim="claim_calendar_reminders",
-        instruction=(
-            "Compose ONE short reminder nudge covering every due item below, "
-            "in your own voice, in the user's language. Include each item's "
-            "clock time. Reply with the message only — no preamble, no quotes."
-        ),
-        fact_line=lambda r: f"- {r['message']} (starts: {r['start']})",
-        # Late-bound so a monkeypatched module-level deliver_reminder is honored.
-        deliver=lambda s, r: deliver_reminder(s, r),
-        log_label="reminder",
     )
+
+
+def next_due_at(settings: Settings, current: datetime, until: datetime) -> list[datetime]:
+    """When upcoming events' next reminder bands open, within ``(current, until]``.
+
+    A pure read for the heartbeat's wake scheduler: cached importance tiers
+    only (never a classification call), the same window math ``due_reminders``
+    uses. An unclassified event is scanned with the normal schedule — at worst
+    it is woken for on the base cadence and graded on that wake.
+    """
+    if not settings.enable_reminders:
+        return []
+    classify = settings.reminder_importance_enabled
+    max_lead = (
+        importance.max_lead_minutes(settings)
+        if classify
+        else max(settings.reminder_lead_minutes, default=0)
+    )
+    if not max_lead:
+        return []
+    events = recurrence.occurrences_in(
+        settings, current, until + timedelta(minutes=max_lead)
+    )
+    tiers = importance.cached_tiers(settings, events) if classify and events else {}
+    repeat = settings.reminder_repeat_minutes
+    openings: list[datetime] = []
+    for event in events:
+        leads = (
+            importance.leads_for(settings, tiers.get(event.id, importance.TIER_NORMAL))
+            if classify
+            else settings.reminder_lead_minutes
+        )
+        if not leads:
+            continue
+        start = store.parse_dt(event.start)
+        if start is None:
+            continue
+        change = next_band_change(
+            start - current, leads, repeat,
+            repeat_floor=-min(START_GRACE, timedelta(minutes=repeat or 0)),
+        )
+        if change is not None and current + change <= until:
+            openings.append(current + change)
+    return openings

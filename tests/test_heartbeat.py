@@ -113,6 +113,48 @@ def test_due_followup_is_claimed_exactly_once(settings) -> None:
     assert again is not None and again.followups == [] and not again.scheduled
 
 
+def _event_in(settings, title, **delta):
+    from assistant.calendar import store
+
+    start = (now(settings) + timedelta(**delta)).isoformat(timespec="seconds")
+    return store.create_event(settings, title=title, start=start)
+
+
+def test_due_reminder_surfaces_into_the_report_and_is_scheduled(settings) -> None:
+    # A calendar event entering its lead window is surfaced for the model's
+    # judgment (not auto-fired), and counts as scheduled intent.
+    reminders = settings.model_copy(
+        update={"reminder_importance_enabled": False, "reminder_lead_minutes": [60]}
+    )
+    _event_in(reminders, "Dentist", minutes=30)
+    situation = heartbeat.gather_situation(reminders)
+    assert situation is not None
+    assert any("Dentist" in line for line in situation.reminders)
+    assert "Due reminder:" in situation.report()
+    assert situation.scheduled  # a due reminder always exempts the ambient throttle
+
+
+def test_skipped_reminder_does_not_resurface_but_a_later_band_does(settings) -> None:
+    # Claim-on-surface, per band: the model staying silent consumes the T-60
+    # band, but the tighter T-15 band still opens on a later wake.
+    reminders = settings.model_copy(
+        update={"reminder_importance_enabled": False, "reminder_lead_minutes": [60, 15]}
+    )
+    event = _event_in(reminders, "Standup", minutes=40)
+    first = heartbeat.gather_situation(reminders)
+    assert first is not None and any("Standup" in line for line in first.reminders)
+    # Same wake again: the 60-min band is claimed, nothing new.
+    again = heartbeat.gather_situation(reminders)
+    assert again is not None and not again.reminders
+    # Closer to the event, the 15-min band opens — a fresh ledger key.
+    from assistant.calendar import reminders as cal_reminders
+
+    later = now(reminders) + timedelta(minutes=30)
+    surfaced = cal_reminders.surface_due(reminders, current=later)
+    assert len(surfaced) == 1 and surfaced[0]["lead_minutes"] == 15
+    _ = event  # created for its side effect on the store
+
+
 def test_contact_staleness_is_reported(settings) -> None:
     stale = settings.model_copy(update={"heartbeat_contact_gap_hours": 24})
     threads.touch(stale, "telegram:7")
@@ -412,8 +454,12 @@ def test_composition_failure_is_contained(settings, monkeypatch) -> None:
 @pytest.fixture
 def paced(settings) -> Settings:
     # Quiet hours are time-of-day dependent; disable them so the pure pacing
-    # tests don't hinge on the wall clock.
-    return settings.model_copy(update={"quiet_hours_default": ""})
+    # tests don't hinge on the wall clock. A 30-min base cadence gives the
+    # ceiling room for the multi-minute wake targets these tests assert (the
+    # shipped 5-min default would clamp an 8- or 10-minute target down).
+    return settings.model_copy(
+        update={"quiet_hours_default": "", "heartbeat_minutes": 30}
+    )
 
 
 def _anchor(paced: Settings):
