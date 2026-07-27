@@ -451,9 +451,9 @@ def gather_situation(
             (birthday_reminders.surface_due, lambda r: r["message"]),
             (subscription_reminders.surface_due, lambda r: r["message"]),
         )
-        for surface, line in families:
+        for surface, render in families:
             try:
-                reminder_lines += [line(r) for r in surface(settings, current)]
+                reminder_lines += [render(r) for r in surface(settings, current)]
             except Exception:
                 logger.exception("heartbeat: surfacing due reminders failed")
 
