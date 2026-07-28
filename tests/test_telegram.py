@@ -12,7 +12,7 @@ from urllib.error import HTTPError, URLError
 
 import pytest
 
-from assistant import notify, telegram
+from assistant import notify, telegram, telegram_render
 from assistant.codex_runner import CodexError, CodexTimeoutError
 from assistant.config import Settings
 
@@ -46,23 +46,23 @@ def _sends(calls: list[tuple[str, dict]]) -> list[dict]:
 
 
 def test_short_reply_is_one_chunk() -> None:
-    assert telegram._chunks("hi") == ["hi"]
+    assert telegram_render._chunks("hi") == ["hi"]
 
 
 def test_empty_reply_becomes_placeholder() -> None:
-    assert telegram._chunks("   ") == ["(empty reply)"]
+    assert telegram_render._chunks("   ") == ["(empty reply)"]
 
 
 def test_long_reply_splits_on_newlines() -> None:
     text = "\n".join(["x" * 100] * 60)  # ~6k chars, newline every 101
-    pieces = telegram._chunks(text)
+    pieces = telegram_render._chunks(text)
     assert len(pieces) == 2
-    assert all(len(p) <= telegram._MAX_MESSAGE_CHARS for p in pieces)
+    assert all(len(p) <= telegram_render._MAX_MESSAGE_CHARS for p in pieces)
     assert "\n".join(pieces) == text  # nothing lost at the seam
 
 
 def test_long_reply_without_newlines_splits_hard() -> None:
-    pieces = telegram._chunks("a" * 9000)
+    pieces = telegram_render._chunks("a" * 9000)
     assert [len(p) for p in pieces] == [4096, 4096, 808]
 
 
@@ -460,7 +460,7 @@ def test_oversized_render_is_resplit_under_limit(calls) -> None:
     telegram.send_message("tok", 7, text)
     sends = _sends(calls)
     assert len(sends) >= 4
-    assert all(len(s["text"]) <= telegram._MAX_MESSAGE_CHARS for s in sends)
+    assert all(len(s["text"]) <= telegram_render._MAX_MESSAGE_CHARS for s in sends)
     assert all(s.get("parse_mode") == "HTML" for s in sends)
     # Nothing was lost across the splits.
     assert "".join(s["text"] for s in sends).count("&amp;") == 80 * 40
