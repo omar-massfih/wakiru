@@ -354,6 +354,33 @@ def _build(settings: Settings, to: str, subject: str, body: str, cc: str = "") -
     return message
 
 
+def _require_send_enabled(settings: Settings) -> None:
+    """The double gate every send path shares. Raises before anything is
+    fetched or written, so the caller can honestly say nothing was sent."""
+    _require_enabled(settings)
+    if not settings.enable_email_send:
+        raise MailDisabledError(
+            "Sending is disabled, so nothing was sent or drafted. "
+            "Use a draft instead, or set ENABLE_EMAIL_SEND=true to allow sending."
+        )
+
+
+def _append_draft(conn: imaplib.IMAP4_SSL, settings: Settings, message: EmailMessage) -> None:
+    """Append ``message`` to the drafts folder with a current timestamp."""
+    stamp = imaplib.Time2Internaldate(datetime.now(UTC).timestamp())
+    conn.append(settings.email_drafts_folder, r"\Draft", stamp, message.as_bytes())
+
+
+def _smtp_send(settings: Settings, message: EmailMessage) -> None:
+    """Send ``message`` over SMTP, always closing the connection."""
+    conn = _smtp_connect(settings)
+    try:
+        conn.send_message(message)
+    finally:
+        with contextlib.suppress(Exception):
+            conn.quit()
+
+
 def save_draft(settings: Settings, to: str, subject: str, body: str, cc: str = "") -> str:
     """Append a draft to the drafts folder. The default write path — never sends.
 
@@ -363,8 +390,7 @@ def save_draft(settings: Settings, to: str, subject: str, body: str, cc: str = "
     message = _build(settings, to, subject, body, cc)
     conn = imap_connect(settings)
     try:
-        stamp = imaplib.Time2Internaldate(datetime.now(UTC).timestamp())
-        conn.append(settings.email_drafts_folder, r"\Draft", stamp, message.as_bytes())
+        _append_draft(conn, settings, message)
     finally:
         _close(conn)
     cc_note = f" (cc {cc.strip()})" if cc.strip() else ""
@@ -377,22 +403,10 @@ def send_message(settings: Settings, to: str, subject: str, body: str, cc: str =
     Never called from a background path — sending is irreversible, so it happens
     only when the user explicitly asks for it.
     """
-    _require_enabled(settings)
-    if not settings.enable_email_send:
-        # Nothing has been written at this point — say so rather than claiming a
-        # draft was saved. The caller can call save_draft() if it wants one.
-        raise MailDisabledError(
-            "Sending is disabled, so nothing was sent or drafted. "
-            "Use a draft instead, or set ENABLE_EMAIL_SEND=true to allow sending."
-        )
+    _require_send_enabled(settings)
     _require_address(to)
     message = _build(settings, to, subject, body, cc)
-    conn = _smtp_connect(settings)
-    try:
-        conn.send_message(message)
-    finally:
-        with contextlib.suppress(Exception):
-            conn.quit()
+    _smtp_send(settings, message)
     cc_note = f" (cc {cc.strip()})" if cc.strip() else ""
     return f"sent: “{subject}” to {to}{cc_note}"
 
@@ -483,8 +497,7 @@ def save_reply_draft(
         if rc is None:
             return f"No message with uid {uid}."
         message = _build_reply(settings, rc, body)
-        stamp = imaplib.Time2Internaldate(datetime.now(UTC).timestamp())
-        conn.append(settings.email_drafts_folder, r"\Draft", stamp, message.as_bytes())
+        _append_draft(conn, settings, message)
     finally:
         _close(conn)
     return f"reply drafted: “{rc.subject}” to {rc.to}"
@@ -492,14 +505,7 @@ def save_reply_draft(
 
 def send_reply(settings: Settings, uid: str, body: str, reply_all: bool = False) -> str:
     """Send a threaded reply. Same double gate and contract as :func:`send_message`."""
-    _require_enabled(settings)
-    if not settings.enable_email_send:
-        # Nothing has been fetched or written at this point — same contract as
-        # send_message: say so rather than claiming a draft was saved.
-        raise MailDisabledError(
-            "Sending is disabled, so nothing was sent or drafted. "
-            "Use a draft instead, or set ENABLE_EMAIL_SEND=true to allow sending."
-        )
+    _require_send_enabled(settings)
     conn = imap_connect(settings)
     try:
         rc = _reply_context(conn, uid, settings.email_address or "", reply_all)
@@ -508,12 +514,7 @@ def send_reply(settings: Settings, uid: str, body: str, reply_all: bool = False)
     if rc is None:
         return f"No message with uid {uid}."
     message = _build_reply(settings, rc, body)
-    smtp = _smtp_connect(settings)
-    try:
-        smtp.send_message(message)
-    finally:
-        with contextlib.suppress(Exception):
-            smtp.quit()
+    _smtp_send(settings, message)
     return f"reply sent: “{rc.subject}” to {rc.to}"
 
 
