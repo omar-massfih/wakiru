@@ -10,11 +10,12 @@ services:
       - .env
       - path: .env.local
         required: false
-    # DATABASE_URL comes from .env.local (Neon). The daemon has no REST surface,
+    # Local SQLite backend: all state lives in ./memory (durable off-node via the
+    # Drive backup — set DRIVE_BACKUP_* in .env). The daemon has no REST surface,
     # so no API_TOKEN is needed; the chat channels (Telegram/Slack) authenticate
     # via their own allowlists.
     environment:
-      STORAGE_BACKEND: postgres
+      STORAGE_BACKEND: local
       FASTEMBED_CACHE_PATH: /app/models/fastembed  # persist the ~2GB model across rebuilds
     volumes:
       - ${HOME}/.codex:/home/assistant/.codex

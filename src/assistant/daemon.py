@@ -21,7 +21,7 @@ from collections.abc import Callable
 from functools import lru_cache
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import slack, telegram
+from . import backup, slack, telegram
 from .agent import build_agent
 from .calendar.context import now
 from .config import get_settings
@@ -156,6 +156,13 @@ async def _run() -> None:
             "Python in this container.",
         )
 
+    # Restore before anything opens a store: build_agent() reindexes on first
+    # _agent() call, and the channel loops touch the DBs — a fresh/empty memory
+    # dir must be repopulated from Drive first. Best-effort; a failure just
+    # starts fresh.
+    if settings.drive_backup_enabled:
+        await asyncio.to_thread(backup.restore_if_empty, settings)
+
     health = _start_health_server(settings.health_port)
     tasks: list[asyncio.Task] = []
     # The heartbeat loop is the single entry point for all background activity
@@ -171,6 +178,17 @@ async def _run() -> None:
     if settings.enable_sleep:
         tasks.append(asyncio.create_task(_sleep_loop(), name="sleep"))
         logger.info("nightly sleep started (due at %s)", settings.sleep_time)
+    if settings.drive_backup_enabled:
+        interval = settings.drive_backup_interval_minutes * 60
+        tasks.append(
+            asyncio.create_task(
+                _ticker("backup", lambda: backup.run_backup(get_settings()), lambda: interval),
+                name="backup",
+            )
+        )
+        logger.info(
+            "drive backup started (every %d min)", settings.drive_backup_interval_minutes
+        )
     if settings.telegram_bot_token:
         tasks.append(
             asyncio.create_task(telegram.poll_loop(_agent(), settings), name="telegram-poll")
@@ -206,6 +224,10 @@ async def _run() -> None:
         # Wait for cancellation to land so shutdown doesn't strand mid-operation
         # work; return_exceptions swallows the resulting CancelledErrors.
         await asyncio.gather(*tasks, return_exceptions=True)
+        # Capture the final state on the way out (SIGTERM from a pod roll), so a
+        # restart onto a fresh volume restores right up to the last shutdown.
+        if settings.drive_backup_enabled:
+            await asyncio.to_thread(backup.run_backup, get_settings())
         if health is not None:
             health.shutdown()
 

@@ -665,6 +665,25 @@ class Settings(BaseSettings):
     # 0 disables it.
     health_port: int = 8000
 
+    # --- Backup to Google Drive ---
+    # Off by default. When on, the daemon snapshots every SQLite DB under the
+    # memory dir and uploads a consistent tar.gz to a dedicated Drive folder on a
+    # cadence and on shutdown, then restores the latest archive onto a fresh /
+    # empty memory dir at startup — durable off-node storage for the local SQLite
+    # backend. Reuses the same Google OAuth client as calendar/mail, but needs its
+    # own refresh token (drive.file scope, so it only ever touches files it
+    # created) — mint it once, out of band, with scripts/drive_oauth_setup.py.
+    drive_backup_enabled: bool = False
+    drive_oauth_client_id: str | None = None
+    drive_oauth_client_secret: str | None = None
+    drive_oauth_refresh_token: str | None = None
+    drive_oauth_token_url: str = "https://oauth2.googleapis.com/token"
+    # Name of the Drive folder the archives live in (created on first backup).
+    drive_backup_folder: str = "wakiru-backups"
+    # How often a backup runs, and how many archives to retain (older are pruned).
+    drive_backup_interval_minutes: int = 15
+    drive_backup_keep: int = 24
+
     @property
     def memory_path(self) -> Path:
         """Absolute path to the memory directory (created on first use)."""
@@ -774,6 +793,11 @@ class Settings(BaseSettings):
     def caldav_token_path(self) -> Path:
         """Cache file for the short-lived CalDAV OAuth2 access token (0600, like mail)."""
         return self.memory_path / "caldav_token.json"
+
+    @property
+    def drive_token_path(self) -> Path:
+        """Cache file for the short-lived Drive OAuth2 access token (0600, like mail)."""
+        return self.memory_path / "drive_token.json"
 
     @property
     def checkpoints_db_path(self) -> Path:
