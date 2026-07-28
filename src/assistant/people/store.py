@@ -16,13 +16,13 @@ from __future__ import annotations
 
 import sqlite3
 import uuid
-from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
-from datetime import datetime
 
 from ..config import Settings, postgres_backend
-from ..sqlite_util import open_db, transaction
+from ..sqlite_util import connect, open_db
+from ..timeutil import normalize_stamp as _normalize_stamp
+from ..timeutil import stamp_now as _stamp_now
 
 # Text columns a caller may set on create/update (id + timestamps + cadence
 # handled separately: cadence is an int, last_contact has its own log_contact path).
@@ -71,11 +71,9 @@ def _open(settings: Settings) -> sqlite3.Connection:
     return conn
 
 
-@contextmanager
-def _connect(settings: Settings) -> Iterator[sqlite3.Connection]:
-    """One transaction on a fresh connection, closed on exit (see tasks.store)."""
-    with transaction(_open(settings)) as conn:
-        yield conn
+def _connect(settings: Settings) -> AbstractContextManager[sqlite3.Connection]:
+    """One transaction on a fresh connection, closed on exit (see sqlite_util.connect)."""
+    return connect(_open, settings)
 
 
 def _row_to_person(row: sqlite3.Row) -> Person:
@@ -90,32 +88,6 @@ def _row_to_person(row: sqlite3.Row) -> Person:
         created=row["created"] or "",
         updated=row["updated"] or "",
     )
-
-
-def _stamp_now(settings: Settings) -> str:
-    from ..calendar.context import resolve_tz
-
-    return datetime.now(resolve_tz(settings)).isoformat(timespec="seconds")
-
-
-def _normalize_stamp(settings: Settings, value: str) -> str:
-    """Attach the assistant's timezone to a naive ISO datetime on its way in.
-
-    Blank or unparseable values pass through unchanged. Mirrors
-    tasks.store._normalize_due.
-    """
-    value = value.strip()
-    if not value:
-        return value
-    try:
-        dt = datetime.fromisoformat(value)
-    except ValueError:
-        return value
-    if dt.tzinfo is not None:
-        return value
-    from ..calendar.context import resolve_tz
-
-    return dt.replace(tzinfo=resolve_tz(settings)).isoformat()
 
 
 def _coerce_cadence(value: object, default: int = 0) -> int:

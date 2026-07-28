@@ -6,16 +6,14 @@ from __future__ import annotations
 from datetime import date
 
 from ..config import Settings
+from ..money import format_amount
 from .store import Subscription, monthly_amount, next_renewal
 
 
 def _amount_str(sub: Subscription) -> str:
-    if not sub.amount:
-        return ""
-    cur = f" {sub.currency}" if sub.currency else ""
-    # Trim a trailing .0 so whole amounts read cleanly (99 kr, not 99.0 kr).
-    n = int(sub.amount) if sub.amount == int(sub.amount) else round(sub.amount, 2)
-    return f"{n}{cur}"
+    # A zero/blank amount renders as nothing (unpriced subscription); otherwise
+    # the amount with its currency, trailing .0 trimmed (99 kr, not 99.0 kr).
+    return format_amount(sub.amount, sub.currency) if sub.amount else ""
 
 
 def _renewal_str(sub: Subscription, today: date) -> str:

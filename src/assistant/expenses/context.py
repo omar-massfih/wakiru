@@ -7,17 +7,13 @@ from __future__ import annotations
 from datetime import date, timedelta
 
 from ..config import Settings
+from ..money import format_amount, num
 from . import store
 from .store import Budget, ExpenseEntry
 
 
-def _num(value: float) -> str:
-    return str(int(value)) if value == int(value) else str(round(value, 2))
-
-
 def _amount_str(entry: ExpenseEntry) -> str:
-    cur = f" {entry.currency}" if entry.currency else ""
-    return f"{_num(entry.amount)}{cur}"
+    return format_amount(entry.amount, entry.currency)
 
 
 def totals_by_currency(entries: list[ExpenseEntry]) -> dict[str, float]:
@@ -44,7 +40,7 @@ def totals_by_category(entries: list[ExpenseEntry]) -> dict[str, dict[str, float
 
 def _render_totals(totals: dict[str, float]) -> str:
     return " + ".join(
-        f"{_num(v)} {cur}" if cur != "?" else _num(v)
+        f"{num(v)} {cur}" if cur != "?" else num(v)
         for cur, v in sorted(totals.items())
     )
 
@@ -71,9 +67,9 @@ def budget_lines(settings: Settings, month: str) -> list[str]:
         spent = _budget_spent(b, entries)
         cur = f" {b.currency}" if b.currency else ""
         pct = round(spent / b.amount * 100) if b.amount else 0
-        line = f"{b.category or 'overall'}: {_num(spent)} of {_num(b.amount)}{cur} ({pct}%)"
+        line = f"{b.category or 'overall'}: {num(spent)} of {num(b.amount)}{cur} ({pct}%)"
         if spent > b.amount:
-            line += f" — over by {_num(spent - b.amount)}{cur}"
+            line += f" — over by {num(spent - b.amount)}{cur}"
         lines.append(line)
     return lines
 

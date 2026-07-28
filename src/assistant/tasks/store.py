@@ -15,14 +15,14 @@ from __future__ import annotations
 
 import sqlite3
 import uuid
-from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
-from datetime import datetime
 
 from ..calendar.store import parse_dt  # shared tz-aware ISO parsing
 from ..config import Settings, postgres_backend
-from ..sqlite_util import ensure_columns, open_db, transaction
+from ..sqlite_util import connect, ensure_columns, open_db
+from ..timeutil import normalize_stamp as _normalize_due
+from ..timeutil import stamp_now as _stamp_now
 
 # Columns a caller may set on create/update (id + timestamps + done_at managed here).
 _FIELDS = ("title", "due", "notes", "rrule")
@@ -76,11 +76,9 @@ def _open(settings: Settings) -> sqlite3.Connection:
     return conn
 
 
-@contextmanager
-def _connect(settings: Settings) -> Iterator[sqlite3.Connection]:
-    """One transaction on a fresh connection, closed on exit (see calendar.store)."""
-    with transaction(_open(settings)) as conn:
-        yield conn
+def _connect(settings: Settings) -> AbstractContextManager[sqlite3.Connection]:
+    """One transaction on a fresh connection, closed on exit (see sqlite_util.connect)."""
+    return connect(_open, settings)
 
 
 def _row_to_task(row: sqlite3.Row) -> Task:
@@ -96,32 +94,6 @@ def _row_to_task(row: sqlite3.Row) -> Task:
         done_at=row["done_at"] or "",
         notify_only=_truthy(row["notify_only"] or ""),
     )
-
-
-def _normalize_due(settings: Settings, value: str) -> str:
-    """Attach the assistant's timezone to a naive ISO due date on its way in.
-
-    Blank or unparseable values pass through unchanged (filtered on read).
-    Mirrors calendar.store._normalize_stamp.
-    """
-    value = value.strip()
-    if not value:
-        return value
-    try:
-        dt = datetime.fromisoformat(value)
-    except ValueError:
-        return value
-    if dt.tzinfo is not None:
-        return value
-    from ..calendar.context import resolve_tz
-
-    return dt.replace(tzinfo=resolve_tz(settings)).isoformat()
-
-
-def _stamp_now(settings: Settings) -> str:
-    from ..calendar.context import resolve_tz
-
-    return datetime.now(resolve_tz(settings)).isoformat(timespec="seconds")
 
 
 def _sort_key(task: Task) -> tuple[int, float, str]:

@@ -18,13 +18,13 @@ from __future__ import annotations
 
 import sqlite3
 import uuid
-from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import date, datetime
 
 from ..config import Settings, postgres_backend
-from ..sqlite_util import open_db, transaction
+from ..sqlite_util import connect, open_db
+from ..timeutil import stamp_now as _stamp_now
 
 
 @dataclass
@@ -102,12 +102,6 @@ def _today(settings: Settings) -> date:
     return now(settings).date()
 
 
-def _stamp_now(settings: Settings) -> str:
-    from ..calendar.context import resolve_tz
-
-    return datetime.now(resolve_tz(settings)).isoformat(timespec="seconds")
-
-
 def _open(settings: Settings) -> sqlite3.Connection:
     conn = open_db(settings.expenses_db_path)
     conn.execute(
@@ -123,10 +117,8 @@ def _open(settings: Settings) -> sqlite3.Connection:
     return conn
 
 
-@contextmanager
-def _connect(settings: Settings) -> Iterator[sqlite3.Connection]:
-    with transaction(_open(settings)) as conn:
-        yield conn
+def _connect(settings: Settings) -> AbstractContextManager[sqlite3.Connection]:
+    return connect(_open, settings)
 
 
 def _row_to_entry(row: sqlite3.Row) -> ExpenseEntry:

@@ -16,13 +16,14 @@ from __future__ import annotations
 import json
 import sqlite3
 import uuid
-from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import datetime
 
 from ..config import Settings, postgres_backend
-from ..sqlite_util import ensure_columns, open_db, transaction
+from ..sqlite_util import connect, ensure_columns, open_db
+from ..timeutil import normalize_stamp as _normalize_stamp
+from ..timeutil import stamp_now as _stamp_now
 
 # Columns a caller may set on create/update (id + timestamps are managed here).
 _FIELDS = ("title", "start", "end", "location", "notes", "rrule", "exdates", "overrides")
@@ -81,11 +82,9 @@ def _open(settings: Settings) -> sqlite3.Connection:
     return conn
 
 
-@contextmanager
-def _connect(settings: Settings) -> Iterator[sqlite3.Connection]:
-    """One transaction on a fresh connection, closed on exit."""
-    with transaction(_open(settings)) as conn:
-        yield conn
+def _connect(settings: Settings) -> AbstractContextManager[sqlite3.Connection]:
+    """One transaction on a fresh connection, closed on exit (see sqlite_util.connect)."""
+    return connect(_open, settings)
 
 
 def _row_to_event(row: sqlite3.Row) -> Event:
@@ -121,37 +120,6 @@ def parse_dt(value: str) -> datetime | None:
     except ValueError:
         return None
     return dt.astimezone() if dt.tzinfo is None else dt
-
-
-def _normalize_stamp(settings: Settings, value: str) -> str:
-    """Attach the assistant's timezone to a naive ISO datetime on its way in.
-
-    The write-path extractor is told to emit offsets, but an LLM slip must not
-    poison the store. Blank or unparseable values pass through unchanged (they
-    are filtered on read).
-    """
-    value = value.strip()
-    if not value:
-        return value
-    try:
-        dt = datetime.fromisoformat(value)
-    except ValueError:
-        return value
-    if dt.tzinfo is not None:
-        return value
-    # Lazy import: context imports this module at top level.
-    from .context import resolve_tz
-
-    return dt.replace(tzinfo=resolve_tz(settings)).isoformat()
-
-
-def _stamp_now(settings: Settings) -> str:
-    """Current time in the assistant's timezone, for created/updated stamps —
-    matching how every other stamp in the system is resolved."""
-    # Lazy import: context imports this module at top level.
-    from .context import resolve_tz
-
-    return datetime.now(resolve_tz(settings)).isoformat(timespec="seconds")
 
 
 def _sort_key(event: Event) -> tuple[int, float, str]:

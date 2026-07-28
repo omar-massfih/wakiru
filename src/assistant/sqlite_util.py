@@ -11,9 +11,11 @@ keeps only its own schema/DDL.
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
+
+from .config import Settings
 
 
 def open_db(path: str | Path, *, row_factory: bool = True) -> sqlite3.Connection:
@@ -60,3 +62,17 @@ def transaction(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
             yield conn
     finally:
         conn.close()
+
+
+@contextmanager
+def connect(
+    open_fn: Callable[[Settings], sqlite3.Connection], settings: Settings
+) -> Iterator[sqlite3.Connection]:
+    """One transaction on a fresh connection from ``open_fn``, closed on exit.
+
+    The shared shape behind every store's ``_connect``: open a connection (each
+    store's own ``_open`` runs its schema/DDL), then wrap the call in
+    :func:`transaction`. Stores keep a one-line ``_connect`` delegating here.
+    """
+    with transaction(open_fn(settings)) as conn:
+        yield conn

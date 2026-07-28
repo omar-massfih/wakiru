@@ -16,13 +16,12 @@ from __future__ import annotations
 
 import sqlite3
 import uuid
-from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
-from datetime import datetime
 
 from ..config import Settings, postgres_backend
-from ..sqlite_util import open_db, transaction
+from ..sqlite_util import connect, open_db
+from ..timeutil import stamp_now as _stamp_now
 
 
 @dataclass
@@ -52,11 +51,9 @@ def _open(settings: Settings) -> sqlite3.Connection:
     return conn
 
 
-@contextmanager
-def _connect(settings: Settings) -> Iterator[sqlite3.Connection]:
-    """One transaction on a fresh connection, closed on exit (see tasks.store)."""
-    with transaction(_open(settings)) as conn:
-        yield conn
+def _connect(settings: Settings) -> AbstractContextManager[sqlite3.Connection]:
+    """One transaction on a fresh connection, closed on exit (see sqlite_util.connect)."""
+    return connect(_open, settings)
 
 
 def _row_to_entry(row: sqlite3.Row) -> ListEntry:
@@ -68,12 +65,6 @@ def _row_to_entry(row: sqlite3.Row) -> ListEntry:
         created=row["created"] or "",
         done_at=row["done_at"] or "",
     )
-
-
-def _stamp_now(settings: Settings) -> str:
-    from ..calendar.context import resolve_tz
-
-    return datetime.now(resolve_tz(settings)).isoformat(timespec="seconds")
 
 
 def canonical_name(settings: Settings, name: str) -> str:
