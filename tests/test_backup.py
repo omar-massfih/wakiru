@@ -130,6 +130,26 @@ def test_snapshot_captures_every_db(tmp_path):
     assert _read_db(dest / "index.db") == "beta"
 
 
+def test_snapshot_includes_note_tree_excludes_tokens(tmp_path):
+    settings = _settings(tmp_path)
+    m = settings.memory_path
+    (m / "episodic").mkdir(parents=True)
+    _make_db(m / "index.db", "idx")
+    (m / "episodic" / "trip.md").write_text("# a trip\nbody", encoding="utf-8")
+    (m / "MEMORY.md").write_text("# index", encoding="utf-8")
+    (m / "drive_token.json").write_text('{"access_token":"secret"}', encoding="utf-8")
+
+    archive = drive.snapshot(settings)
+    dest = tmp_path / "restored"
+    names = drive._extract(archive.read_bytes(), dest)
+
+    assert "episodic/trip.md" in names  # markdown note body, subdir preserved
+    assert "MEMORY.md" in names
+    assert "index.db" in names
+    assert not any("token" in n for n in names)  # OAuth caches excluded
+    assert (dest / "episodic" / "trip.md").read_text(encoding="utf-8") == "# a trip\nbody"
+
+
 def test_snapshot_none_when_no_dbs(tmp_path):
     settings = _settings(tmp_path)
     settings.memory_path.mkdir(parents=True, exist_ok=True)

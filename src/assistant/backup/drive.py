@@ -69,43 +69,63 @@ def _copy_db(src: Path, dst: Path) -> None:
 
 
 def snapshot(settings: Settings) -> Path | None:
-    """Write a tar.gz of consistent copies of every ``*.db`` under the memory dir.
+    """Write a tar.gz of the whole memory dir into a fresh temp dir.
 
-    Returns the archive path (in a fresh temp dir the caller must clean up), or
-    ``None`` when there is nothing to back up yet.
+    Every ``*.db`` is copied consistently via the online-backup API; every other
+    on-disk file is copied verbatim, preserving its relative path — crucially the
+    note markdown tree (``<kind>/<name>.md`` + ``MEMORY.md``), which is the
+    *source of truth* for note bodies (``index.db`` only holds the derived vector
+    index). Excludes WAL sidecars and the ``*_token.json`` OAuth caches (secrets,
+    regenerated from the refresh token). Returns the archive path (caller cleans
+    up its parent), or ``None`` when there is nothing to back up yet.
     """
-    dbs = sorted(settings.memory_path.glob("*.db"))
-    if not dbs:
+    memory = settings.memory_path
+    dbs = sorted(memory.glob("*.db"))
+    extras = sorted(
+        p
+        for p in memory.rglob("*")
+        if p.is_file()
+        and p.suffix != ".db"
+        and not p.name.endswith((".db-wal", ".db-shm", ".tmp"))
+        and not p.name.endswith("_token.json")
+    )
+    if not dbs and not extras:
         return None
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     workdir = Path(tempfile.mkdtemp(prefix="wakiru-snap-"))
-    staging = workdir / "db"
+    staging = workdir / "mem"
     staging.mkdir()
     for db in dbs:
         _copy_db(db, staging / db.name)
+    for src in extras:
+        dst = staging / src.relative_to(memory)
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
     archive = workdir / f"{_ARCHIVE_PREFIX}{stamp}.tar.gz"
     with tarfile.open(archive, "w:gz") as tar:
-        for db in dbs:
-            tar.add(staging / db.name, arcname=db.name)
+        tar.add(staging, arcname=".")
     shutil.rmtree(staging, ignore_errors=True)
     return archive
 
 
 def _extract(data: bytes, dest: Path) -> list[str]:
-    """Extract the ``.db`` files from an archive into ``dest`` (flat, no traversal)."""
+    """Extract a memory archive into ``dest``, preserving subdirs; refuse any
+    absolute path or ``..`` traversal."""
     dest.mkdir(parents=True, exist_ok=True)
     restored: list[str] = []
     with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
         for member in tar.getmembers():
-            name = member.name
-            # We wrote these ourselves as bare basenames; refuse anything else
-            # rather than trust a path from the archive.
-            if not member.isfile() or "/" in name or name in ("", ".", ".."):
+            if not member.isfile():
+                continue
+            name = member.name[2:] if member.name.startswith("./") else member.name
+            if not name or name.startswith("/") or ".." in name.split("/"):
                 continue
             handle = tar.extractfile(member)
             if handle is None:
                 continue
-            (dest / name).write_bytes(handle.read())
+            target = dest / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(handle.read())
             restored.append(name)
     return restored
 
