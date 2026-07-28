@@ -25,7 +25,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 
-from .calendar.context import now
+from .calendar.context import format_when, now
 from .calendar.store import parse_dt
 from .config import Settings, postgres_backend
 from .sqlite_util import open_db, transaction
@@ -304,6 +304,33 @@ def close(
         status=status,
         outcome=outcome,
     )
+
+
+def goals_context(settings: Settings) -> str:
+    """The standing goals block for the per-turn prompt (the goals context
+    provider). The same intentions the heartbeat advances, so a chat turn about
+    one picks up its working state and the user can steer or drop it. Empty when
+    nothing is open."""
+    open_items = list_open(settings)
+    if not open_items:
+        return ""
+    lines = [
+        "## Your standing goals",
+        "Ongoing projects you are advancing in the background. If the "
+        "conversation touches one, use its state; record progress or changes "
+        "of direction with update_goal, and close_goal when it is finished "
+        "or the user drops it.",
+    ]
+    for goal in open_items:
+        when = (
+            f" — next step {format_when(settings, goal.next_action_at)}"
+            if goal.next_action_at
+            else " — parked"
+        )
+        lines.append(f"- {goal.title}{when} (id {goal.id})")
+        if goal.state:
+            lines.append(f"  state: {goal.state}")
+    return "\n".join(lines)
 
 
 def stale(settings: Settings, current: datetime | None = None) -> list[Goal]:
