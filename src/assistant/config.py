@@ -689,10 +689,15 @@ class Settings(BaseSettings):
         """Absolute path to the memory directory (created on first use)."""
         return Path(self.memory_dir).expanduser().resolve()
 
+    def _db(self, name: str) -> Path:
+        """A named SQLite file under the memory directory (see the *_db_path
+        properties below, one per feature store)."""
+        return self.memory_path / name
+
     @property
     def memory_db_path(self) -> Path:
         """SQLite file holding the vector index + reinforcement counters."""
-        return self.memory_path / "index.db"
+        return self._db("index.db")
 
     @property
     def graph_db_path(self) -> Path:
@@ -702,87 +707,87 @@ class Settings(BaseSettings):
         graph's plain-SQL traversal never share a connection, and either index
         can be rebuilt from the notes without disturbing the other.
         """
-        return self.memory_path / "graph.db"
+        return self._db("graph.db")
 
     @property
     def calendar_db_path(self) -> Path:
         """SQLite file holding the local calendar's events."""
-        return self.memory_path / "calendar.db"
+        return self._db("calendar.db")
 
     @property
     def tasks_db_path(self) -> Path:
         """SQLite file holding the to-do list (tasks + their undo ledger)."""
-        return self.memory_path / "tasks.db"
+        return self._db("tasks.db")
 
     @property
     def people_db_path(self) -> Path:
         """SQLite file holding the people store (contacts + their undo ledger)."""
-        return self.memory_path / "people.db"
+        return self._db("people.db")
 
     @property
     def reading_db_path(self) -> Path:
         """SQLite file holding the read-it-later list."""
-        return self.memory_path / "reading.db"
+        return self._db("reading.db")
 
     @property
     def trips_db_path(self) -> Path:
         """SQLite file holding the trips store."""
-        return self.memory_path / "trips.db"
+        return self._db("trips.db")
 
     @property
     def lists_db_path(self) -> Path:
         """SQLite file holding the named checklists."""
-        return self.memory_path / "lists.db"
+        return self._db("lists.db")
 
     @property
     def habits_db_path(self) -> Path:
         """SQLite file holding the health / habits log."""
-        return self.memory_path / "habits.db"
+        return self._db("habits.db")
 
     @property
     def expenses_db_path(self) -> Path:
         """SQLite file holding the expense log."""
-        return self.memory_path / "expenses.db"
+        return self._db("expenses.db")
 
     @property
     def worklog_db_path(self) -> Path:
         """SQLite file holding the work log (time tracking)."""
-        return self.memory_path / "worklog.db"
+        return self._db("worklog.db")
 
     @property
     def subscriptions_db_path(self) -> Path:
         """SQLite file holding tracked subscriptions + their renewal fired ledger."""
-        return self.memory_path / "subscriptions.db"
+        return self._db("subscriptions.db")
 
     @property
     def docs_db_path(self) -> Path:
         """SQLite file holding ingested documents + their chunk vector index."""
-        return self.memory_path / "docs.db"
+        return self._db("docs.db")
 
     @property
     def briefing_db_path(self) -> Path:
         """SQLite file holding the daily fired ledgers (briefing, nightly sleep)."""
-        return self.memory_path / "briefing.db"
+        return self._db("briefing.db")
 
     @property
     def mutes_db_path(self) -> Path:
         """SQLite file holding active reminder mutes (see assistant.mutes)."""
-        return self.memory_path / "mutes.db"
+        return self._db("mutes.db")
 
     @property
     def threads_db_path(self) -> Path:
         """SQLite file holding the live-thread registry (see assistant.threads)."""
-        return self.memory_path / "threads.db"
+        return self._db("threads.db")
 
     @property
     def followups_db_path(self) -> Path:
         """SQLite file holding the assistant's followups (see assistant.followups)."""
-        return self.memory_path / "followups.db"
+        return self._db("followups.db")
 
     @property
     def mail_db_path(self) -> Path:
         """SQLite file holding the mailbox-mutation audit ledger (see assistant.mail.audit)."""
-        return self.memory_path / "mail.db"
+        return self._db("mail.db")
 
     @property
     def mail_token_path(self) -> Path:
@@ -807,7 +812,7 @@ class Settings(BaseSettings):
         contend with the long-lived checkpointer connection, and a reindex can
         rebuild vectors without touching conversation history.
         """
-        return self.memory_path / "checkpoints.db"
+        return self._db("checkpoints.db")
 
 
 @lru_cache
