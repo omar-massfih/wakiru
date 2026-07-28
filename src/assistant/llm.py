@@ -6,14 +6,12 @@ graph, the API) is provider-agnostic. ``build_model`` selects one via
 
 Wired today:
   - ``codex``     — drives the Codex CLI (auth via ``codex login``; no API key).
-  - ``chatgpt``   — chatgpt.com's backend over HTTP, reusing the Codex CLI's
-                    OAuth tokens (``codex login``; no API key).
   - ``openai``    — hosted OpenAI / any OpenAI-compatible endpoint via ChatOpenAI.
   - ``anthropic`` — Claude via ChatAnthropic.
 
 The API-backed providers read their key/model/base-url from ``Settings``
-(``llm_api_key`` / ``llm_model`` / ``llm_base_url``); the codex and chatgpt
-providers ignore those and authenticate through the Codex CLI's login.
+(``llm_api_key`` / ``llm_model`` / ``llm_base_url``); the codex provider ignores
+those and authenticates through the Codex CLI's login.
 """
 
 from __future__ import annotations
@@ -39,14 +37,13 @@ from langchain_core.messages.tool import ToolCall, ToolCallChunk
 from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
 from pydantic import Field
 
-from .chatgpt_backend import run_chatgpt, run_chatgpt_stream
 from .codex_runner import run_codex, run_codex_stream
 from .config import Settings, get_settings
 
 logger = logging.getLogger(__name__)
 
 # --------------------------------------------------------------------------- #
-# Text-only providers (codex / chatgpt): emulated tool calling
+# Text-only providers (codex): emulated tool calling
 # --------------------------------------------------------------------------- #
 
 _ROLE_LABELS = {
@@ -197,25 +194,6 @@ def _render_prompt(messages: list[BaseMessage], tools: list[dict] | None = None)
         lines.append(f"{label}: {content}")
     lines.append("Assistant:")
     return "\n\n".join(lines)
-
-
-def _split_leading_system(messages: list[BaseMessage]) -> tuple[str, list[BaseMessage]]:
-    """Peel consecutive leading ``SystemMessage``s off ``messages``.
-
-    Returns ``(system_text, remaining)`` where ``system_text`` is their content
-    joined with blank lines (empty when there are none). Backends with a native
-    system slot (chatgpt.com's ``instructions``) route ``system_text`` there
-    instead of flattening it into the user turn.
-    """
-    parts: list[str] = []
-    index = 0
-    for message in messages:
-        if not isinstance(message, SystemMessage):
-            break
-        content = message.content
-        parts.append(content if isinstance(content, str) else str(content))
-        index += 1
-    return "\n\n".join(parts), messages[index:]
 
 
 class _TextToolChatModel(BaseChatModel):
@@ -370,39 +348,8 @@ class CodexChatModel(_TextToolChatModel):
         return run_codex_stream(prompt, settings=self.settings)
 
 
-class ChatGptChatModel(_TextToolChatModel):
-    """Delegates generation to chatgpt.com's backend (see :mod:`assistant.chatgpt_backend`)."""
-
-    @property
-    def _llm_type(self) -> str:
-        return "chatgpt-backend"
-
-    def _prepare(
-        self, messages: list[BaseMessage], tools: list[dict] | None
-    ) -> tuple[str, dict]:
-        # The Responses endpoint has a real system slot: route the persona +
-        # context blocks there via `instructions` instead of flattening them
-        # into the user turn. Empty → None → backend's placeholder fallback.
-        system, rest = _split_leading_system(messages)
-        return _render_prompt(rest, tools=tools), {"instructions": system or None}
-
-    def _run(self, prompt: str, instructions: str | None = None, **kwargs: Any) -> str:
-        return run_chatgpt(prompt, settings=self.settings, instructions=instructions)
-
-    def _run_stream(
-        self, prompt: str, instructions: str | None = None, **kwargs: Any
-    ) -> Iterator[str]:
-        return run_chatgpt_stream(
-            prompt, settings=self.settings, instructions=instructions
-        )
-
-
 def _build_codex(settings: Settings) -> BaseChatModel:
     return CodexChatModel(settings=settings)
-
-
-def _build_chatgpt(settings: Settings) -> BaseChatModel:
-    return ChatGptChatModel(settings=settings)
 
 
 # --------------------------------------------------------------------------- #
@@ -460,7 +407,6 @@ ProviderBuilder = Callable[[Settings], BaseChatModel]
 
 PROVIDERS: dict[str, ProviderBuilder] = {
     "codex": _build_codex,
-    "chatgpt": _build_chatgpt,
     "openai": _build_openai,
     "anthropic": _build_anthropic,
 }

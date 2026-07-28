@@ -1,10 +1,9 @@
 """Shared scaffolding for the subprocess/HTTP backends.
 
-The Codex CLI runner, the chatgpt.com backend, and the code sandbox each bound
-their concurrent work with the same lazily-sized semaphore, and the two LLM
-backends raise the same error/timeout pair. Those shared shapes live here so
-each backend keeps only what is genuinely its own (argv/payload building,
-stream parsing, auth).
+The Codex CLI runner and the code sandbox each bound their concurrent work with
+the same lazily-sized semaphore, and the LLM backend raises an error/timeout
+pair. Those shared shapes live here so each backend keeps only what is genuinely
+its own (argv building, stream parsing, auth).
 """
 
 from __future__ import annotations
@@ -16,7 +15,7 @@ from .config import Settings
 
 
 class BackendError(RuntimeError):
-    """An LLM backend call (the Codex CLI or the chatgpt.com endpoint) failed."""
+    """An LLM backend call (the Codex CLI) failed."""
 
 
 class BackendTimeoutError(BackendError):

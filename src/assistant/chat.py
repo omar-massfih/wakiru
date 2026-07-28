@@ -18,7 +18,6 @@ from langgraph.graph.state import CompiledStateGraph
 
 from . import threads
 from .agent import maybe_summarize
-from .chatgpt_backend import ChatGptAuthError, ChatGptError, ChatGptTimeoutError
 from .codex_runner import CodexError, CodexTimeoutError
 from .config import Settings, get_settings
 from .memory import consolidate_memory, index, update_memory
@@ -33,19 +32,12 @@ def error_reply(exc: Exception) -> str:
     or worse, silence. Deliberately content-free about internals: the log has
     the traceback, the user just needs to know whether retrying can help.
     """
-    if isinstance(exc, CodexTimeoutError | ChatGptTimeoutError | TimeoutError):
+    if isinstance(exc, CodexTimeoutError | TimeoutError):
         return (
             "That one took too long and I gave up partway. "
             "Try again — or break it into smaller steps."
         )
-    if isinstance(exc, ChatGptAuthError):
-        # User-actionable, unlike a transient snag: the ChatGPT sign-in the
-        # chatgpt provider borrows has expired or gone missing.
-        return (
-            "I can't reach ChatGPT right now — my sign-in looks expired. "
-            "Run `codex login` on the server, then try again."
-        )
-    if isinstance(exc, CodexError | ChatGptError):
+    if isinstance(exc, CodexError):
         return "My reasoning engine hit a snag. Give it a moment and try again."
     return "Something unexpected broke on my end — it's logged. Try once more."
 
@@ -62,9 +54,8 @@ def run_chat(
     resolves by calling the ``undo`` tool against the ledger.
 
     Raises the provider's error (:class:`assistant.codex_runner.CodexError`,
-    :class:`assistant.chatgpt_backend.ChatGptError`, …) when the model fails;
-    each channel translates that into its own error surface (HTTP 502, a chat
-    apology).
+    an openai/anthropic error, …) when the model fails; each channel translates
+    that into its own error surface (HTTP 502, a chat apology).
     """
     settings = settings or get_settings()
     config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
@@ -90,8 +81,8 @@ async def run_chat_stream(
     is exhausted.
 
     Propagates whatever the configured provider raises when the model fails
-    (e.g. ``CodexError``, ``ChatGptError``, or an openai/anthropic error) — the
-    caller catches broadly and turns it into a clean error response.
+    (e.g. ``CodexError`` or an openai/anthropic error) — the caller catches
+    broadly and turns it into a clean error response.
     """
     settings = settings or get_settings()
     config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
