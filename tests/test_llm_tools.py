@@ -111,12 +111,11 @@ def test_render_prompt_replays_tool_history() -> None:
     assert "Tool result (add_task): added task: milk" in prompt
 
 
-def test_codex_prepare_keeps_system_in_the_prompt() -> None:
-    model = CodexChatModel(settings=Settings())
+def test_render_prompt_keeps_system_in_the_prompt() -> None:
+    # The text backends have no native system slot: system content stays folded
+    # into the one rendered prompt string.
     messages = [SystemMessage(content="persona"), HumanMessage(content="hi")]
-    prompt, extra = model._prepare(messages, tools=None)
-    # Codex has no system slot: everything stays folded into the one prompt.
-    assert extra == {}
+    prompt = _render_prompt(messages)
     assert "System: persona" in prompt
 
 

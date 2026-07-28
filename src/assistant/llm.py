@@ -211,22 +211,11 @@ class _TextToolChatModel(BaseChatModel):
     settings: Settings
     bound_tools: list[dict] = Field(default_factory=list)
 
-    def _run(self, prompt: str, **kwargs: Any) -> str:
+    def _run(self, prompt: str) -> str:
         raise NotImplementedError
 
-    def _run_stream(self, prompt: str, **kwargs: Any) -> Iterator[str]:
+    def _run_stream(self, prompt: str) -> Iterator[str]:
         raise NotImplementedError
-
-    def _prepare(
-        self, messages: list[BaseMessage], tools: list[dict] | None
-    ) -> tuple[str, dict]:
-        """Render ``messages`` into a prompt plus any transport-specific extras.
-
-        The default folds the whole message list (system content included) into
-        the single prompt string. Backends with a native system slot override
-        this to peel that content out and pass it via the returned extras.
-        """
-        return _render_prompt(messages, tools=tools), {}
 
     def bind_tools(self, tools: Sequence[Any], **kwargs: Any) -> _TextToolChatModel:
         from langchain_core.utils.function_calling import convert_to_openai_tool
@@ -242,8 +231,8 @@ class _TextToolChatModel(BaseChatModel):
         run_manager: CallbackManagerForLLMRun | None = None,
         **kwargs: Any,
     ) -> ChatResult:
-        prompt, extra = self._prepare(messages, self.bound_tools)
-        text = self._run(prompt, **extra)
+        prompt = _render_prompt(messages, tools=self.bound_tools)
+        text = self._run(prompt)
         if self.bound_tools:
             content, calls = parse_tool_calls(text)
             message = AIMessage(content=content, tool_calls=calls)
@@ -273,9 +262,9 @@ class _TextToolChatModel(BaseChatModel):
         # _should_stream routes through here whenever a streaming callback
         # handler (e.g. LangGraph's messages mode) is attached. The async side
         # needs no override — astream falls back to running this in an executor.
-        prompt, extra = self._prepare(messages, self.bound_tools)
+        prompt = _render_prompt(messages, tools=self.bound_tools)
         if not self.bound_tools:
-            for delta in self._run_stream(prompt, **extra):
+            for delta in self._run_stream(prompt):
                 chunk = ChatGenerationChunk(message=AIMessageChunk(content=delta))
                 if run_manager:
                     run_manager.on_llm_new_token(delta, chunk=chunk)
@@ -289,7 +278,7 @@ class _TextToolChatModel(BaseChatModel):
         buffer = ""
         flushed = 0
         fence_at: int | None = None  # confirmed fence start — never emit past it
-        for delta in self._run_stream(prompt, **extra):
+        for delta in self._run_stream(prompt):
             buffer += delta
             if fence_at is None:
                 found = buffer.find(_STREAM_FENCE_HINT, max(flushed - 8, 0))
@@ -341,10 +330,10 @@ class CodexChatModel(_TextToolChatModel):
     def _llm_type(self) -> str:
         return "codex-cli"
 
-    def _run(self, prompt: str, **kwargs: Any) -> str:
+    def _run(self, prompt: str) -> str:
         return run_codex(prompt, settings=self.settings)
 
-    def _run_stream(self, prompt: str, **kwargs: Any) -> Iterator[str]:
+    def _run_stream(self, prompt: str) -> Iterator[str]:
         return run_codex_stream(prompt, settings=self.settings)
 
 
