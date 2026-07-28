@@ -431,31 +431,7 @@ def gather_situation(
     # channel. Claims are at-most-once per band: a reminder the model skips
     # resurfaces only when a closer band opens. Each family is best-effort,
     # like the watches, so one failing store never blocks the wake.
-    reminder_lines: list[str] = []
-    if settings.enable_reminders:
-        from .calendar import reminders as calendar_reminders
-        from .calendar.context import format_when
-        from .people import reminders as birthday_reminders
-        from .subscriptions import reminders as subscription_reminders
-        from .tasks import reminders as task_reminders
-
-        families = (
-            (
-                calendar_reminders.surface_due,
-                lambda r: f"{r['message']} (starts {format_when(settings, r['start'])})",
-            ),
-            (
-                task_reminders.surface_due,
-                lambda r: f"{r['message']} (due {format_when(settings, r['due'])})",
-            ),
-            (birthday_reminders.surface_due, lambda r: r["message"]),
-            (subscription_reminders.surface_due, lambda r: r["message"]),
-        )
-        for surface, render in families:
-            try:
-                reminder_lines += [render(r) for r in surface(settings, current)]
-            except Exception:
-                logger.exception("heartbeat: surfacing due reminders failed")
+    reminder_lines = _due_reminder_lines(settings, current)
 
     # Ready goals are raised, never claimed: the model moves next_action_at
     # forward itself (update_goal). The raise-stamp KV keeps a goal the model
@@ -501,9 +477,66 @@ def gather_situation(
         minutes = int((current - last_heard).total_seconds() / 60)
         info.append(f"You last heard from the user {minutes} minutes ago.")
 
-    # The standing intentions you carry across wakes: open follow-ups not yet
-    # due (the due ones were just claimed above). Surfaced every beat so you can
-    # act toward them, reschedule them, or rewrite their context as things move.
+    # The standing intentions carried across wakes (open follow-ups, active
+    # watches, stale goals) and what earlier wakes already did (mailbox actions,
+    # nudges delivered) — all surfaced for judgment, never auto-actioned.
+    info += _standing_info(settings, current)
+    info += _accountability_info(settings, current)
+
+    return Situation(
+        triggers=triggers,
+        followups=due,
+        goals=ready_goals,
+        watch_hits=watch_hits,
+        reminders=reminder_lines,
+        info=info,
+    )
+
+
+def _due_reminder_lines(settings: Settings, current: datetime) -> list[str]:
+    """Due-reminder lines across the four families — calendar events, dated
+    tasks, birthdays, subscription renewals.
+
+    Claimed here (at-most-once per band): a reminder the model skips resurfaces
+    only when a closer band opens. Each family is best-effort, so one failing
+    store never blocks the wake. Empty when reminders are disabled.
+    """
+    if not settings.enable_reminders:
+        return []
+    from .calendar import reminders as calendar_reminders
+    from .calendar.context import format_when
+    from .people import reminders as birthday_reminders
+    from .subscriptions import reminders as subscription_reminders
+    from .tasks import reminders as task_reminders
+
+    families = (
+        (
+            calendar_reminders.surface_due,
+            lambda r: f"{r['message']} (starts {format_when(settings, r['start'])})",
+        ),
+        (
+            task_reminders.surface_due,
+            lambda r: f"{r['message']} (due {format_when(settings, r['due'])})",
+        ),
+        (birthday_reminders.surface_due, lambda r: r["message"]),
+        (subscription_reminders.surface_due, lambda r: r["message"]),
+    )
+    lines: list[str] = []
+    for surface, render in families:
+        try:
+            lines += [render(r) for r in surface(settings, current)]
+        except Exception:
+            logger.exception("heartbeat: surfacing due reminders failed")
+    return lines
+
+
+def _standing_info(settings: Settings, current: datetime) -> list[str]:
+    """The standing intentions carried across wakes: open follow-ups not yet due
+    (the due ones are claimed in :func:`gather_situation`), active watches, and
+    goals left untouched too long. Surfaced every beat so the model can act
+    toward, reschedule, prune, or advance them — never auto-actioned.
+    """
+    info: list[str] = []
     open_items = followups.list_open(settings)
     if open_items:
         from .calendar.context import format_when
@@ -516,8 +549,6 @@ def gather_situation(
             line = f"  - {item.topic} @ {format_when(settings, item.due)} (id {item.id})"
             info.append(line + (f" — {item.context}" if item.context else ""))
 
-    # Active watches, so the model remembers what it is looking for and can
-    # prune ones overtaken by events (unwatch).
     active_watches = watches.list_active(settings, current)
     if active_watches:
         info.append("Watches you have set (drop stale ones with unwatch):")
@@ -528,18 +559,24 @@ def gather_situation(
             for w in active_watches[:8]
         ]
 
-    # Open goals already ride along via the goals context block; the report
-    # only nudges about ones the model has left untouched too long —
-    # surfaced for judgment, never auto-closed.
+    # Open goals already ride along via the goals context block; only nudge
+    # about ones the model has left untouched too long.
     for goal in goals.stale(settings, current):
         info.append(
             f"Stale goal: {goal.title} (id {goal.id}) has not moved in "
             f"{settings.goal_stale_days}+ days — advance it, reschedule its "
             "next step, or close it as abandoned."
         )
+    return info
 
-    # Triage accountability: what you already did to the mailbox, so a wake
-    # never re-archives, re-labels, or re-drafts what an earlier one handled.
+
+def _accountability_info(settings: Settings, current: datetime) -> list[str]:
+    """What earlier wakes already did — mailbox actions taken and nudges
+    delivered — so this wake never re-archives/re-labels/re-drafts what an
+    earlier one handled, nor re-sends the same nudge in different words. Both
+    ledgers are best-effort; a read failure just yields nothing.
+    """
+    info: list[str] = []
     if settings.enable_email and settings.email_triage_max_actions > 0:
         try:
             from .mail import audit as mail_audit
@@ -552,10 +589,6 @@ def gather_situation(
             info.append("Mailbox actions you took on recent wakes (do not redo them):")
             info += [f"  - {row['detail']}" for row in actions]
 
-    # De-dup accountability: the nudges already delivered to the user recently
-    # (by an earlier wake or a manually-triggered digest). Surfacing what was
-    # already sent stops a wake from re-sending the same thing in different
-    # words (the repeated "session resets…" nudges this guards against).
     if settings.heartbeat_dedup_push_hours > 0:
         try:
             from .reflect import recent_pushes
@@ -572,15 +605,7 @@ def gather_situation(
                 "again, or a reworded version; they have been handled:"
             )
             info += [f"  - [{row['kind']}] {row['excerpt']}" for row in delivered[-6:]]
-
-    return Situation(
-        triggers=triggers,
-        followups=due,
-        goals=ready_goals,
-        watch_hits=watch_hits,
-        reminders=reminder_lines,
-        info=info,
-    )
+    return info
 
 
 def _raisable_goals(settings: Settings, current: datetime) -> list:
