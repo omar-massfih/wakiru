@@ -30,7 +30,7 @@ from datetime import date
 import sqlite_vec
 
 from ..config import Settings, postgres_backend
-from ..sqlite_util import open_db
+from ..sqlite_util import ensure_columns, open_db
 from .embeddings import embedding_signature
 from .locks import locked
 
@@ -60,9 +60,7 @@ def _connect(settings: Settings) -> sqlite3.Connection:
         " recall_count INTEGER DEFAULT 0, hash TEXT DEFAULT '')"
     )
     # Migrate pre-hash databases in place (a blank hash just means "re-embed").
-    columns = {row[1] for row in conn.execute("PRAGMA table_info(notes)")}
-    if "hash" not in columns:
-        conn.execute("ALTER TABLE notes ADD COLUMN hash TEXT DEFAULT ''")
+    ensure_columns(conn, "notes", ("hash",))
     conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
     return conn
 
