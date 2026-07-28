@@ -256,7 +256,7 @@ def _ensure_state(conn: sqlite3.Connection) -> None:
 
 
 def _minutes_since(settings: Settings, key: str, current: datetime) -> float | None:
-    stamp = parse_dt(_state_get(settings, key)) if _state_get(settings, key) else None
+    stamp = parse_dt(_state_get(settings, key))
     if stamp is None:
         return None
     return (current - stamp).total_seconds() / 60
