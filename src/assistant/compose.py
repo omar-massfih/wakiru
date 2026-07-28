@@ -21,7 +21,7 @@ from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from . import persona
 from .config import Settings
 from .context_providers import build_context
-from .llm import build_model
+from .llm import build_model, reply_text
 
 logger = logging.getLogger(__name__)
 
@@ -49,13 +49,7 @@ def compose_push(
                 prefix.append(SystemMessage(content=block))
         prefix.append(SystemMessage(content=instruction))
         reply = build_model(settings).invoke([*prefix, HumanMessage(content=facts)])
-        content = reply.content
-        if not isinstance(content, str):
-            # Anthropic can return a list of content blocks; keep the text ones.
-            content = "".join(
-                block.get("text", "") for block in content if isinstance(block, dict)
-            )
-        text = content.strip()
+        text = reply_text(reply.content).strip()
         return text if text else fallback
     except Exception:
         logger.exception("background composition failed; using the fallback text")

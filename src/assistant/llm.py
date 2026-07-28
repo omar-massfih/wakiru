@@ -414,6 +414,19 @@ def build_model(settings: Settings | None = None) -> BaseChatModel:
     return builder(settings)
 
 
+def reply_text(content: str | list) -> str:
+    """Flatten a chat model's ``.content`` to plain text.
+
+    Anthropic can return a list of content blocks instead of a bare string; keep
+    the text of each block. A string passes through unchanged.
+    """
+    if isinstance(content, str):
+        return content
+    return "".join(
+        block.get("text", "") for block in content if isinstance(block, dict)
+    )
+
+
 def complete_text(
     prompt: str, settings: Settings | None = None, *, system: str | None = None
 ) -> str:
@@ -430,13 +443,7 @@ def complete_text(
     if system:
         messages.insert(0, SystemMessage(content=system))
     reply = build_model(settings).invoke(messages)
-    content = reply.content
-    if isinstance(content, str):
-        return content
-    # Anthropic can return a list of content blocks; keep the text ones.
-    return "".join(
-        block.get("text", "") for block in content if isinstance(block, dict)
-    )
+    return reply_text(reply.content)
 
 
 def cacheable_system_message(text: str, settings: Settings) -> SystemMessage:
