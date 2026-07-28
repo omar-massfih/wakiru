@@ -15,35 +15,21 @@ import threading
 from collections.abc import Iterator
 from pathlib import Path
 
+from .concurrency import BackendError, BackendTimeoutError, BoundedSlot
 from .config import Settings, get_settings
 
 logger = logging.getLogger(__name__)
 
-# Cap on concurrent Codex subprocesses (see run_codex). Sized from the first
-# Settings that reaches run_codex; one process-wide semaphore is enough because
-# settings are effectively a singleton.
-_semaphore: threading.BoundedSemaphore | None = None
-_semaphore_lock = threading.Lock()
+# Cap on concurrent Codex subprocesses (see run_codex); excess calls queue.
+_codex_slot = BoundedSlot(lambda s: s.codex_max_concurrency)
 
 
-def _codex_slot(settings: Settings) -> threading.BoundedSemaphore:
-    global _semaphore
-    with _semaphore_lock:
-        if _semaphore is None:
-            _semaphore = threading.BoundedSemaphore(max(settings.codex_max_concurrency, 1))
-        return _semaphore
-
-
-class CodexError(RuntimeError):
+class CodexError(BackendError):
     """Raised when the Codex CLI exits non-zero or times out."""
 
 
-class CodexTimeoutError(CodexError):
-    """Raised when a Codex invocation exceeds ``codex_timeout``.
-
-    A subclass so ``except CodexError`` callers keep working, while channels
-    can tell "took too long" from "broke" when explaining a failure.
-    """
+class CodexTimeoutError(CodexError, BackendTimeoutError):
+    """Raised when a Codex invocation exceeds ``codex_timeout``."""
 
 
 def build_command(

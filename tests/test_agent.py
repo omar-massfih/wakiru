@@ -421,7 +421,7 @@ def test_run_codex_bounds_concurrency(monkeypatch) -> None:
 
     from assistant import codex_runner
 
-    monkeypatch.setattr(codex_runner, "_semaphore", None)  # fresh, sized from these settings
+    codex_runner._codex_slot.reset()  # fresh, sized from these settings
     settings = Settings(codex_max_concurrency=2)
 
     active = 0

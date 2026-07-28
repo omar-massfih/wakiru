@@ -26,6 +26,7 @@ from collections.abc import Iterable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 
+from .concurrency import BackendError, BackendTimeoutError, BoundedSlot
 from .config import Settings, get_settings
 
 logger = logging.getLogger(__name__)
@@ -52,30 +53,15 @@ _auth_lock = threading.Lock()
 
 # Cap on concurrent requests (see run_chatgpt) — rate limits here are the
 # ChatGPT plan's, and one chat turn fans out into several calls.
-_semaphore: threading.BoundedSemaphore | None = None
-_semaphore_lock = threading.Lock()
+_chatgpt_slot = BoundedSlot(lambda s: s.chatgpt_max_concurrency)
 
 
-def _chatgpt_slot(settings: Settings) -> threading.BoundedSemaphore:
-    global _semaphore
-    with _semaphore_lock:
-        if _semaphore is None:
-            _semaphore = threading.BoundedSemaphore(
-                max(settings.chatgpt_max_concurrency, 1)
-            )
-        return _semaphore
-
-
-class ChatGptError(RuntimeError):
+class ChatGptError(BackendError):
     """Raised when the chatgpt.com backend request fails."""
 
 
-class ChatGptTimeoutError(ChatGptError):
-    """Raised when a request exceeds ``chatgpt_timeout``.
-
-    A subclass so ``except ChatGptError`` callers keep working, while channels
-    can tell "took too long" from "broke" when explaining a failure.
-    """
+class ChatGptTimeoutError(ChatGptError, BackendTimeoutError):
+    """Raised when a request exceeds ``chatgpt_timeout``."""
 
 
 class ChatGptAuthError(ChatGptError):

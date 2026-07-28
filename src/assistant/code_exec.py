@@ -35,27 +35,15 @@ import logging
 import subprocess
 import sys
 import tempfile
-import threading
 from pathlib import Path
 
+from .concurrency import BoundedSlot
 from .config import Settings, get_settings
 
 logger = logging.getLogger(__name__)
 
-# Sized from the first Settings that reaches run_python; one process-wide
-# semaphore is enough because settings are effectively a singleton.
-_semaphore: threading.BoundedSemaphore | None = None
-_semaphore_lock = threading.Lock()
-
-
-def _exec_slot(settings: Settings) -> threading.BoundedSemaphore:
-    global _semaphore
-    with _semaphore_lock:
-        if _semaphore is None:
-            _semaphore = threading.BoundedSemaphore(
-                max(settings.code_exec_max_concurrency, 1)
-            )
-        return _semaphore
+# Cap on concurrent scripts (see run_python); excess calls queue for a slot.
+_exec_slot = BoundedSlot(lambda s: s.code_exec_max_concurrency)
 
 
 # Prepended to every script: block network as defense-in-depth before any of the
