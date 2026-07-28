@@ -90,6 +90,7 @@ def _subscription_tools() -> list[ToolSpec]:
                 ["name"],
             ),
             _add_subscription,
+            chat_only=True,
         ),
         ToolSpec(
             "list_subscriptions",
@@ -114,11 +115,13 @@ def _subscription_tools() -> list[ToolSpec]:
                 ["query"],
             ),
             _update_subscription,
+            chat_only=True,
         ),
         ToolSpec(
             "remove_subscription",
             "Stop tracking a subscription (e.g. the user cancelled it).",
             _params({"query": ("string", _ref)}, ["query"]),
             _remove_subscription,
+            chat_only=True,
         ),
     ]

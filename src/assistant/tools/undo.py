@@ -20,5 +20,6 @@ def _undo_tools() -> list[ToolSpec]:
             "back your latest change; the result says what was reverted.",
             _params({}, []),
             _undo,
+            chat_only=True,
         )
     ]

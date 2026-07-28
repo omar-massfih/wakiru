@@ -134,6 +134,7 @@ def _trip_tools() -> list[ToolSpec]:
                 ["destination"],
             ),
             _add_trip,
+            chat_only=True,
         ),
         ToolSpec(
             "list_trips",
@@ -160,11 +161,13 @@ def _trip_tools() -> list[ToolSpec]:
                 ["trip"],
             ),
             _update_trip,
+            chat_only=True,
         ),
         ToolSpec(
             "remove_trip",
             "Delete a trip (cancelled or added by mistake).",
             _params({"trip": ("string", _ref)}, ["trip"]),
             _remove_trip,
+            chat_only=True,
         ),
     ]

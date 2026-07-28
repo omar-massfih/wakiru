@@ -68,6 +68,7 @@ def _habit_tools() -> list[ToolSpec]:
                 ["habit"],
             ),
             _log_habit,
+            chat_only=True,
         ),
         ToolSpec(
             "habit_summary",
@@ -83,5 +84,6 @@ def _habit_tools() -> list[ToolSpec]:
             "for correcting a mistaken log.",
             _params({"id": ("string", "Exact entry id")}, ["id"]),
             _remove_habit_entry,
+            chat_only=True,
         ),
     ]

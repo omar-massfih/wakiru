@@ -31,12 +31,20 @@ class ToolContext:
     batch_id: str = ""
 @dataclass(frozen=True)
 class ToolSpec:
-    """One tool: an OpenAI-format schema plus its implementation."""
+    """One tool: an OpenAI-format schema plus its implementation.
+
+    ``chat_only`` marks a tool the background heartbeat must never hold: the
+    registry drops these in ``mode="heartbeat"`` (see :func:`available_tools`).
+    Setting it here, next to the tool, is what keeps a new chat-only tool from
+    silently leaking into unattended wakes — the property travels with the spec
+    rather than living in a blocklist the author has to remember to update.
+    """
 
     name: str
     description: str
     parameters: dict
     run: Callable[..., str] = field(repr=False)
+    chat_only: bool = False
 
     def to_openai_tool(self) -> dict:
         return {

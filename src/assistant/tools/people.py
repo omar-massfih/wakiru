@@ -63,6 +63,7 @@ def _people_tools() -> list[ToolSpec]:
                 ["name"],
             ),
             _op_runner(_person_op, "add"),
+            chat_only=True,
         ),
         ToolSpec(
             "update_person",
@@ -80,6 +81,7 @@ def _people_tools() -> list[ToolSpec]:
                 ["query"],
             ),
             _op_runner(_person_op, "update"),
+            chat_only=True,
         ),
         ToolSpec(
             "log_contact",
@@ -97,11 +99,13 @@ def _people_tools() -> list[ToolSpec]:
                 ["query"],
             ),
             _op_runner(_person_op, "log_contact"),
+            chat_only=True,
         ),
         ToolSpec(
             "remove_person",
             "Delete a person from the store.",
             _params({"query": ("string", _ref)}, ["query"]),
             _op_runner(_person_op, "remove"),
+            chat_only=True,
         ),
     ]

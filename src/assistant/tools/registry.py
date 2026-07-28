@@ -124,44 +124,15 @@ def available_tools(settings: Settings, mode: str = "chat") -> list[ToolSpec]:
         # whole-document summarize stay chat-only too: a background wake should
         # not grow docs.db or spend a map-reduce of LLM calls unprompted.
         tools += _wake_tools()
-        tools = [
-            spec
-            for spec in tools
-            if spec.name not in (
-                "send_email", "send_reply", "undo",
-                "ingest_attachment", "summarize_document", "save_note",
-                "read_url", "ingest_url",
-                # On-demand weather does a network fetch; like the web tools it
-                # is chat-only — a background wake must not fetch arbitrary places.
-                "get_weather",
-                # People writes are chat-only: a background wake surfaces who is
-                # due (see heartbeat) and composes outreach, but does not mutate
-                # the CRM unattended.
-                "add_person", "update_person", "remove_person", "log_contact",
-                # Reading-list writes are chat-only too — nothing a background
-                # wake should be saving or pruning on its own.
-                "save_reading", "mark_read", "remove_reading",
-                # Checklist writes likewise: the user says what goes on a list;
-                # show_list stays readable for briefing enrichment.
-                "add_to_list", "check_off_item", "remove_from_list",
-                # Trip writes are chat-only; list_trips stays readable so a
-                # wake can reason about imminent travel.
-                "add_trip", "update_trip", "remove_trip",
-                # Subscription writes are chat-only; the heartbeat only fires
-                # renewal reminders, it does not edit what's tracked.
-                "add_subscription", "update_subscription", "remove_subscription",
-                # Habit writes are chat-only — the user logs what they did; a
-                # background wake has nothing to record on their behalf.
-                "log_habit", "remove_habit_entry",
-                # Expense writes likewise — only the user knows what they
-                # spent or wants to cap; expense_summary stays readable for
-                # rollup and budget questions.
-                "log_expense", "remove_expense", "set_budget", "remove_budget",
-                # Work-log writes too — only the user starts, stops, or logs
-                # their time; work_summary stays readable for rollups.
-                "start_work", "stop_work", "log_work", "remove_work_entry",
-            )
-        ]
+        # Drop every chat-only tool: send_email/send_reply and undo, the docs
+        # and web ingest/read tools, on-demand weather, and all the per-feature
+        # writes (people/reading/lists/trips/subscriptions/habits/expenses/
+        # worklog). Each is flagged chat_only=True at its definition, so a new
+        # chat-only tool is excluded here by construction — no blocklist to keep
+        # in sync. Their read/summary siblings stay readable for briefing
+        # enrichment. The send exclusion in particular is structural: no prompt,
+        # bug, or jailbreak can make a background wake send mail.
+        tools = [spec for spec in tools if not spec.chat_only]
         tools = [
             _chat_only_feed(spec) if spec.name == "watch" else spec for spec in tools
         ]

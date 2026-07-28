@@ -143,6 +143,7 @@ def _web_tools() -> list[ToolSpec]:
             "are truncated.",
             _params({"url": ("string", "Absolute http(s) URL")}, ["url"]),
             _read_url,
+            chat_only=True,
         ),
     ]
 
@@ -160,6 +161,7 @@ def _web_ingest_tools() -> list[ToolSpec]:
                 ["url"],
             ),
             _ingest_url,
+            chat_only=True,
         ),
     ]
 
@@ -183,6 +185,7 @@ def _docs_tools() -> list[ToolSpec]:
                 ["title", "text"],
             ),
             _save_note,
+            chat_only=True,
         ),
         ToolSpec(
             "summarize_document",
@@ -193,5 +196,6 @@ def _docs_tools() -> list[ToolSpec]:
                 ["target"],
             ),
             _summarize_document,
+            chat_only=True,
         ),
     ]

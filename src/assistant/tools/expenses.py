@@ -92,6 +92,7 @@ def _expense_tools() -> list[ToolSpec]:
                 ["amount"],
             ),
             _log_expense,
+            chat_only=True,
         ),
         ToolSpec(
             "expense_summary",
@@ -108,6 +109,7 @@ def _expense_tools() -> list[ToolSpec]:
             "for correcting a mistaken log.",
             _params({"id": ("string", "Exact entry id")}, ["id"]),
             _remove_expense,
+            chat_only=True,
         ),
         ToolSpec(
             "set_budget",
@@ -123,6 +125,7 @@ def _expense_tools() -> list[ToolSpec]:
                 ["amount"],
             ),
             _set_budget,
+            chat_only=True,
         ),
         ToolSpec(
             "remove_budget",
@@ -130,5 +133,6 @@ def _expense_tools() -> list[ToolSpec]:
             "overall budget).",
             _params({"category": ("string", "The budgeted category; omit for overall")}, []),
             _remove_budget,
+            chat_only=True,
         ),
     ]

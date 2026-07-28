@@ -109,6 +109,40 @@ def test_heartbeat_registry_never_sends_and_gates_triage() -> None:
     assert "send_email" not in beat and "send_reply" not in beat  # still never
 
 
+def test_heartbeat_drops_exactly_the_chat_only_tools() -> None:
+    # Every feature on, mail triage opted in — the widest possible toolset.
+    flags = {n: True for n in Settings.model_fields if n.startswith("enable_")}
+    enabled = Settings(**flags, email_triage_max_actions=3)
+
+    chat = list(available_tools(enabled, mode="chat"))
+    beat = list(available_tools(enabled, mode="heartbeat"))
+    chat_only = {s.name for s in chat if s.chat_only}
+
+    # The flag is the whole filter: no chat_only tool survives a background
+    # wake, and the excluded set is exactly the chat_only tools. This is the
+    # security-relevant guard — a dropped flag on a write tool fails here.
+    assert not any(s.chat_only for s in beat)
+    assert chat_only == {s.name for s in chat} - {s.name for s in beat}
+
+    # Canary on the specific tools that must never reach an unattended wake:
+    # sends, undo, the docs/web ingest + on-demand weather (arbitrary-origin
+    # reads), and every per-feature write.
+    must_be_chat_only = {
+        "send_email", "send_reply", "undo",
+        "ingest_attachment", "summarize_document", "save_note", "read_url", "ingest_url",
+        "get_weather",
+        "add_person", "update_person", "remove_person", "log_contact",
+        "save_reading", "mark_read", "remove_reading",
+        "add_to_list", "check_off_item", "remove_from_list",
+        "add_trip", "update_trip", "remove_trip",
+        "add_subscription", "update_subscription", "remove_subscription",
+        "log_habit", "remove_habit_entry",
+        "log_expense", "remove_expense", "set_budget", "remove_budget",
+        "start_work", "stop_work", "log_work", "remove_work_entry",
+    }
+    assert must_be_chat_only <= chat_only
+
+
 def test_heartbeat_triage_budget_caps_mutations(settings, monkeypatch) -> None:
     triage = settings.model_copy(
         update={

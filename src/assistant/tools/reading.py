@@ -87,6 +87,7 @@ def _reading_tools() -> list[ToolSpec]:
                 ["url"],
             ),
             _save_reading,
+            chat_only=True,
         ),
         ToolSpec(
             "list_reading",
@@ -103,11 +104,13 @@ def _reading_tools() -> list[ToolSpec]:
             "Mark a saved link as read (done). ",
             _params({"query": ("string", _ref)}, ["query"]),
             _mark_read,
+            chat_only=True,
         ),
         ToolSpec(
             "remove_reading",
             "Delete a link from the reading list.",
             _params({"query": ("string", _ref)}, ["query"]),
             _remove_reading,
+            chat_only=True,
         ),
     ]

@@ -291,6 +291,7 @@ def _email_tools(settings: Settings) -> list[ToolSpec]:
                     ["uid"],
                 ),
                 _ingest_attachment,
+                chat_only=True,
             )
         )
     if settings.enable_email_send:
@@ -309,6 +310,7 @@ def _email_tools(settings: Settings) -> list[ToolSpec]:
                     ["to", "subject", "body"],
                 ),
                 _send_email,
+                chat_only=True,
             )
         )
         tools.append(
@@ -329,6 +331,7 @@ def _email_tools(settings: Settings) -> list[ToolSpec]:
                     ["uid", "body"],
                 ),
                 _send_reply,
+                chat_only=True,
             )
         )
     return tools

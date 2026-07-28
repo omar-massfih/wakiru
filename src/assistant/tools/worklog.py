@@ -88,6 +88,7 @@ def _worklog_tools() -> list[ToolSpec]:
                 ["project"],
             ),
             _start_work,
+            chat_only=True,
         ),
         ToolSpec(
             "stop_work",
@@ -95,6 +96,7 @@ def _worklog_tools() -> list[ToolSpec]:
             "says they are done, taking a break, or heading out.",
             _params({"note": ("string", "Optional note about what got done")}, []),
             _stop_work,
+            chat_only=True,
         ),
         ToolSpec(
             "log_work",
@@ -110,6 +112,7 @@ def _worklog_tools() -> list[ToolSpec]:
                 ["project", "minutes"],
             ),
             _log_work,
+            chat_only=True,
         ),
         ToolSpec(
             "work_summary",
@@ -124,5 +127,6 @@ def _worklog_tools() -> list[ToolSpec]:
             "for correcting a mistaken log or an accidental timer.",
             _params({"id": ("string", "Exact entry id")}, ["id"]),
             _remove_work_entry,
+            chat_only=True,
         ),
     ]

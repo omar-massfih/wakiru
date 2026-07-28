@@ -103,6 +103,7 @@ def _lists_tools() -> list[ToolSpec]:
                 ["list", "items"],
             ),
             _add_to_list,
+            chat_only=True,
         ),
         ToolSpec(
             "show_list",
@@ -128,6 +129,7 @@ def _lists_tools() -> list[ToolSpec]:
                 ["item"],
             ),
             _check_off_item,
+            chat_only=True,
         ),
         ToolSpec(
             "remove_from_list",
@@ -140,5 +142,6 @@ def _lists_tools() -> list[ToolSpec]:
                 ["item"],
             ),
             _remove_from_list,
+            chat_only=True,
         ),
     ]

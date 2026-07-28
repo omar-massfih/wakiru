@@ -41,5 +41,6 @@ def _weather_tools() -> list[ToolSpec]:
                 ["location"],
             ),
             _get_weather,
+            chat_only=True,
         ),
     ]
