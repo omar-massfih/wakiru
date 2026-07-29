@@ -17,12 +17,13 @@ import sqlite3
 import uuid
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date
 from zoneinfo import ZoneInfo
 
 from ..config import Settings, postgres_backend
 from ..sqlite_util import connect, open_db
 from ..timeutil import stamp_now as _stamp_now
+from ..timeutil import today as _today
 
 # Text columns a caller may set on update.
 _TEXT_FIELDS = ("name", "destination", "start", "end", "timezone", "notes")
@@ -103,12 +104,6 @@ def _row_to_trip(row: sqlite3.Row) -> Trip:
         created=row["created"] or "",
         updated=row["updated"] or "",
     )
-
-
-def _today(settings: Settings) -> date:
-    from ..calendar.context import resolve_tz
-
-    return datetime.now(resolve_tz(settings)).date()
 
 
 def create_trip(

@@ -10,9 +10,20 @@ would close an import cycle.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 
 from .config import Settings
+
+
+def today(settings: Settings) -> date:
+    """Current date in the assistant's timezone.
+
+    The date half of :func:`stamp_now`; stores use it to default an
+    ``on``/``spent_on``/``worked_on`` field to "today" when the caller omits it.
+    """
+    from .calendar.context import now
+
+    return now(settings).date()
 
 
 def stamp_now(settings: Settings) -> str:

@@ -22,6 +22,7 @@ from datetime import date
 from ..config import Settings, postgres_backend
 from ..sqlite_util import connect, open_db
 from ..timeutil import stamp_now as _stamp_now
+from ..timeutil import today as _today
 
 
 @dataclass
@@ -57,12 +58,6 @@ def _coerce_value(value: object, default: float = 0.0) -> float:
         return float(str(value).strip().replace(",", "."))
     except (TypeError, ValueError):
         return default
-
-
-def _today(settings: Settings) -> date:
-    from ..calendar.context import now
-
-    return now(settings).date()
 
 
 def _open(settings: Settings) -> sqlite3.Connection:

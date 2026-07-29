@@ -28,6 +28,7 @@ from ..calendar.store import parse_dt
 from ..config import Settings, postgres_backend
 from ..sqlite_util import connect, open_db
 from ..timeutil import stamp_now as _stamp_now
+from ..timeutil import today as _today
 
 
 @dataclass
@@ -68,12 +69,6 @@ def coerce_minutes(value: object, default: int = 0) -> int:
     except (TypeError, ValueError):
         return default
     return minutes if minutes > 0 else default
-
-
-def _today(settings: Settings) -> date:
-    from ..calendar.context import now
-
-    return now(settings).date()
 
 
 def _open(settings: Settings) -> sqlite3.Connection:
