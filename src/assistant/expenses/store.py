@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from ..config import Settings, postgres_backend
+from ..money import parse_decimal as _coerce_amount
 from ..sqlite_util import connect, open_db
 from ..timeutil import parse_date
 from ..timeutil import stamp_now as _stamp_now
@@ -79,13 +80,6 @@ def parse_month(value: str) -> str:
     except ValueError:
         return ""
     return value
-
-
-def _coerce_amount(value: object, default: float = 0.0) -> float:
-    try:
-        return float(str(value).strip().replace(",", "."))
-    except (TypeError, ValueError):
-        return default
 
 
 def _open(settings: Settings) -> sqlite3.Connection:

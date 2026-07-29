@@ -19,6 +19,7 @@ from contextlib import AbstractContextManager
 from dataclasses import dataclass
 
 from ..config import Settings, postgres_backend
+from ..money import parse_decimal as _coerce_value
 from ..sqlite_util import connect, open_db
 from ..timeutil import parse_date
 from ..timeutil import stamp_now as _stamp_now
@@ -41,13 +42,6 @@ class HabitEntry:
     note: str = ""
     logged_on: str = ""
     created: str = ""
-
-
-def _coerce_value(value: object, default: float = 0.0) -> float:
-    try:
-        return float(str(value).strip().replace(",", "."))
-    except (TypeError, ValueError):
-        return default
 
 
 def _open(settings: Settings) -> sqlite3.Connection:

@@ -22,6 +22,7 @@ from datetime import date
 from dateutil.relativedelta import relativedelta
 
 from ..config import Settings, postgres_backend
+from ..money import parse_decimal
 from ..sqlite_util import connect, open_db
 from ..timeutil import parse_date
 from ..timeutil import stamp_now as _stamp_now
@@ -89,10 +90,7 @@ def monthly_amount(sub: Subscription) -> float | None:
 
 
 def _coerce_amount(value: object, default: float = 0.0) -> float:
-    try:
-        return max(0.0, float(str(value).strip().replace(",", ".")))
-    except (TypeError, ValueError):
-        return default
+    return max(0.0, parse_decimal(value, default))
 
 
 def _normalize_cadence(value: str) -> str:
