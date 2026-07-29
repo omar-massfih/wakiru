@@ -23,6 +23,7 @@ from dateutil.relativedelta import relativedelta
 
 from ..config import Settings, postgres_backend
 from ..sqlite_util import connect, open_db
+from ..timeutil import parse_date
 from ..timeutil import stamp_now as _stamp_now
 
 # Text columns a caller may set on update (amount is numeric, handled separately).
@@ -57,17 +58,6 @@ class Subscription:
     notes: str = ""
     created: str = ""
     updated: str = ""
-
-
-def parse_date(value: str) -> date | None:
-    """A ``date`` from an ISO date/datetime string (date part), or ``None``."""
-    value = (value or "").strip()
-    if not value:
-        return None
-    try:
-        return date.fromisoformat(value[:10])
-    except ValueError:
-        return None
 
 
 def next_renewal(sub: Subscription, today: date) -> date | None:

@@ -22,11 +22,11 @@ import sqlite3
 import uuid
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
-from datetime import date
 
 from ..calendar.store import parse_dt
 from ..config import Settings, postgres_backend
 from ..sqlite_util import connect, open_db
+from ..timeutil import parse_date
 from ..timeutil import stamp_now as _stamp_now
 from ..timeutil import today as _today
 
@@ -50,16 +50,6 @@ class WorkEntry:
     started: str = ""
     ended: str = ""
     created: str = ""
-
-
-def parse_date(value: str) -> date | None:
-    value = (value or "").strip()
-    if not value:
-        return None
-    try:
-        return date.fromisoformat(value[:10])
-    except ValueError:
-        return None
 
 
 def coerce_minutes(value: object, default: int = 0) -> int:

@@ -15,6 +15,21 @@ from datetime import date, datetime
 from .config import Settings
 
 
+def parse_date(value: str) -> date | None:
+    """A ``date`` from an ISO date/datetime string (date part), or ``None``.
+
+    Blank or unparseable input yields ``None`` so callers can fall back to a
+    default; the ``[:10]`` slice takes the date half of a full datetime string.
+    """
+    value = (value or "").strip()
+    if not value:
+        return None
+    try:
+        return date.fromisoformat(value[:10])
+    except ValueError:
+        return None
+
+
 def today(settings: Settings) -> date:
     """Current date in the assistant's timezone.
 

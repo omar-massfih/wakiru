@@ -20,10 +20,11 @@ import sqlite3
 import uuid
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import datetime
 
 from ..config import Settings, postgres_backend
 from ..sqlite_util import connect, open_db
+from ..timeutil import parse_date
 from ..timeutil import stamp_now as _stamp_now
 from ..timeutil import today as _today
 
@@ -68,16 +69,6 @@ def normalize_budget_category(value: str) -> str:
     """Lower-cased category name; overall-budget aliases collapse to ""."""
     value = (value or "").strip().lower()
     return "" if value in _OVERALL_ALIASES else value
-
-
-def parse_date(value: str) -> date | None:
-    value = (value or "").strip()
-    if not value:
-        return None
-    try:
-        return date.fromisoformat(value[:10])
-    except ValueError:
-        return None
 
 
 def parse_month(value: str) -> str:
