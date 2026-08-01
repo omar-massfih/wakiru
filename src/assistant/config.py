@@ -158,6 +158,14 @@ class Settings(BaseSettings):
     # --- Retrieval ranking (blended re-rank on top of cosine) ---
     # Candidate pool size = recall_top_k * this, re-ranked then trimmed to top_k.
     recall_candidate_multiplier: int = 3
+    # Episodic traces vastly outnumber durable notes (a rolling log capped at 200
+    # vs a handful of facts). A plain top-k KNN can come back all-episodic, so
+    # durable facts — the point of long-term memory — never even enter the pool.
+    # Pull this many nearest DURABLE candidates alongside the general pool, and
+    # guarantee at least ``recall_durable_reserve`` durable notes in the injected
+    # top-k (when that many relevant durable notes exist). 0 disables both.
+    recall_durable_pool: int = 50
+    recall_durable_reserve: int = 2
     recall_w_similarity: float = 1.0
     recall_w_recency: float = 0.15
     recall_w_reuse: float = 0.15
@@ -200,6 +208,18 @@ class Settings(BaseSettings):
     sleep_time: str = "03:30"
     # Max episodic traces fed to the consolidation LLM in one pass.
     consolidate_max_episodes: int = 40
+    # Circuit breaker on the LLM consolidation "forget" op. The nightly pass asks
+    # the model to merge duplicates and forget the losers; a single over-eager
+    # response can otherwise wipe core memory (identity, preferences, standing
+    # reminders). If the model asks to forget more than this in one pass, we treat
+    # it as a runaway and apply NO forgets that pass (saves/updates still apply).
+    # A legitimate dedup merge only drops a handful.
+    consolidate_max_forgets_per_pass: int = 5
+    # Consolidation never forgets a durable note this salient, nor any note tagged
+    # "profile" (identity/preferences put to work every turn). Guards load-bearing
+    # facts (the user's name at 0.9, address at 0.8, …) against a bad LLM call.
+    # Deliberate user-driven forgets and deterministic cap-eviction still apply.
+    consolidate_forget_protect_salience: float = 0.6
     # Episodic salience at creation, and the pruning floor / age horizon.
     episodic_initial_salience: float = 0.25
     salience_prune_floor: float = 0.05

@@ -8,6 +8,7 @@ is patched at ``embeddings._embed`` — the single seam every embed wrapper
 
 from __future__ import annotations
 
+import json
 import math
 import re
 import zlib
@@ -668,3 +669,75 @@ def test_extract_prompt_flags_communication_preferences_as_profile() -> None:
     # the dormant tone-personalization path gets fed (marker, not full prose).
     assert "communication preferences as first-class profile facts" in learn._EXTRACT_PROMPT
     assert '"tags": ["profile"]' in learn._EXTRACT_PROMPT
+
+
+# --- consolidation forget safety (a bad LLM pass must not wipe core memory) --- #
+
+
+def test_consolidation_protects_high_salience_and_profile_notes(tmp_path, monkeypatch) -> None:
+    # Regression: a single "sleep" pass once forgot ~60 durable notes, including
+    # the user's name. High-salience and profile-tagged notes are now shielded.
+    settings = Settings(memory_dir=str(tmp_path / "memory"), enable_auto_memory=True)
+    learn.save_memory(settings, body="The user's name is Omar.", description="user name",
+                      kind="semantic", salience=0.9)
+    learn.save_memory(settings, body="Prefers terse answers.", description="tone",
+                      kind="semantic", salience=0.3, tags=["profile"])
+    learn.save_memory(settings, body="Ordered pizza once last month.", description="one off pizza",
+                      kind="semantic", salience=0.3)
+    learn.record_episode(settings, "we chatted about the weather today", "Sunny!")
+
+    ops = [{"op": "forget", "name": n} for n in ("user-name", "tone", "one-off-pizza")]
+    monkeypatch.setattr("assistant.memory.consolidate.complete_text", lambda *a, **k: json.dumps(ops))
+
+    consolidate.consolidate_memory(settings)
+    names = {n.name for n in store.list_notes(settings)}
+    assert "user-name" in names          # salience >= floor -> protected
+    assert "tone" in names               # profile-tagged -> protected
+    assert "one-off-pizza" not in names  # unprotected low-salience -> forgotten
+
+
+def test_consolidation_forget_circuit_breaker_skips_all(tmp_path, monkeypatch) -> None:
+    # A forget list longer than the cap reads as a runaway: apply none of them,
+    # but let saves/updates through.
+    settings = Settings(memory_dir=str(tmp_path / "memory"), enable_auto_memory=True,
+                        consolidate_max_forgets_per_pass=2)
+    for body, desc in [
+        ("The user owns a red bicycle.", "bicycle"),
+        ("The user visited Rome in spring.", "rome trip"),
+        ("The user plays the cello.", "cello"),
+    ]:
+        learn.save_memory(settings, body=body, description=desc, kind="semantic", salience=0.3)
+    learn.record_episode(settings, "we talked about travel plans today", "Nice!")
+
+    ops = [{"op": "forget", "name": n} for n in ("bicycle", "rome-trip", "cello")]
+    ops.append({"op": "save", "kind": "semantic", "description": "new fact", "body": "The user likes tea."})
+    monkeypatch.setattr("assistant.memory.consolidate.complete_text", lambda *a, **k: json.dumps(ops))
+
+    consolidate.consolidate_memory(settings)
+    names = {n.name for n in store.list_notes(settings)}
+    assert {"bicycle", "rome-trip", "cello"} <= names  # 3 forgets > cap 2 -> none applied
+    assert "new-fact" in names                         # saves still apply
+
+
+# --- recall: durable facts survive an episodic flood ---------------------- #
+
+
+def test_reserve_durable_guarantees_a_durable_slot(settings) -> None:
+    def note(name: str, kind: str) -> Note:
+        return Note(name=name, description=name, body=name, kind=kind)
+
+    # Five episodics all out-score the one durable fact; reservation still keeps it.
+    scored = [(note(f"ep{i}", "episodic"), 0.9 - i * 0.05) for i in range(5)]
+    scored.append((note("standing-fact", "semantic"), 0.2))
+    out = recall._reserve_durable(settings, scored, k=5)
+    assert len(out) == 5
+    assert "standing-fact" in {n.name for n, _ in out}
+
+
+def test_search_surfaces_durable_amid_episodic_flood(settings) -> None:
+    learn.save_memory(settings, body="The user wants a daily exercise reminder.",
+                      description="daily exercise reminder", kind="semantic", salience=0.5)
+    for i in range(8):
+        learn.record_episode(settings, f"exercise session {i} felt good and the daily reminder helped", "Great!")
+    results = recall.search_memory(settings, "daily exercise reminder")
+    assert "daily-exercise-reminder" in {note.name for note, _ in results}

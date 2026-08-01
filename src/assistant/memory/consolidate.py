@@ -151,6 +151,16 @@ Do:
 - Do NOT restate trivia or one-off chit-chat. Be conservative; quality over
   quantity. Do not touch episodic traces (they are managed automatically).
 
+Forgetting is DESTRUCTIVE and hard to undo — hold it to a very high bar:
+- Only "forget" a note that is a NEAR-EXACT DUPLICATE of another you are keeping,
+  or is DIRECTLY CONTRADICTED by a correction. When two notes overlap, UPDATE the
+  survivor and forget only the redundant copy.
+- NEVER forget a distinct standing fact just because it wasn't mentioned in the
+  recent episodes — absence from recent chat is not evidence it is obsolete.
+- NEVER forget the user's identity, name, language, location, relationships,
+  standing preferences, or recurring reminders/schedules.
+- If unsure, keep it. Expect to forget nothing or at most a couple of notes.
+
 Return a JSON array of operations, each one of:
   {{"op": "save", "kind": "semantic|procedural", "description": "<short>", "body": "<one clear sentence>", "salience": <0..1>}}
   {{"op": "update", "name": "<existing name>", "description": "<short>", "body": "<corrected sentence>"}}
@@ -188,8 +198,25 @@ def _llm_consolidate(settings: Settings) -> list[str]:
         logger.exception("consolidation (LLM) failed")
         return []
 
+    ops = learn._parse_ops(raw)
+
+    # Circuit breaker: the "forget the losers" instruction lets one over-eager
+    # response wipe core memory (a real incident: 60 durable notes, including the
+    # user's name and standing reminders, deleted in a single pass). A genuine
+    # dedup merge only drops a handful, so an unusually long forget list is a
+    # runaway — apply none of it, but still let saves/updates through.
+    forget_ops = [op for op in ops if op.get("op") == "forget"]
+    forgets_allowed = len(forget_ops) <= settings.consolidate_max_forgets_per_pass
+    if not forgets_allowed:
+        logger.warning(
+            "consolidation asked to forget %d notes (cap %d); skipping all forgets "
+            "this pass as a likely runaway",
+            len(forget_ops),
+            settings.consolidate_max_forgets_per_pass,
+        )
+
     applied: list[str] = []
-    for op in learn._parse_ops(raw):
+    for op in ops:
         try:
             if op["op"] == "save" and op.get("body"):
                 note = learn.save_memory(
@@ -212,9 +239,16 @@ def _llm_consolidate(settings: Settings) -> list[str]:
                 if revised is not None:
                     applied.append(f"merged: {revised.description}")
             elif op["op"] == "forget":
+                if not forgets_allowed:
+                    continue
                 # Exact-name only (matching the prompt's op schema): a
                 # hallucinated name must not fuzzy-delete an unrelated note.
                 name, fuzzy = op.get("name"), op.get("query")
+                if name and _forget_protected(settings, str(name)):
+                    logger.warning(
+                        "consolidation refused to forget protected note %r", name
+                    )
+                    continue
                 deleted = None
                 if name:
                     deleted = learn.forget_memory(settings, str(name), allow_fuzzy=False)
@@ -225,6 +259,27 @@ def _llm_consolidate(settings: Settings) -> list[str]:
         except Exception:
             logger.exception("failed to apply consolidation op: %s", op)
     return applied
+
+
+# Profile-tagged notes (identity/preferences the assistant puts to work every
+# turn) are off-limits to automated forgetting; see :mod:`.profile`.
+_PROFILE_TAG = "profile"
+
+
+def _forget_protected(settings: Settings, name: str) -> bool:
+    """Whether consolidation must not forget the durable note called ``name``.
+
+    Shields load-bearing facts from a bad LLM call: anything tagged ``profile``
+    or above the salience floor (the user's name, address, standing reminders).
+    A missing note isn't protected — let the normal exact-name forget no-op.
+    Deliberate user forgets and deterministic cap-eviction bypass this.
+    """
+    note = store.find_note(settings, name)
+    if note is None:
+        return False
+    if _PROFILE_TAG in note.tags:
+        return True
+    return note.salience >= settings.consolidate_forget_protect_salience
 
 
 def consolidate_memory(

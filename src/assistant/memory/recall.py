@@ -109,8 +109,17 @@ def search_memory(
     # holds nothing to match — the vector search could only return []. Graph
     # augmentation below still runs; it resolves entities by name, not vectors.
     if not index.is_empty(settings):
+        query_vector = embed_query(query, settings)
         pool = max(k * settings.recall_candidate_multiplier, k)
-        hits = index.search_ranked(settings, embed_query(query, settings), pool)
+        hits = index.search_ranked(settings, query_vector, pool)
+        # Episodic traces (a rolling log ~200 deep) can fill the whole pool with
+        # near-duplicates of the query, crowding the handful of durable facts out
+        # before re-ranking. Pull a wider pool and fold in the durable candidates
+        # it surfaces, so a relevant fact is scored even when episodics dominate.
+        if settings.recall_durable_pool > pool:
+            seen = {h[0] for h in hits}
+            wide = index.search_ranked(settings, query_vector, settings.recall_durable_pool)
+            hits.extend(h for h in wide if h[3] != "episodic" and h[0] not in seen)
         for name, path, _desc, kind, salience, recall_count, last_recalled, sim in hits:
             if sim < settings.recall_min_similarity:
                 continue
@@ -124,7 +133,39 @@ def search_memory(
 
     _augment_with_graph(settings, query, scored)
     scored.sort(key=lambda pair: pair[1], reverse=True)
-    return scored[:k]
+    return _reserve_durable(settings, scored, k)
+
+
+def _reserve_durable(
+    settings: Settings, scored: list[tuple[Note, float]], k: int
+) -> list[tuple[Note, float]]:
+    """Trim ``scored`` (already sorted best-first) to ``k``, guaranteeing at least
+    ``recall_durable_reserve`` durable notes when that many are available.
+
+    Even after widening the pool, episodic traces can out-*score* durable facts
+    and fill every top-k slot. Reserving a couple of slots for durable memory
+    keeps standing facts (name, preferences, reminders) reachable each turn
+    without displacing genuinely top-ranked results wholesale.
+    """
+    if len(scored) <= k:
+        return scored
+    top = scored[:k]
+    reserve = min(settings.recall_durable_reserve, k)
+    have = sum(1 for note, _ in top if note.kind != "episodic")
+    if have >= reserve:
+        return top
+    spare_durable = [pair for pair in scored[k:] if pair[0].kind != "episodic"]
+    for pair in spare_durable[: reserve - have]:
+        # Drop the lowest-ranked episodic to make room; stop if none remain.
+        drop = next(
+            (i for i in range(len(top) - 1, -1, -1) if top[i][0].kind == "episodic"),
+            None,
+        )
+        if drop is None:
+            break
+        top[drop] = pair
+    top.sort(key=lambda pair: pair[1], reverse=True)
+    return top
 
 
 def _augment_with_graph(
