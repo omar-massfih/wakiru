@@ -626,3 +626,38 @@ def test_summarize_fold_never_orphans_a_tool_message(tmp_path) -> None:
     # The boundary slides past the ToolMessage so the kept tail can't open on one.
     assert "4" in removed
     assert removed == {"0", "1", "2", "3", "4"}
+
+
+def test_complete_text_retries_transient_backend_failures(monkeypatch) -> None:
+    # Background LLM calls (memory writes, consolidation) must survive a transient
+    # backend blip rather than silently dropping the work.
+    from langchain_core.messages import AIMessage
+
+    from assistant import llm as llm_module
+
+    calls = {"n": 0}
+
+    class Flaky:
+        def invoke(self, messages):
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise RuntimeError("500 Internal Server Error")
+            return AIMessage(content="ok")
+
+    monkeypatch.setattr(llm_module, "build_model", lambda s=None: Flaky())
+    s = Settings(background_llm_retries=2, background_llm_retry_base_delay=0.0)
+    assert llm_module.complete_text("hi", s) == "ok"
+    assert calls["n"] == 3
+
+
+def test_complete_text_raises_after_exhausting_retries(monkeypatch) -> None:
+    from assistant import llm as llm_module
+
+    class Broken:
+        def invoke(self, messages):
+            raise RuntimeError("always down")
+
+    monkeypatch.setattr(llm_module, "build_model", lambda s=None: Broken())
+    s = Settings(background_llm_retries=1, background_llm_retry_base_delay=0.0)
+    with pytest.raises(RuntimeError, match="always down"):
+        llm_module.complete_text("hi", s)

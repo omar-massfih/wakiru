@@ -123,6 +123,38 @@ def surface_due(settings: Settings | None = None, current: datetime | None = Non
     )
 
 
+def advance_recurring_notify_reminders(
+    settings: Settings | None = None, current: datetime | None = None
+) -> int:
+    """Roll a past-due ``notify_only`` recurring task forward to its next
+    occurrence, so a clock-driven reminder never freezes.
+
+    A recurring *task* only rolls forward when it's marked done (it's a chore you
+    complete). A recurring ``notify_only`` reminder has no completion — miss a day
+    and its ``due`` sits in the past forever, going silent (the frozen daily
+    reminders this fixes). Call after :func:`surface_due` in the same beat: the
+    current occurrence's bands are already claimed, so advancing to the next
+    occurrence (``store.next_due`` skips any missed ones) just re-arms it for next
+    time without dropping the reminder that just fired. Returns how many advanced.
+    """
+    settings = settings or get_settings()
+    if not (settings.enable_reminders and settings.enable_tasks):
+        return 0
+    current = current or now(settings)
+    advanced = 0
+    for task in store.list_tasks(settings):  # open tasks only
+        if not (task.notify_only and task.rrule):
+            continue
+        due = parse_dt(task.due)
+        if due is None or due > current:
+            continue
+        upcoming = store.next_due(settings, task)
+        if upcoming and upcoming != task.due:
+            store.update_task(settings, task.id, due=upcoming)
+            advanced += 1
+    return advanced
+
+
 def next_due_at(settings: Settings, current: datetime, until: datetime) -> list[datetime]:
     """When open tasks' next reminder bands open, within ``(current, until]``.
 

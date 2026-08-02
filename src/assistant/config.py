@@ -40,6 +40,14 @@ class Settings(BaseSettings):
     llm_timeout: int = 120
     # Reply-length cap (tokens) for the API-backed providers.
     llm_max_tokens: int = 4096
+    # Background one-shot LLM calls (memory extraction/consolidation, summaries,
+    # briefing composition) run best-effort and swallow errors — so a transient
+    # backend blip (e.g. the Azure Foundry 500s seen in prod) silently drops a
+    # turn's memory write. Retry those calls a few times with exponential backoff
+    # before giving up. Retries: extra attempts after the first (0 disables).
+    # Only `complete_text` retries — the interactive chat path is unaffected.
+    background_llm_retries: int = 2
+    background_llm_retry_base_delay: float = 1.0
     # Reasoning effort ("low"/"medium"/"high") for reasoning-capable openai
     # models. None => provider default. Ignored by non-reasoning models.
     llm_reasoning_effort: str | None = None

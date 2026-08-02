@@ -534,3 +534,29 @@ def test_undo_arbiter_reverts_most_recent_across_ledgers(settings) -> None:
     assert undo_latest(settings, THREAD, 15) == "Undone: removed: buy milk"
     assert [t.title for t in store.list_tasks(settings)] == []
     assert [e.title for e in cal_store.list_events(settings)] == ["Dentist"]
+
+
+def test_advance_rolls_notify_only_recurring_but_not_a_chore(settings) -> None:
+    # A notify_only daily reminder gone past-due re-arms to its next occurrence
+    # (it is never "completed"); a plain recurring chore stays frozen until done.
+    from assistant.calendar.store import parse_dt
+
+    reminder = store.create_task(
+        settings, "measure blood sugar", due=_iso_in(settings, days=-2),
+        rrule="FREQ=DAILY", notify_only=True,
+    )
+    chore = store.create_task(
+        settings, "water plants", due=_iso_in(settings, days=-2),
+        rrule="FREQ=DAILY", notify_only=False,
+    )
+    future = store.create_task(
+        settings, "take vitamins", due=_iso_in(settings, days=1),
+        rrule="FREQ=DAILY", notify_only=True,
+    )
+
+    advanced = reminders.advance_recurring_notify_reminders(settings)
+    assert advanced == 1
+    after = {t.id: t for t in store.list_tasks(settings)}
+    assert parse_dt(after[reminder.id].due) > context.now(settings)  # re-armed
+    assert after[chore.id].due == chore.due    # chore stays frozen for completion
+    assert after[future.id].due == future.due  # not yet due — untouched

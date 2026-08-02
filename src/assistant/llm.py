@@ -20,6 +20,7 @@ import asyncio
 import json
 import logging
 import re
+import time
 from collections.abc import Callable, Iterator, Sequence
 from typing import Any
 
@@ -442,8 +443,21 @@ def complete_text(
     messages: list[BaseMessage] = [HumanMessage(content=prompt)]
     if system:
         messages.insert(0, SystemMessage(content=system))
-    reply = build_model(settings).invoke(messages)
-    return reply_text(reply.content)
+    model = build_model(settings)
+    attempts = max(settings.background_llm_retries, 0) + 1
+    for i in range(attempts):
+        try:
+            return reply_text(model.invoke(messages).content)
+        except Exception as exc:
+            if i + 1 >= attempts:
+                raise
+            delay = settings.background_llm_retry_base_delay * (2**i)
+            logger.warning(
+                "background LLM call failed (attempt %d/%d): %s; retrying in %.1fs",
+                i + 1, attempts, exc, delay,
+            )
+            time.sleep(delay)
+    raise AssertionError("unreachable")  # loop either returns or raises
 
 
 def cacheable_system_message(text: str, settings: Settings) -> SystemMessage:

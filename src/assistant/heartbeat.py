@@ -433,6 +433,17 @@ def gather_situation(
     # like the watches, so one failing store never blocks the wake.
     reminder_lines = _due_reminder_lines(settings, current)
 
+    # Roll any past-due notify_only recurring reminder to its next occurrence,
+    # after its bands were just claimed above — so a clock-driven daily reminder
+    # re-arms instead of freezing when it isn't "completed" (it never is).
+    if settings.enable_reminders and settings.enable_tasks:
+        try:
+            from .tasks import reminders as task_reminders
+
+            task_reminders.advance_recurring_notify_reminders(settings, current)
+        except Exception:
+            logger.exception("advancing recurring notify reminders failed")
+
     # Ready goals are raised, never claimed: the model moves next_action_at
     # forward itself (update_goal). The raise-stamp KV keeps a goal the model
     # ignored from re-raising on every short self-paced wake — it comes back
