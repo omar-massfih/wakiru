@@ -146,15 +146,20 @@ cleaned up.
 Do:
 - PROMOTE recurring or important patterns from the episodes into durable
   "semantic" (facts/preferences/goals) or "procedural" (how-to) memories.
-- MERGE duplicates and RESOLVE contradictions among existing durable memories
-  (update the surviving one, forget the rest).
+- MERGE duplicate memories that state the SAME fact — even when worded
+  differently, written in another language, or saved under different names
+  (e.g. "The user's weight is over 155 kg" and a note named
+  `user-weight-is-over-155-kg` are the same fact). Keep the single clearest,
+  highest-salience copy, `update` it if it needs better wording, and `forget`
+  the redundant ones. RESOLVE contradictions the same way: update the survivor
+  to the corrected value, forget the stale copy.
 - Do NOT restate trivia or one-off chit-chat. Be conservative; quality over
   quantity. Do not touch episodic traces (they are managed automatically).
 
 Forgetting is DESTRUCTIVE and hard to undo — hold it to a very high bar:
-- Only "forget" a note that is a NEAR-EXACT DUPLICATE of another you are keeping,
-  or is DIRECTLY CONTRADICTED by a correction. When two notes overlap, UPDATE the
-  survivor and forget only the redundant copy.
+- Only "forget" a note that DUPLICATES another you are keeping (the same fact in
+  any wording, language, or name), or is DIRECTLY CONTRADICTED by a correction.
+  When two notes overlap, UPDATE the survivor and forget only the redundant copy.
 - NEVER forget a distinct standing fact just because it wasn't mentioned in the
   recent episodes — absence from recent chat is not evidence it is obsolete.
 - NEVER forget the user's identity, name, language, location, relationships,

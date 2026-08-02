@@ -741,3 +741,12 @@ def test_search_surfaces_durable_amid_episodic_flood(settings) -> None:
         learn.record_episode(settings, f"exercise session {i} felt good and the daily reminder helped", "Great!")
     results = recall.search_memory(settings, "daily exercise reminder")
     assert "daily-exercise-reminder" in {note.name for note, _ in results}
+
+
+def test_consolidate_prompt_instructs_cross_wording_merge() -> None:
+    # The nightly pass sees every durable note, so it is the net that must catch
+    # same-fact duplicates the per-turn extractor creates under different
+    # wording/language/names (e.g. omar-s-weight vs user-weight-is-over-155-kg).
+    p = consolidate._CONSOLIDATE_PROMPT.lower()
+    assert "same fact" in p
+    assert "another language" in p and "different names" in p
