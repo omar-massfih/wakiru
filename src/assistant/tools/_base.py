@@ -29,6 +29,10 @@ class ToolContext:
     settings: Settings
     thread_id: str = ""
     batch_id: str = ""
+    # Rolling summary of older, folded-away turns for this thread. Threaded in so
+    # the `recall_conversation` tool can return it without touching the
+    # checkpointer; empty when nothing has been summarized yet.
+    summary: str = ""
 @dataclass(frozen=True)
 class ToolSpec:
     """One tool: an OpenAI-format schema plus its implementation.

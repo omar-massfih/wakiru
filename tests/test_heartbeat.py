@@ -688,3 +688,36 @@ def test_triage_instruction_rides_only_when_opted_in(settings, monkeypatch) -> N
     joined = "\n".join(str(m.content) for m in model.prompts[0])
     assert "Inbox triage" in joined and "at most 3" in joined
     assert "drafts only" in joined  # the no-send rule is restated to the model
+
+
+# --- summary as a heartbeat tool (not passively injected) ------------------- #
+
+
+def _bound_tool_names(model) -> set[str]:
+    return {s["function"]["name"] for s in model.bound_schemas}
+
+
+def test_heartbeat_offers_summary_as_tool_instead_of_injecting_it(settings, monkeypatch) -> None:
+    # A stale conversation summary must not sit in the prompt where it can
+    # override fresh facts (the morning-briefing-reports-yesterday's-stats bug).
+    monkeypatch.setattr(heartbeat, "_latest_summary", lambda s, a: "Spirit and Will at 5/6 E, one to go.")
+    monkeypatch.setattr("assistant.memory.profile.in_quiet_hours", lambda s, c: False)
+    monkeypatch.setattr("assistant.notify.deliver_reminder", lambda *a, **k: True)
+    model = _wire_model(monkeypatch, [AIMessage(content="God morgen!")])
+    heartbeat.run_heartbeat(settings)
+    joined = "\n".join(str(m.content) for m in model.prompts[0])
+    assert "5/6 E" not in joined                       # stale summary not injected
+    assert "recall_conversation" in joined             # pointer to the tool instead
+    assert "recall_conversation" in _bound_tool_names(model)  # and the tool is offered
+
+
+def test_heartbeat_injects_full_summary_when_flag_off(settings, monkeypatch) -> None:
+    off = settings.model_copy(update={"heartbeat_summary_as_tool": False})
+    monkeypatch.setattr(heartbeat, "_latest_summary", lambda s, a: "Spirit and Will at 5/6 E, one to go.")
+    monkeypatch.setattr("assistant.memory.profile.in_quiet_hours", lambda s, c: False)
+    monkeypatch.setattr("assistant.notify.deliver_reminder", lambda *a, **k: True)
+    model = _wire_model(monkeypatch, [AIMessage(content="God morgen!")])
+    heartbeat.run_heartbeat(off)
+    joined = "\n".join(str(m.content) for m in model.prompts[0])
+    assert "Latest conversation so far:" in joined and "5/6 E" in joined  # legacy inject
+    assert "recall_conversation" not in _bound_tool_names(model)

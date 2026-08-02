@@ -247,6 +247,16 @@ class Settings(BaseSettings):
     working_memory_max_messages: int = 40
     # How many of the most recent messages to keep verbatim after summarizing.
     working_memory_keep_recent: int = 12
+    # Proactive path only: how the latest thread's rolling summary reaches the
+    # heartbeat model. True: it is NOT auto-injected; a one-line pointer tells the
+    # model the summary exists and to fetch it via `recall_conversation` only if
+    # it needs older context. This stops a stale summary narrative from silently
+    # overriding fresh facts in a proactive message (e.g. a morning briefing
+    # reporting yesterday's stat state because the evening summary still described
+    # it). Interactive chat is unaffected — it always injects the summary, where
+    # passive continuity matters and the user is present to correct drift. False
+    # restores the legacy always-inject behavior in the heartbeat too.
+    heartbeat_summary_as_tool: bool = True
 
     # --- Time & calendar ---
     # IANA timezone name (e.g. "Europe/Oslo") the assistant reasons in. None =>

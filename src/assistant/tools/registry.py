@@ -14,7 +14,7 @@ from .followups import _followup_tools
 from .goals import _goal_tools
 from .habits import _habit_tools
 from .lists import _lists_tools
-from .memory import _memory_tools
+from .memory import _conversation_tools, _memory_tools
 from .people import _people_tools
 from .reading import _reading_tools
 from .reminders import _reminder_tools
@@ -124,6 +124,11 @@ def available_tools(settings: Settings, mode: str = "chat") -> list[ToolSpec]:
         # whole-document summarize stay chat-only too: a background wake should
         # not grow docs.db or spend a map-reduce of LLM calls unprompted.
         tools += _wake_tools()
+        # The latest-thread summary is offered on demand rather than injected, so
+        # a stale conversation narrative can't override fresh facts in a proactive
+        # message. Heartbeat-only: chat keeps the summary passively injected.
+        if settings.heartbeat_summary_as_tool:
+            tools += _conversation_tools()
         # Drop every chat-only tool: send_email/send_reply and undo, the docs
         # and web ingest/read tools, on-demand weather, and all the per-feature
         # writes (people/reading/lists/trips/subscriptions/habits/expenses/

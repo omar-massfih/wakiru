@@ -793,7 +793,17 @@ def _compose(settings: Settings, situation: Situation, agent) -> str:
             prefix.append(SystemMessage(content=block))
     summary = _latest_summary(settings, agent)
     if summary:
-        prefix.append(SystemMessage(content="Latest conversation so far:\n" + summary))
+        if settings.heartbeat_summary_as_tool:
+            # Don't let a possibly-stale conversation narrative sit in the prompt
+            # and override fresh facts (the morning-briefing-reports-yesterday's-
+            # stats bug). Point at it instead; the model fetches it on demand.
+            from .tools.memory import CONVERSATION_POINTER
+
+            prefix.append(SystemMessage(content=CONVERSATION_POINTER))
+        else:
+            prefix.append(
+                SystemMessage(content="Latest conversation so far:\n" + summary)
+            )
     prefix.append(SystemMessage(content=_INSTRUCTION))
     # The freshest lessons the nightly reflection distilled about how this
     # assistant's own proactivity lands — a guaranteed slot, not left to recall.
@@ -818,7 +828,9 @@ def _compose(settings: Settings, situation: Situation, agent) -> str:
             )
         )
 
-    ctx = ToolContext(settings=settings, thread_id="", batch_id=uuid.uuid4().hex)
+    ctx = ToolContext(
+        settings=settings, thread_id="", batch_id=uuid.uuid4().hex, summary=summary
+    )
     messages: list[BaseMessage] = [HumanMessage(content=situation.report())]
     for _round in range(max(settings.tool_max_rounds, 1)):
         reply = bound.invoke(prefix + messages)
