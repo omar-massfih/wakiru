@@ -121,7 +121,12 @@ def search_memory(
             wide = index.search_ranked(settings, query_vector, settings.recall_durable_pool)
             hits.extend(h for h in wide if h[3] != "episodic" and h[0] not in seen)
         for name, path, _desc, kind, salience, recall_count, last_recalled, sim in hits:
-            if sim < settings.recall_min_similarity:
+            floor = (
+                settings.recall_min_similarity
+                if kind == "episodic"
+                else settings.recall_min_similarity_durable
+            )
+            if sim < floor:
                 continue
             note = _load(settings, name, path)
             if note is None:

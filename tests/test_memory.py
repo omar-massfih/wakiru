@@ -664,11 +664,15 @@ def test_concurrent_same_slug_saves_do_not_clobber(settings) -> None:
     assert {n.body for n in notes} == set(bodies)
 
 
-def test_extract_prompt_flags_communication_preferences_as_profile() -> None:
-    # The extractor is told to profile-tag tone/communication preferences, so
-    # the dormant tone-personalization path gets fed (marker, not full prose).
-    assert "communication preferences as first-class profile facts" in learn._EXTRACT_PROMPT
-    assert '"tags": ["profile"]' in learn._EXTRACT_PROMPT
+def test_extract_prompt_flags_identity_and_preferences_as_profile() -> None:
+    # The extractor profile-tags core standing context so it is injected every
+    # turn (not left to similarity recall): identity + how they live + comms.
+    p = learn._EXTRACT_PROMPT
+    assert '"tags": ["profile"]' in p
+    assert "IDENTITY" in p and "COMMUNICATION" in p
+    # Identity now explicitly includes name/language so cross-lingual facts stop
+    # depending on recall clearing the similarity floor.
+    assert "the user's name" in p.lower() and "language" in p.lower()
 
 
 # --- consolidation forget safety (a bad LLM pass must not wipe core memory) --- #
@@ -750,3 +754,53 @@ def test_consolidate_prompt_instructs_cross_wording_merge() -> None:
     p = consolidate._CONSOLIDATE_PROMPT.lower()
     assert "same fact" in p
     assert "another language" in p and "different names" in p
+
+
+# --- reindex OOM-safety (batch + defer the destructive drop) -------------- #
+
+
+def test_embed_in_batches_chunks_and_preserves_order(settings, monkeypatch) -> None:
+    settings.reindex_embed_batch_size = 2
+    calls: list[list[str]] = []
+
+    def spy(texts, s=None):
+        calls.append(list(texts))
+        return [[float(len(t))] for t in texts]
+
+    monkeypatch.setattr("assistant.memory.embeddings.embed_passages", spy)
+    out = index._embed_in_batches(settings, ["a", "bb", "ccc", "dddd", "eeeee"])
+    assert [len(c) for c in calls] == [2, 2, 1]              # chunked by batch size
+    assert out == [[1.0], [2.0], [3.0], [4.0], [5.0]]        # order preserved
+
+
+def test_reindex_keeps_old_index_when_reembed_fails(settings, monkeypatch) -> None:
+    # A model-change re-embed that OOMs must NOT leave the index dropped-empty:
+    # the destructive reset is deferred until the new vectors are in hand.
+    learn.save_memory(settings, body="The user lives in Oslo.", kind="semantic")
+    assert recall.search_memory(settings, "where does the user live")
+
+    settings.embedding_model = "some-other-model"  # force model_changed
+
+    def boom(s, texts):
+        raise RuntimeError("OOM during re-embed")
+
+    monkeypatch.setattr(index, "_embed_in_batches", boom)
+    with pytest.raises(RuntimeError, match="OOM"):
+        index.reindex(settings)
+
+    assert not index.is_empty(settings)                       # old table intact
+    assert recall.search_memory(settings, "where does the user live")
+
+
+# --- durable notes get a lower recall floor (cross-lingual reach) ---------- #
+
+
+def test_durable_notes_use_a_lower_similarity_floor(settings) -> None:
+    settings.recall_min_similarity = 0.95          # episodic must nearly match
+    settings.recall_min_similarity_durable = 0.05  # a durable fact surfaces weak
+    learn.save_memory(settings, body="The user studied marine biology in Bergen.", kind="semantic")
+    learn.record_episode(settings, "the user studied marine biology in Bergen once", "Noted.")
+    results = recall.search_memory(settings, "marine biology")
+    kinds = {note.kind for note, _ in results}
+    assert "semantic" in kinds       # durable clears the low floor on a weak match
+    assert "episodic" not in kinds   # episodic held to the high floor

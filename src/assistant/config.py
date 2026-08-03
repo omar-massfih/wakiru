@@ -111,6 +111,11 @@ class Settings(BaseSettings):
     # is multilingual (strong Norwegian recall), 1024-dim. It is an *asymmetric*
     # e5 model — embeddings.py adds the required query:/passage: prefixes.
     embedding_model: str = "intfloat/multilingual-e5-large"
+    # Re-embed the vector index in batches of this many notes. A model-change
+    # migration re-embeds every note; doing it in one call loads the ~2GB model
+    # AND all note texts at once, the OOM that can crash-loop startup. Batching
+    # bounds the per-call spike. Vectors are identical either way.
+    reindex_embed_batch_size: int = 32
     # How many notes to recall and inject per turn.
     recall_top_k: int = 5
     # Recall query expansion: how many recent turns (besides the latest message)
@@ -120,6 +125,12 @@ class Settings(BaseSettings):
     recall_context_extra_chars: int = 600
     # Cosine-similarity floor for a candidate note to be considered at all.
     recall_min_similarity: float = 0.35
+    # A lower floor for DURABLE notes (semantic/procedural). Durable facts are few
+    # and worth surfacing even on a weaker match — notably cross-lingual ones (an
+    # English fact vs a Norwegian question sits lower on e5 cosine than the 0.35
+    # episodic floor allows). The durable-slot reservation bounds how many low
+    # scorers actually reach the prompt. Episodic traces keep the higher floor.
+    recall_min_similarity_durable: float = 0.2
     # Master switch for long-term memory upkeep. When True, an LLM extraction
     # runs after each turn (in the background) to save/update/forget notes.
     enable_auto_memory: bool = True

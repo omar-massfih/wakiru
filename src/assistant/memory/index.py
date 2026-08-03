@@ -298,6 +298,24 @@ def get_stats(settings: Settings, name: str) -> tuple[int, str] | None:
 
 
 @locked
+def _embed_in_batches(settings: Settings, texts: list[str]) -> list[list[float]]:
+    """Embed ``texts`` in ``reindex_embed_batch_size`` chunks, preserving order.
+
+    Same vectors as a single ``embed_passages`` call, but the model never has to
+    hold every note's activations at once — the peak-memory guard that keeps a
+    full-store re-embed from OOM-ing a small container.
+    """
+    from .embeddings import embed_passages
+
+    if not texts:
+        return []
+    batch = max(settings.reindex_embed_batch_size, 1)
+    out: list[list[float]] = []
+    for start in range(0, len(texts), batch):
+        out.extend(embed_passages(texts[start : start + batch], settings))
+    return out
+
+
 def reindex(settings: Settings) -> int:
     """Rebuild the vector index from the markdown files (the source of truth).
 
@@ -317,7 +335,6 @@ def reindex(settings: Settings) -> int:
     if storage_postgres := postgres_backend(settings):
         return storage_postgres.reindex_memory(settings)
     from . import store
-    from .embeddings import embed_passages
 
     notes = store.list_notes(settings)
 
@@ -334,11 +351,9 @@ def reindex(settings: Settings) -> int:
             None,
             embedding_signature(settings),
         )
-        if model_changed and _vec_dim(conn) is not None:
-            conn.execute(f"DROP TABLE IF EXISTS {VEC_TABLE}")
-            conn.execute("DELETE FROM notes")
-            conn.execute("DELETE FROM meta WHERE key IN ('dim', 'embedding_model')")
-            conn.commit()
+        # The destructive reset for a model change is DEFERRED until the new
+        # vectors are in hand (below), so an embed failure (e.g. an OOM on a big
+        # migration) leaves the existing index intact instead of dropped-empty.
     finally:
         conn.close()
 
@@ -382,17 +397,33 @@ def reindex(settings: Settings) -> int:
     finally:
         conn.close()
 
-    # Re-embed only what changed, carrying counters forward.
-    vectors = (
-        embed_passages([n.index_text for n, _h, _rc, _lr in pending], settings)
-        if pending
-        else []
+    # Re-embed only what changed (all notes on a model change), carrying counters
+    # forward. Batched so a full-store migration never loads the model AND every
+    # note's text at once — and done BEFORE the destructive reset below, so a
+    # failure here can't leave the index empty.
+    vectors = _embed_in_batches(
+        settings, [n.index_text for n, _h, _rc, _lr in pending]
     )
     if len(vectors) != len(pending):
         # zip would silently drop the tail — those notes would never be indexed.
         raise RuntimeError(
             f"embedder returned {len(vectors)} vectors for {len(pending)} notes"
         )
+
+    # Now that the vectors exist, apply the model-change reset: drop the old vec
+    # table (its dimension may differ) and clear the rows so the fresh vectors
+    # land in a clean table. Skipped when the model is unchanged.
+    if model_changed:
+        conn = _connect(settings)
+        try:
+            if _vec_dim(conn) is not None:
+                conn.execute(f"DROP TABLE IF EXISTS {VEC_TABLE}")
+            conn.execute("DELETE FROM notes")
+            conn.execute("DELETE FROM meta WHERE key IN ('dim', 'embedding_model')")
+            conn.commit()
+        finally:
+            conn.close()
+
     for (note, text_hash, rc, lr), vector in zip(pending, vectors, strict=True):
         upsert(
             settings,

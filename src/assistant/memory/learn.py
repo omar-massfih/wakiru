@@ -337,13 +337,17 @@ Choose a kind for each saved/updated memory:
 - "semantic"   — durable facts, preferences, goals about the user or world.
 - "procedural" — how-to knowledge, methods, the way the user likes things done.
 
-Additionally, when a memory describes how the user LIVES or WORKS — working
-hours, home/work locations, quiet hours ("don't ping me after 22:00"), commute,
-or preferred tone/format of replies — add "tags": ["profile"] to the operation.
-Treat communication preferences as first-class profile facts: preferred
-language, formality, humor tolerance, brevity ("keep answers short"), how they
-like to be greeted, and when not to be disturbed. These profile memories
-personalize scheduling, reminders, and tone every turn.
+Additionally, add "tags": ["profile"] when a memory is core standing context
+about the user — the kind that should inform EVERY turn, not just be recalled on
+a matching question:
+- IDENTITY: the user's name, where they live, their language, and the people
+  closest to them (spouse, children, parents, siblings).
+- how they LIVE or WORK: working hours, home/work locations, quiet hours
+  ("don't ping me after 22:00"), commute.
+- COMMUNICATION preferences: preferred language, formality, humor tolerance,
+  brevity ("keep answers short"), how they like to be greeted.
+These profile memories personalize scheduling, reminders, and tone every turn,
+and are injected directly rather than left to similarity recall.
 
 On a "save" or "update", also extract the entity RELATIONSHIPS the memory states
 as (subject, relation, object) triples, when any are present. These build a graph
