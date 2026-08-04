@@ -14,7 +14,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from assistant.calendar import context, ops, recurrence, store, undo
+from assistant.calendar import context, invitations, ops, recurrence, store, undo
 from assistant.config import Settings
 from assistant.ops_parse import parse_ops
 from assistant.people import store as people_store
@@ -226,6 +226,214 @@ def test_render_events_can_expose_ids(settings) -> None:
     with_ids = context.render_events(settings, upcoming, with_ids=True)
     without = context.render_events(settings, upcoming, with_ids=False)
     assert event.id in with_ids and event.id not in without
+
+
+def _invitation_event(
+    settings: Settings,
+    *,
+    event_id: str = "remote-invite",
+    attendees: list[dict] | None = None,
+    organizer: dict | None = None,
+    rrule: str = "",
+) -> store.Event:
+    event = store.Event(
+        id=event_id,
+        title="Planning review",
+        start=_iso_in(settings, days=1),
+        rrule=rrule,
+        organizer=store.dump_organizer(
+            organizer or {"email": "owner@example.com", "name": "Owner"}
+        ),
+        attendees=store.dump_attendees(attendees or [
+            {
+                "email": "me@example.com", "name": "Me", "status": "needsaction",
+                "role": "required", "rsvp": True, "self": True,
+            },
+            {"email": "guest@example.com", "status": "accepted"},
+        ]),
+        caldav_href="/calendar/invite.ics",
+        caldav_etag='"one"',
+    )
+    return store.restore_event(settings, event)
+
+
+def test_invitation_identity_is_conservative(settings) -> None:
+    marked = _invitation_event(settings)
+    result = invitations.classify(settings, marked)
+    assert result.is_invitation and result.pending
+    assert result.attendee and result.attendee["email"] == "me@example.com"
+
+    by_caldav = settings.model_copy(update={"caldav_username": "MAILTO:ME@EXAMPLE.COM"})
+    unmarked = _invitation_event(
+        by_caldav, event_id="by-address",
+        attendees=[{"email": "me@example.com", "status": "NEEDS-ACTION", "rsvp": True}],
+    )
+    assert invitations.classify(by_caldav, unmarked).pending
+
+    for field in ("email_address", "google_calendar_id"):
+        fallback = settings.model_copy(update={field: "fallback@example.com"})
+        event = _invitation_event(
+            fallback, event_id=f"fallback-{field}",
+            attendees=[{"email": "fallback@example.com", "rsvp": True}],
+        )
+        assert invitations.classify(fallback, event).pending
+
+    precedence = settings.model_copy(update={"email_address": "alias@example.com"})
+    provider_marked = _invitation_event(
+        precedence, event_id="provider-precedence",
+        attendees=[
+            {"email": "alias@example.com", "status": "accepted"},
+            {"email": "actual@example.com", "status": "needsaction", "self": True},
+        ],
+    )
+    selected = invitations.classify(precedence, provider_marked)
+    assert selected.attendee and selected.attendee["email"] == "actual@example.com"
+    assert selected.pending
+
+    aliases = settings.model_copy(update={
+        "caldav_username": "one@example.com", "email_address": "two@example.com",
+    })
+    ambiguous = _invitation_event(
+        aliases, event_id="ambiguous",
+        attendees=[
+            {"email": "one@example.com", "status": "needsaction"},
+            {"email": "two@example.com", "status": "needsaction"},
+        ],
+    )
+    assert invitations.classify(aliases, ambiguous).reason == "ambiguous self attendee"
+
+    duplicate_self = _invitation_event(
+        settings, event_id="duplicate-self",
+        attendees=[
+            {"email": "one@example.com", "self": True},
+            {"email": "two@example.com", "self": True},
+        ],
+    )
+    assert invitations.classify(settings, duplicate_self).reason == "ambiguous self attendee"
+
+    organized = _invitation_event(
+        settings, event_id="organized",
+        organizer={"email": "me@example.com"},
+    )
+    assert invitations.classify(settings, organized).reason == "not an invitation"
+
+
+def test_pending_invitation_agenda_is_actionable_and_deduplicated(settings) -> None:
+    writable = settings.model_copy(update={
+        "enable_caldav": True, "enable_caldav_write": True,
+        "caldav_url": "https://dav.example.com/calendar/",
+    })
+    start = _past_monday(writable, weeks_ago=1)
+    event = _invitation_event(writable, rrule="FREQ=DAILY")
+    store.update_event(writable, event.id, start=start.isoformat())
+    block = context.agenda_context(writable)
+    assert "## Pending invitations" in block
+    assert "Planning review" in block and event.id in block
+    assert "Owner <owner@example.com>" in block
+    assert "accept, tentatively accept, or decline" in block
+    assert block.count(f"[id: {event.id}]") == 1
+
+    readonly = writable.model_copy(update={"enable_caldav_write": False})
+    assert "read-only/non-actionable" in context.agenda_context(readonly)
+
+
+def test_respond_updates_only_self_is_idempotent_and_undoes(settings, monkeypatch) -> None:
+    writable = settings.model_copy(update={
+        "enable_caldav": True, "enable_caldav_write": True,
+        "enable_write_confirmation": True,
+        "caldav_url": "https://dav.example.com/calendar/",
+    })
+    event = _invitation_event(writable)
+    pushed: list[str] = []
+    monkeypatch.setattr(
+        ops, "_push_caldav",
+        lambda _settings, revised, _op, _before: pushed.append(revised.attendees) or True,
+    )
+    before = store.load_attendees(event)
+    summary = ops.apply_op(
+        writable, {"op": "respond", "id": event.id, "response": "tentative"},
+        "thread", "batch",
+    )
+    assert summary == "tentative invitation: Planning review"
+    after = store.load_attendees(store.get_event(writable, event.id))
+    assert next(item for item in after if item.get("email") == "guest@example.com") == next(
+        item for item in before if item.get("email") == "guest@example.com"
+    )
+    me = next(item for item in after if item.get("self"))
+    assert me == {**next(item for item in before if item.get("self")), "status": "tentative"}
+    assert len(pushed) == 1
+
+    assert ops.apply_op(
+        writable, {"op": "respond", "id": event.id, "response": "tentative"},
+        "thread", "noop",
+    ) == "already tentative: Planning review"
+    assert len(pushed) == 1
+
+    assert undo.undo_latest(writable, "thread", 60).startswith("Undone:")
+    assert next(
+        item for item in store.load_attendees(store.get_event(writable, event.id))
+        if item.get("self")
+    )["status"] == "needsaction"
+
+
+def test_respond_refusals_do_not_mutate_or_record_undo(settings) -> None:
+    local = _invitation_event(settings)
+    local = store.update_event(settings, local.id, attendees=local.attendees)
+    # Remove remote metadata via a full restore because content updates deliberately
+    # cannot alter provider bookkeeping fields.
+    local.caldav_href = ""
+    store.restore_event(settings, local)
+    before = store.get_event(settings, local.id)
+    for response in ("maybe", "accepted"):
+        result = ops.apply_op(
+            settings, {"op": "respond", "id": local.id, "response": response},
+            "thread", response,
+        )
+        assert result
+    assert store.get_event(settings, local.id) == before
+    assert undo.undo_latest(settings, "thread", 60) == "Nothing to undo."
+
+
+def test_ambiguous_and_read_only_invitation_responses_never_write(settings, monkeypatch) -> None:
+    writable = settings.model_copy(update={
+        "enable_caldav": True, "enable_caldav_write": True,
+        "caldav_url": "https://dav.example.com/calendar/",
+        "email_address": "me@example.com",
+    })
+    first = _invitation_event(writable, event_id="same-one")
+    second = _invitation_event(writable, event_id="same-two")
+    pushed: list[str] = []
+    monkeypatch.setattr(
+        ops, "_push_caldav", lambda *args: pushed.append("push") or True
+    )
+    result = ops.apply_op(
+        writable, {"op": "respond", "id": "Planning", "response": "accepted"},
+        "thread", "ambiguous-title",
+    )
+    assert result and "Ambiguous" in result
+
+    ambiguous_self = _invitation_event(
+        writable, event_id="ambiguous-person",
+        attendees=[
+            {"email": "one@example.com", "self": True, "status": "needsaction"},
+            {"email": "two@example.com", "self": True, "status": "needsaction"},
+        ],
+    )
+    assert "identity is ambiguous" in ops.apply_op(
+        writable,
+        {"op": "respond", "id": ambiguous_self.id, "response": "declined"},
+        "thread", "ambiguous-self",
+    )
+
+    ics = _invitation_event(writable, event_id="ics-readonly")
+    assert "read-only" in ops.apply_op(
+        writable, {"op": "respond", "id": ics.id, "response": "accepted"},
+        "thread", "ics",
+    )
+    assert pushed == []
+    assert store.get_event(writable, first.id).attendees == first.attendees
+    assert store.get_event(writable, second.id).attendees == second.attendees
+    assert undo.undo_latest(writable, "thread", 60) == "Nothing to undo."
 
 
 # --- ops (write path) ----------------------------------------------------- #

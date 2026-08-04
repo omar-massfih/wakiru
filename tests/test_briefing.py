@@ -8,11 +8,13 @@ real against a tmp SQLite file.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from assistant import briefing
+from assistant.calendar import context as calendar_context
+from assistant.calendar import store as calendar_store
 from assistant.config import Settings
 
 
@@ -165,6 +167,23 @@ def test_compose_failure_falls_back_to_the_verbatim_digest(settings, delivered, 
     _freeze_clock(monkeypatch, settings, "08:00")
     assert briefing.run_briefing(settings)["sent"]
     assert "Upcoming events" in delivered[0]["message"]
+
+
+def test_briefing_includes_pending_invitation_verbatim(settings) -> None:
+    invite = calendar_store.Event(
+        id="briefing-invite", title="Planning review",
+        start=(calendar_context.now(settings) + timedelta(days=1)).isoformat(),
+        organizer=calendar_store.dump_organizer({"email": "owner@example.com"}),
+        attendees=calendar_store.dump_attendees([
+            {"email": "me@example.com", "status": "needsaction", "self": True},
+        ]),
+        caldav_href="/invite.ics",
+    )
+    calendar_store.restore_event(settings, invite)
+    digest = briefing.build_briefing(settings)
+    assert "## Pending invitations" in digest
+    assert "briefing-invite" in digest
+    assert "read-only/non-actionable" in digest
 
 
 def test_heartbeat_enabled_delegates_composition(settings, delivered, monkeypatch) -> None:

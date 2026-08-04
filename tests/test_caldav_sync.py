@@ -155,6 +155,67 @@ def test_participants_survive_pull_reschedule_and_ical_round_trip(settings, serv
     assert "ATTENDEE;CN=Kari" in server.of_method("PUT")[0]["body"]
 
 
+def _caldav_invitation() -> str:
+    participants = (
+        "ORGANIZER;CN=Owner:mailto:owner@example.com\n"
+        "ATTENDEE;CN=Me;PARTSTAT=NEEDS-ACTION;ROLE=REQ-PARTICIPANT;RSVP=TRUE:"
+        "mailto:me@example.com\n"
+        "ATTENDEE;CN=Guest;PARTSTAT=ACCEPTED:mailto:guest@example.com\n"
+    )
+    return _vcal(_vevent(
+        "invite-uid", "Planning review", "20261201T090000Z", extra=participants
+    ))
+
+
+@pytest.mark.parametrize("response", ["accepted", "tentative", "declined"])
+def test_caldav_invitation_response_round_trip(settings, server, response) -> None:
+    server.report_body = _multistatus(("/cal/invite.ics", '"e-i"', _caldav_invitation()))
+    sync.pull_caldav(settings)
+    event = store.find_event(settings, "Planning review")
+    server.calls.clear()
+
+    assert ops.apply_op(
+        settings, {"op": "respond", "id": event.id, "response": response}
+    ) == f"{response} invitation: Planning review"
+    body = server.of_method("PUT")[-1]["body"]
+    assert f"PARTSTAT={response.upper()}" in body
+    assert "ATTENDEE;CN=Guest;PARTSTAT=ACCEPTED" in body
+    reparsed = next(iter(sync.parse_vevents(body, settings).values()))
+    me = next(
+        item for item in store.load_attendees(reparsed)
+        if item["email"] == "me@example.com"
+    )
+    assert me == {
+        "email": "me@example.com", "name": "Me", "status": response,
+        "role": "required", "rsvp": True,
+    }
+
+
+def test_caldav_invitation_retry_and_undo(settings, server) -> None:
+    server.report_body = _multistatus(("/cal/invite.ics", '"e-i"', _caldav_invitation()))
+    sync.pull_caldav(settings)
+    event = store.find_event(settings, "Planning review")
+    server.calls.clear()
+
+    ops.apply_op(
+        settings, {"op": "respond", "id": event.id, "response": "accepted"},
+        "thread", "accepted-batch",
+    )
+    undo.undo_latest(settings, "thread", 60)
+    assert "PARTSTAT=NEEDS-ACTION" in server.of_method("PUT")[-1]["body"]
+
+    server.put_status = 500
+    summary = ops.apply_op(
+        settings, {"op": "respond", "id": event.id, "response": "declined"}
+    )
+    assert summary and "will retry" in summary
+    assert len(outbox.pending(settings)) == 1
+    server.put_status = 204
+    server.calls.clear()
+    assert sync.reconcile_caldav(settings)["reconciled"] == 1
+    assert "PARTSTAT=DECLINED" in server.of_method("PUT")[-1]["body"]
+
+
 def test_repull_is_idempotent_by_etag(settings, server) -> None:
     server.report_body = _multistatus(
         ("/cal/a.ics", '"e-a"', _vcal(_vevent("uid-a", "Dentist", "20261201T090000Z"))),

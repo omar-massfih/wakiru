@@ -289,6 +289,7 @@ def test_heartbeat_drops_exactly_the_chat_only_tools() -> None:
         "log_habit", "remove_habit_entry",
         "log_expense", "remove_expense", "set_budget", "remove_budget",
         "start_work", "stop_work", "log_work", "remove_work_entry",
+        "respond_to_invitation",
     }
     assert must_be_chat_only <= chat_only
 
@@ -419,6 +420,46 @@ def test_calendar_tools_expose_and_dispatch_attendees(settings) -> None:
     # The shared dispatcher must retain [], since it means replace with nobody.
     execute_tool(tools["reschedule_event"], _ctx(settings), {"id": event.id, "attendees": []})
     assert calendar_store.load_attendees(calendar_store.get_event(settings, event.id)) == []
+
+
+def test_invitation_response_tool_schema_dispatch_and_heartbeat_gate(settings, monkeypatch) -> None:
+    writable = settings.model_copy(update={
+        "enable_caldav": True, "enable_caldav_write": True,
+        "caldav_username": "me@example.com",
+        "caldav_url": "https://dav.example.com/calendar/",
+    })
+    chat = {spec.name: spec for spec in available_tools(writable)}
+    assert "respond_to_invitation" in chat
+    assert chat["respond_to_invitation"].parameters["properties"]["response"]["enum"] == [
+        "accepted", "tentative", "declined",
+    ]
+    assert "respond_to_invitation" not in {
+        spec.name for spec in available_tools(writable, mode="heartbeat")
+    }
+
+    event = calendar_store.Event(
+        id="tool-invite", title="Planning review", start=_iso_in(writable, days=1),
+        organizer=calendar_store.dump_organizer({"email": "owner@example.com"}),
+        attendees=calendar_store.dump_attendees([
+            {"email": "me@example.com", "status": "needsaction", "rsvp": True},
+            {"email": "guest@example.com", "status": "accepted"},
+        ]),
+        caldav_href="/invite.ics",
+    )
+    calendar_store.restore_event(writable, event)
+    monkeypatch.setattr("assistant.calendar.ops._push_caldav", lambda *args: True)
+    result = execute_tool(
+        chat["respond_to_invitation"], _ctx(writable),
+        {"id": event.id, "response": "declined"},
+    )
+    assert result == "declined invitation: Planning review"
+    me = next(
+        item for item in calendar_store.load_attendees(
+            calendar_store.get_event(writable, event.id)
+        ) if item["email"] == "me@example.com"
+    )
+    assert me["status"] == "declined"
+    assert undo_latest(writable, THREAD, writable.write_undo_window_minutes).startswith("Undone:")
 
 
 def test_task_roundtrip_and_ambiguous_target(settings) -> None:
