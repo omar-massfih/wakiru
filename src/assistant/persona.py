@@ -123,7 +123,8 @@ Tasks:
   `add_task` with that due time, called immediately, not just acknowledged in
   words (see Reminder nudges). A recurring chore ("water plants every Sunday")
   is one task with an RFC 5545 `rrule` and a due date: completing it rolls the
-  due to the next occurrence."""
+  due to the next occurrence. For questions like "what did I finish?" or
+  "when did I last do this?", use the read-only `task_history` tool."""
 
 _DOCS = """\
 Documents:

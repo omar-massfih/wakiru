@@ -71,6 +71,32 @@ def test_default_registry_has_no_email_tools() -> None:
     assert not any(name.endswith("email") for name in names)
 
 
+def test_task_history_is_enabled_and_available_to_heartbeat() -> None:
+    enabled = Settings(enable_tasks=True)
+    disabled = Settings(enable_tasks=False)
+    assert "task_history" in {spec.name for spec in available_tools(enabled)}
+    assert "task_history" in {
+        spec.name for spec in available_tools(enabled, mode="heartbeat")
+    }
+    assert "task_history" not in {spec.name for spec in available_tools(disabled)}
+    spec = tool_map(enabled)["task_history"]
+    assert set(spec.parameters["properties"]) == {"days", "query", "limit"}
+    assert spec.parameters["required"] == []
+
+
+def test_task_history_reads_without_mutating(settings) -> None:
+    task = tasks_store.create_task(settings, "Ship report")
+    tasks_store.complete_task(settings, task.id, completion_id="tool-history")
+    before = tasks_store.list_task_completions(settings, include_undone=True)
+
+    result = execute_tool(
+        tool_map(settings)["task_history"], _ctx(settings),
+        {"days": 7, "query": "ship", "limit": 1},
+    )
+    assert "Ship report" in result and task.id in result
+    assert tasks_store.list_task_completions(settings, include_undone=True) == before
+
+
 def test_email_tools_appear_without_send_unless_gated() -> None:
     names = {s.name for s in available_tools(Settings(enable_email=True))}
     assert {"list_email", "read_email", "draft_email"} <= names

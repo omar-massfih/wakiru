@@ -41,11 +41,18 @@ def record_write(
     op: str,
     summary: str,
     before: store.Task | None,
+    completion_id: str | None = None,
 ) -> None:
     """Log one applied task mutation so it can later be undone. No-op without a thread."""
+    before_json = None
+    if before:
+        payload: dict = asdict(before)
+        if completion_id:
+            payload = {"task": payload, "completion_id": completion_id}
+        before_json = json.dumps(payload)
     write_ledger.record_write(
         _SPEC, settings, thread_id, batch_id, task_id, op, summary,
-        json.dumps(asdict(before)) if before else None,
+        before_json,
     )
 
 
@@ -77,8 +84,18 @@ def _revert_row(settings: Settings, row: dict) -> str | None:
             return f"removed: {deleted.title}" if deleted else None
         if not row["before_json"]:
             return None
-        before = store.Task(**json.loads(row["before_json"]))
-        restored = store.restore_task(settings, before)
+        payload = json.loads(row["before_json"])
+        completion_id = None
+        if isinstance(payload, dict) and "task" in payload:
+            completion_id = payload.get("completion_id")
+            payload = payload["task"]
+        before = store.Task(**payload)
+        if row["op"] == "complete" and completion_id:
+            restored = store.restore_task_and_undo_completion(
+                settings, before, str(completion_id)
+            )
+        else:
+            restored = store.restore_task(settings, before)
         return f"restored: {restored.title}"
     except Exception:
         logger.exception("failed to revert task write_log row %s", row["id"])

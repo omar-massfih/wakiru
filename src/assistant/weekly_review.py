@@ -74,7 +74,7 @@ def _tasks_sections(settings: Settings, current) -> list[str]:
 
     week_ago = current - timedelta(days=7)
     week_ahead = current + timedelta(days=7)
-    everything = tasks_store.list_tasks(settings, include_done=True)
+    everything = tasks_store.list_tasks(settings)
     due = [
         t
         for t in everything
@@ -83,14 +83,9 @@ def _tasks_sections(settings: Settings, current) -> list[str]:
         and (when := parse_dt(t.due)) is not None
         and when <= week_ahead
     ]
-    finished = [
-        t
-        for t in everything
-        if t.done
-        and t.done_at
-        and (when := parse_dt(t.done_at)) is not None
-        and when >= week_ago
-    ]
+    finished = tasks_store.list_task_completions(
+        settings, since=week_ago, until=current
+    )
     parts = []
     if due:
         parts.append("## Tasks due this week\n" + render_tasks(settings, due))

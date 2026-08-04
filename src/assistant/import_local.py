@@ -79,7 +79,15 @@ def import_calendar(local: Settings, pg: Settings) -> int:
 
 
 def import_tasks(local: Settings, pg: Settings) -> int:
-    tasks = task_store.list_tasks(local)
+    tasks = task_store.list_tasks(local, include_done=True)
+    # Seed history before terminal task rows.  Postgres schema initialization
+    # backfills legacy completions for terminal tasks that have no history; if
+    # tasks are restored first, that backfill races ahead of the real imported
+    # occurrence and leaves both rows active.
+    for completion in task_store.list_task_completions(
+        local, include_undone=True
+    ):
+        storage_postgres.restore_task_completion(pg, completion)
     for task in tasks:
         storage_postgres.restore_task(pg, task)
     return len(tasks)

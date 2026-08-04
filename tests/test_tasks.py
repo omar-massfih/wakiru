@@ -78,6 +78,20 @@ def test_complete_is_idempotent(settings) -> None:
     first = store.complete_task(settings, t.id)
     second = store.complete_task(settings, t.id)
     assert first.done_at == second.done_at  # not re-stamped
+    assert len(store.list_task_completions(settings)) == 1
+
+
+def test_completion_history_is_a_durable_snapshot(settings) -> None:
+    due = _iso_in(settings, days=-1)
+    task = store.create_task(settings, "Original title", due=due)
+    store.complete_task(settings, task.id, completion_id="request-1")
+    store.update_task(settings, task.id, title="Renamed")
+    store.delete_task(settings, task.id)
+
+    history = store.list_task_completions(settings)
+    assert [(item.id, item.title, item.due) for item in history] == [
+        ("request-1", "Original title", due)
+    ]
 
 
 def test_open_tasks_sort_dated_before_undated(settings) -> None:
@@ -214,6 +228,21 @@ def test_complete_recurring_rolls_due_forward(settings) -> None:
     due = store.parse_dt(rolled.due)
     assert due is not None and due > context.now(settings)  # next occurrence
     assert rolled.rrule == "FREQ=DAILY"  # rule survives the roll
+    occurrence = store.list_task_completions(settings)[0]
+    assert occurrence.task_id == t.id and occurrence.due == t.due
+    assert occurrence.rrule == "FREQ=DAILY"
+
+
+def test_recurring_completion_request_id_is_idempotent(settings) -> None:
+    task = store.create_task(
+        settings, "water plants", due=_iso_in(settings, days=-2), rrule="FREQ=DAILY"
+    )
+    first = store.complete_task(settings, task.id, completion_id="same-request")
+    second = store.complete_task(settings, task.id, completion_id="same-request")
+    assert second.due == first.due
+    assert [item.id for item in store.list_task_completions(settings)] == [
+        "same-request"
+    ]
 
 
 def test_complete_recurring_keeps_wall_clock_time(settings) -> None:
@@ -323,6 +352,56 @@ def test_undo_restores_rolled_due(settings) -> None:
     result = undo_latest(settings, THREAD, 15)
     assert result.startswith("Undone: restored:")
     assert store.get_task(settings, t.id).due == stored_due  # back on the old due
+    assert store.list_task_completions(settings) == []
+    assert len(store.list_task_completions(settings, include_undone=True)) == 1
+
+
+def test_undo_latest_recurring_occurrence_when_completion_timestamps_tie(
+    settings, monkeypatch
+) -> None:
+    fixed = "2026-07-01T12:00:00+00:00"
+    monkeypatch.setattr(store, "_stamp_now", lambda _settings: fixed)
+    task = store.create_task(
+        settings, "water plants", due="2026-06-30T09:00:00+00:00",
+        rrule="FREQ=DAILY",
+    )
+    before_first = store.get_task(settings, task.id)
+    store.complete_task(settings, task.id, completion_id="first")
+    before_second = store.get_task(settings, task.id)
+    store.complete_task(settings, task.id, completion_id="second")
+
+    history = store.list_task_completions(settings)
+    assert {item.completed_at for item in history} == {fixed}
+    assert {item.occurrence_seq for item in history} == {1, 2}
+
+    store.restore_task_and_undo_completion(settings, before_second, "second")
+    assert store.get_task(settings, task.id).due == before_second.due
+    assert [item.id for item in store.list_task_completions(settings)] == ["first"]
+    assert before_first.due != before_second.due
+
+
+def test_out_of_order_recurring_undos_restore_last_active_due(settings) -> None:
+    task = store.create_task(
+        settings, "water plants", due=_iso_in(settings, days=-3),
+        rrule="FREQ=DAILY",
+    )
+    before_a = store.get_task(settings, task.id)
+    store.complete_task(settings, task.id, completion_id="a")
+    before_b = store.get_task(settings, task.id)
+    store.complete_task(settings, task.id, completion_id="b")
+    before_c = store.get_task(settings, task.id)
+    due_before_b = before_b.due
+    due_before_c = before_c.due
+    store.complete_task(settings, task.id, completion_id="c")
+
+    store.restore_task_and_undo_completion(settings, before_b, "b")
+    store.restore_task_and_undo_completion(settings, before_c, "c")
+
+    restored = store.get_task(settings, task.id)
+    assert restored.due == due_before_b
+    assert restored.due != due_before_c
+    assert [item.id for item in store.list_task_completions(settings)] == ["a"]
+    assert before_a.due != before_b.due
 
 
 def test_context_shows_recurrence(settings) -> None:
@@ -352,6 +431,39 @@ def test_store_migrates_pre_rrule_db(settings, tmp_path) -> None:
     assert tasks[0].rrule == ""
 
 
+def test_history_orders_offsets_by_instant(settings) -> None:
+    # Lexically these offsets sort incorrectly; the +02 occurrence is earlier.
+    store.restore_task_completion(settings, store.TaskCompletion(
+        id="early", task_id="t", title="early",
+        completed_at="2026-10-25T02:30:00+02:00",
+    ))
+    store.restore_task_completion(settings, store.TaskCompletion(
+        id="late", task_id="t", title="late",
+        completed_at="2026-10-25T02:15:00+01:00",
+    ))
+    assert [item.id for item in store.list_task_completions(settings)] == [
+        "late", "early"
+    ]
+
+
+def test_completion_insert_rolls_back_when_task_update_fails(settings) -> None:
+    import sqlite3 as sqlite3_mod
+
+    task = store.create_task(settings, "cannot finish")
+    conn = sqlite3_mod.connect(settings.tasks_db_path)
+    conn.execute(
+        "CREATE TRIGGER reject_task_completion BEFORE UPDATE ON tasks "
+        "BEGIN SELECT RAISE(ABORT, 'no update'); END"
+    )
+    conn.commit()
+    conn.close()
+
+    with pytest.raises(sqlite3_mod.IntegrityError):
+        store.complete_task(settings, task.id, completion_id="will-rollback")
+    assert store.list_task_completions(settings) == []
+    assert store.get_task(settings, task.id).done is False
+
+
 # --- undo (via the cross-ledger arbiter) ------------------------------------ #
 
 
@@ -369,6 +481,7 @@ def test_undo_restores_completed_task(settings) -> None:
     result = undo_latest(settings, THREAD, 15)
     assert result.startswith("Undone: restored:")
     assert [x.title for x in store.list_tasks(settings)] == ["buy milk"]  # open again
+    assert store.list_task_completions(settings) == []
 
 
 def test_undo_restores_removed_task(settings) -> None:

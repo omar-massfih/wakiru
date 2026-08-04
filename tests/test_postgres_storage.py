@@ -171,10 +171,244 @@ def test_postgres_connect_pools_and_schema_runs_once(monkeypatch: pytest.MonkeyP
     storage_postgres.ensure_people_schema(settings)
     storage_postgres.ensure_calendar_schema(settings)
     sql = "\n".join(executed)
+    assert "CREATE TABLE IF NOT EXISTS assistant_task_completions" in sql
+    assert "assistant_task_completions_completed_at_idx" in sql
+    assert "SELECT 'legacy:' || t.id" in sql
     assert "ADD COLUMN IF NOT EXISTS email TEXT NOT NULL DEFAULT ''" in sql
     assert "ADD COLUMN IF NOT EXISTS organizer TEXT NOT NULL DEFAULT ''" in sql
     assert "ADD COLUMN IF NOT EXISTS attendees TEXT NOT NULL DEFAULT ''" in sql
     assert "ADD COLUMN IF NOT EXISTS availability TEXT NOT NULL DEFAULT 'busy'" in sql
+
+
+def test_postgres_task_history_adapters_are_exported() -> None:
+    from assistant import storage_postgres
+
+    assert callable(storage_postgres.list_task_completions)
+    assert callable(storage_postgres.restore_task_completion)
+    assert callable(storage_postgres.restore_task_and_undo_completion)
+    assert callable(storage_postgres.complete_task_occurrence)
+
+
+def test_postgres_completion_locks_inserts_and_updates_in_one_transaction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+
+    from assistant.storage_postgres import tasks as pg_tasks
+    from assistant.tasks import store as task_store
+
+    settings = Settings()
+    sql_calls: list[str] = []
+    task_values = (
+        "t1", "Water plants", False, "2026-07-01T09:00:00+02:00", "",
+        "FREQ=DAILY", "created", "updated", "", "",
+    )
+
+    class Cursor:
+        rowcount = 1
+
+        def __init__(self, columns=(), rows=()):
+            self.description = [SimpleNamespace(name=name) for name in columns]
+            self._rows = list(rows)
+
+        def fetchall(self):
+            return self._rows
+
+    class FakeConn:
+        def execute(self, sql, params=()):
+            sql_calls.append(sql)
+            if "FROM assistant_tasks" in sql and "FOR UPDATE" in sql:
+                return Cursor(
+                    ("id", "title", "done", "due", "notes", "rrule", "created",
+                     "updated", "done_at", "notify_only"),
+                    (task_values,),
+                )
+            if "MAX(occurrence_seq)" in sql:
+                return Cursor(("occurrence_seq",), ((1,),))
+            return Cursor()
+
+    connects = 0
+
+    @contextmanager
+    def fake_connect(_settings):
+        nonlocal connects
+        connects += 1
+        yield FakeConn()
+
+    monkeypatch.setattr(pg_tasks, "ensure_tasks_schema", lambda _settings: None)
+    monkeypatch.setattr(pg_tasks, "connect", fake_connect)
+    monkeypatch.setattr(task_store, "next_due", lambda _settings, _task: "next-due")
+    monkeypatch.setattr(task_store, "_stamp_now", lambda _settings: "completed-at")
+
+    task, applied = pg_tasks.complete_task_occurrence(settings, "t1", "request-1")
+    assert applied is True and task.due == "next-due"
+    assert connects == 1
+    assert "FOR UPDATE" in sql_calls[0]
+    assert "INSERT INTO assistant_task_completions" in sql_calls[3]
+    assert "UPDATE assistant_tasks SET due" in sql_calls[4]
+
+
+def test_postgres_undo_uses_sequence_to_preserve_state_for_earlier_timestamp_tie(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from contextlib import contextmanager
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+
+    from assistant.storage_postgres import tasks as pg_tasks
+    from assistant.tasks import store as task_store
+
+    sql_calls: list[str] = []
+    completion_columns = (
+        "id", "task_id", "title", "due", "rrule", "completed_at", "undone_at",
+        "occurrence_seq",
+    )
+    completion_rows = (
+        ("first", "t1", "Water plants", "old-due", "FREQ=DAILY", "same-time", "", 1),
+        ("second", "t1", "Water plants", "next-due", "FREQ=DAILY", "same-time", "", 2),
+    )
+
+    class Cursor:
+        rowcount = 1
+
+        def __init__(self, columns=(), rows=()):
+            self.description = [SimpleNamespace(name=name) for name in columns]
+            self._rows = list(rows)
+
+        def fetchall(self):
+            return self._rows
+
+    class FakeConn:
+        def execute(self, sql, params=()):
+            sql_calls.append(sql)
+            if "FROM assistant_task_completions" in sql:
+                return Cursor(completion_columns, completion_rows)
+            return Cursor()
+
+    @contextmanager
+    def fake_connect(_settings):
+        yield FakeConn()
+
+    monkeypatch.setattr(pg_tasks, "ensure_tasks_schema", lambda _settings: None)
+    monkeypatch.setattr(pg_tasks, "connect", fake_connect)
+    monkeypatch.setattr(
+        task_store, "parse_dt",
+        lambda value: datetime(2026, 7, 1, tzinfo=UTC)
+        if value == "same-time" else None,
+    )
+    monkeypatch.setattr(task_store, "_stamp_now", lambda _settings: "undo-time")
+    before = task_store.Task(id="t1", title="Water plants", due="old-due")
+
+    pg_tasks.restore_task_and_undo_completion(Settings(), before, "first")
+
+    assert "FROM assistant_tasks" in sql_calls[0]
+    assert "FOR UPDATE" in sql_calls[0]
+    assert "FROM assistant_task_completions" in sql_calls[1]
+    assert "FOR UPDATE" in sql_calls[1]
+    assert not any("INSERT INTO assistant_tasks" in sql for sql in sql_calls)
+    assert "UPDATE assistant_task_completions" in sql_calls[2]
+
+
+def test_postgres_undo_restores_latest_occurrence_when_timestamps_tie(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+
+    from assistant.storage_postgres import tasks as pg_tasks
+    from assistant.tasks import store as task_store
+
+    sql_calls: list[str] = []
+    columns = (
+        "id", "task_id", "title", "due", "rrule", "completed_at", "undone_at",
+        "occurrence_seq",
+    )
+    rows = (
+        ("first", "t1", "Water plants", "old", "FREQ=DAILY", "same", "", 1),
+        ("second", "t1", "Water plants", "next", "FREQ=DAILY", "same", "", 2),
+    )
+
+    class Cursor:
+        rowcount = 1
+
+        def __init__(self, result=()):
+            self.description = [SimpleNamespace(name=name) for name in columns]
+            self._rows = list(result)
+
+        def fetchall(self):
+            return self._rows
+
+    class FakeConn:
+        def execute(self, sql, params=()):
+            sql_calls.append(sql)
+            return Cursor(rows if "FROM assistant_task_completions" in sql else ())
+
+    @contextmanager
+    def fake_connect(_settings):
+        yield FakeConn()
+
+    monkeypatch.setattr(pg_tasks, "ensure_tasks_schema", lambda _settings: None)
+    monkeypatch.setattr(pg_tasks, "connect", fake_connect)
+    monkeypatch.setattr(task_store, "_stamp_now", lambda _settings: "undo-time")
+    before_second = task_store.Task(id="t1", title="Water plants", due="next")
+
+    pg_tasks.restore_task_and_undo_completion(Settings(), before_second, "second")
+
+    assert any("INSERT INTO assistant_tasks" in sql for sql in sql_calls)
+    assert any("UPDATE assistant_task_completions" in sql for sql in sql_calls)
+
+
+def test_postgres_out_of_order_recurring_undos_rebase_due(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+
+    from assistant.storage_postgres import tasks as pg_tasks
+    from assistant.tasks import store as task_store
+
+    columns = (
+        "id", "task_id", "title", "due", "rrule", "completed_at", "undone_at",
+        "occurrence_seq",
+    )
+    rows = (
+        ("a", "t1", "Water plants", "due-a", "FREQ=DAILY", "one", "", 1),
+        ("b", "t1", "Water plants", "due-b", "FREQ=DAILY", "two", "undone", 2),
+        ("c", "t1", "Water plants", "due-c", "FREQ=DAILY", "three", "", 3),
+    )
+    calls: list[tuple[str, tuple]] = []
+
+    class Cursor:
+        rowcount = 1
+
+        def __init__(self, result=()):
+            self.description = [SimpleNamespace(name=name) for name in columns]
+            self._rows = list(result)
+
+        def fetchall(self):
+            return self._rows
+
+    class FakeConn:
+        def execute(self, sql, params=()):
+            calls.append((sql, params))
+            return Cursor(rows if "FROM assistant_task_completions" in sql else ())
+
+    @contextmanager
+    def fake_connect(_settings):
+        yield FakeConn()
+
+    monkeypatch.setattr(pg_tasks, "ensure_tasks_schema", lambda _settings: None)
+    monkeypatch.setattr(pg_tasks, "connect", fake_connect)
+    monkeypatch.setattr(task_store, "_stamp_now", lambda _settings: "undo-time")
+    before_c = task_store.Task(id="t1", title="Water plants", due="due-c")
+
+    pg_tasks.restore_task_and_undo_completion(Settings(), before_c, "c")
+
+    restore_params = next(
+        params for sql, params in calls if "INSERT INTO assistant_tasks" in sql
+    )
+    assert restore_params[3] == "due-b"
 
 
 def test_postgres_calendar_and_task_stores_delegate(monkeypatch: pytest.MonkeyPatch) -> None:

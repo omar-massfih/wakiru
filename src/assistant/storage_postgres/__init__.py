@@ -165,12 +165,16 @@ from .subscriptions import (
 )
 from .tasks import (
     complete_task,
+    complete_task_occurrence,
     create_task,
     delete_task,
     ensure_tasks_schema,
     get_task,
+    list_task_completions,
     list_tasks,
     restore_task,
+    restore_task_and_undo_completion,
+    restore_task_completion,
     update_task,
 )
 from .telegram import ensure_telegram_schema, pair_telegram_chat, paired_telegram_chats
@@ -220,6 +224,7 @@ __all__ = [
     "clear_mute",
     "close_goal",
     "complete_task",
+    "complete_task_occurrence",
     "connect",
     "create_event",
     "create_list_item",
@@ -306,6 +311,7 @@ __all__ = [
     "list_people",
     "list_reading_items",
     "list_subscriptions",
+    "list_task_completions",
     "list_tasks",
     "list_trips",
     "list_work_entries",
@@ -344,6 +350,8 @@ __all__ = [
     "restore_event",
     "restore_person",
     "restore_task",
+    "restore_task_and_undo_completion",
+    "restore_task_completion",
     "search_chunks",
     "search_memory_index",
     "set_caldav_meta",
