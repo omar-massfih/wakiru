@@ -2,7 +2,8 @@
 
 A single ``people`` table in its own SQLite file (:attr:`Settings.people_db_path`,
 under the memory directory), modeled on :mod:`assistant.tasks.store`. A person
-carries a ``relationship`` (how the user knows them), an optional keep-in-touch
+carries a ``relationship`` (how the user knows them), an optional email address,
+an optional keep-in-touch
 ``cadence_days``, the ``last_contact`` instant, an optional ``birthday``, and
 free-form ``notes``. ``last_contact`` — when set — is a timezone-aware ISO-8601
 string, stored so the offset travels with the value, exactly as the calendar and
@@ -20,20 +21,21 @@ from contextlib import AbstractContextManager
 from dataclasses import dataclass
 
 from ..config import Settings, postgres_backend
-from ..sqlite_util import connect, open_db
+from ..sqlite_util import connect, ensure_columns, open_db
 from ..timeutil import normalize_stamp as _normalize_stamp
 from ..timeutil import stamp_now as _stamp_now
 
 # Text columns a caller may set on create/update (id + timestamps + cadence
 # handled separately: cadence is an int, last_contact has its own log_contact path).
-_TEXT_FIELDS = ("name", "relationship", "birthday", "notes")
+_TEXT_FIELDS = ("name", "relationship", "email", "birthday", "notes")
 
 
 @dataclass
 class Person:
     """One person in the user's circle.
 
-    ``cadence_days`` is the keep-in-touch interval (0 = no cadence tracked).
+    ``email`` is normalized to lowercase on write. ``cadence_days`` is the
+    keep-in-touch interval (0 = no cadence tracked).
     ``last_contact`` is an optional tz-aware ISO-8601 string (empty = never
     logged). ``birthday`` is ``MM-DD`` or ``YYYY-MM-DD`` (empty = unknown).
     """
@@ -47,6 +49,7 @@ class Person:
     notes: str = ""
     created: str = ""
     updated: str = ""
+    email: str = ""
 
     @property
     def title(self) -> str:
@@ -64,10 +67,12 @@ def _open(settings: Settings) -> sqlite3.Connection:
     conn.execute(
         "CREATE TABLE IF NOT EXISTS people ("
         " id TEXT PRIMARY KEY, name TEXT NOT NULL, relationship TEXT DEFAULT '',"
+        " email TEXT DEFAULT '',"
         " cadence_days INTEGER DEFAULT 0, last_contact TEXT DEFAULT '',"
         " birthday TEXT DEFAULT '', notes TEXT DEFAULT '',"
         " created TEXT DEFAULT '', updated TEXT DEFAULT '')"
     )
+    ensure_columns(conn, "people", ("email",))
     return conn
 
 
@@ -81,6 +86,7 @@ def _row_to_person(row: sqlite3.Row) -> Person:
         id=row["id"],
         name=row["name"],
         relationship=row["relationship"] or "",
+        email=row["email"] or "",
         cadence_days=int(row["cadence_days"] or 0),
         last_contact=row["last_contact"] or "",
         birthday=row["birthday"] or "",
@@ -99,6 +105,11 @@ def _coerce_cadence(value: object, default: int = 0) -> int:
     return max(0, n)
 
 
+def normalize_email(value: object) -> str:
+    """Canonical stored email: surrounding whitespace removed and lowercase."""
+    return str(value or "").strip().lower()
+
+
 def create_person(
     settings: Settings,
     name: str,
@@ -106,17 +117,20 @@ def create_person(
     cadence_days: object = 0,
     birthday: str = "",
     notes: str = "",
+    email: str = "",
 ) -> Person:
     """Insert a new person and return it (with a generated id and timestamps)."""
     if storage_postgres := postgres_backend(settings):
         return storage_postgres.create_person(
-            settings, name, relationship, _coerce_cadence(cadence_days), birthday, notes
+            settings, name, relationship, _coerce_cadence(cadence_days), birthday, notes,
+            email=email,
         )
     now = _stamp_now(settings)
     person = Person(
         id=uuid.uuid4().hex[:12],
         name=name.strip(),
         relationship=relationship.strip(),
+        email=normalize_email(email),
         cadence_days=_coerce_cadence(cadence_days),
         birthday=birthday.strip(),
         notes=notes.strip(),
@@ -126,9 +140,9 @@ def create_person(
     with _connect(settings) as conn:
         conn.execute(
             "INSERT INTO people"
-            " (id, name, relationship, cadence_days, last_contact, birthday, notes, created, updated)"
-            " VALUES (?, ?, ?, ?, '', ?, ?, ?, ?)",
-            (person.id, person.name, person.relationship, person.cadence_days,
+            " (id, name, relationship, email, cadence_days, last_contact, birthday, notes, created, updated)"
+            " VALUES (?, ?, ?, ?, ?, '', ?, ?, ?, ?)",
+            (person.id, person.name, person.relationship, person.email, person.cadence_days,
              person.birthday, person.notes, person.created, person.updated),
         )
     return person
@@ -165,6 +179,8 @@ def update_person(settings: Settings, person_id: str, **fields: object) -> Perso
         for k, v in fields.items()
         if k in _TEXT_FIELDS and v is not None
     }
+    if "email" in updates:
+        updates["email"] = normalize_email(updates["email"])
     if fields.get("cadence_days") is not None:
         updates["cadence_days"] = _coerce_cadence(fields["cadence_days"])
     if fields.get("last_contact") is not None:
@@ -195,9 +211,9 @@ def restore_person(settings: Settings, person: Person) -> Person:
     with _connect(settings) as conn:
         conn.execute(
             "INSERT OR REPLACE INTO people"
-            " (id, name, relationship, cadence_days, last_contact, birthday, notes, created, updated)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (person.id, person.name, person.relationship, person.cadence_days,
+            " (id, name, relationship, email, cadence_days, last_contact, birthday, notes, created, updated)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (person.id, person.name, person.relationship, person.email, person.cadence_days,
              person.last_contact, person.birthday, person.notes,
              person.created, person.updated),
         )

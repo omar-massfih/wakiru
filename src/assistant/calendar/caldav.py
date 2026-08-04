@@ -28,7 +28,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 
 from .. import netguard
@@ -283,7 +283,7 @@ def _as_utc(value: str):
 
 def _build_vevent(event: store.Event, *, recurrence_id: str | None, fields: dict | None):
     from icalendar import Event as IEvent
-    from icalendar.prop import vRecur
+    from icalendar.prop import vCalAddress, vRecur
 
     fields = fields or {}
     ve = IEvent()
@@ -311,6 +311,37 @@ def _build_vevent(event: store.Event, *, recurrence_id: str | None, fields: dict
     notes = fields.get("notes") or event.notes
     if notes:
         ve.add("description", notes)
+
+    participant_event = replace(
+        event,
+        organizer=fields.get("organizer", event.organizer),
+        attendees=fields.get("attendees", event.attendees),
+    )
+    organizer = store.load_organizer(participant_event)
+    if organizer:
+        address = vCalAddress("MAILTO:" + organizer["email"])
+        if organizer.get("name"):
+            address.params["CN"] = organizer["name"]
+        ve.add("organizer", address, encode=False)
+    role_map = {
+        "required": "REQ-PARTICIPANT",
+        "optional": "OPT-PARTICIPANT",
+        "non-participant": "NON-PARTICIPANT",
+        "chair": "CHAIR",
+    }
+    for participant in store.load_attendees(participant_event):
+        address = vCalAddress("MAILTO:" + participant["email"])
+        if participant.get("name"):
+            address.params["CN"] = participant["name"]
+        if participant.get("status"):
+            address.params["PARTSTAT"] = participant["status"].upper()
+        if participant.get("role"):
+            address.params["ROLE"] = role_map.get(
+                participant["role"], participant["role"].upper()
+            )
+        if "rsvp" in participant:
+            address.params["RSVP"] = "TRUE" if participant["rsvp"] else "FALSE"
+        ve.add("attendee", address, encode=False)
 
     if recurrence_id is None and event.rrule:
         try:

@@ -84,6 +84,7 @@ def apply_op(
             settings,
             name=str(op["name"]),
             relationship=str(op.get("relationship", "") or ""),
+            email=str(op.get("email", "") or ""),
             cadence_days=op.get("cadence_days", 0) or 0,
             birthday=str(op.get("birthday", "") or ""),
             notes=str(op.get("notes", "") or ""),
@@ -102,6 +103,7 @@ def apply_op(
         revised = store.update_person(
             settings, target,
             name=op.get("name"), relationship=op.get("relationship"),
+            email=op.get("email"),
             cadence_days=op.get("cadence_days"), birthday=op.get("birthday"),
             notes=op.get("notes"),
         )

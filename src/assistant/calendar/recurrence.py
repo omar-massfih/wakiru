@@ -171,7 +171,7 @@ def expand(
             event, start=occ.isoformat(), end=occ_end, rrule="", exdates="", overrides=""
         )
         change = overrides.get(occ)
-        if change:
+        if change is not None:
             item = replace(
                 item,
                 start=change.get("start") or item.start,
@@ -179,6 +179,8 @@ def expand(
                 title=change.get("title") or item.title,
                 location=change.get("location") or item.location,
                 notes=change.get("notes") or item.notes,
+                organizer=change.get("organizer", item.organizer),
+                attendees=change.get("attendees", item.attendees),
             )
         occurrences.append(item)
     return occurrences

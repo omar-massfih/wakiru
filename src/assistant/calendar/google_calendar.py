@@ -175,6 +175,21 @@ def _to_body(settings: Settings, event: store.Event) -> dict:
         body["location"] = event.location
     if event.notes:
         body["description"] = event.notes
+    attendees = []
+    for participant in store.load_attendees(event):
+        attendee: dict = {"email": participant["email"]}
+        if participant.get("name"):
+            attendee["displayName"] = participant["name"]
+        if participant.get("status"):
+            attendee["responseStatus"] = {
+                "needsaction": "needsAction",
+                "needs-action": "needsAction",
+            }.get(participant["status"], participant["status"])
+        if participant.get("role") == "optional":
+            attendee["optional"] = True
+        attendees.append(attendee)
+    if attendees:
+        body["attendees"] = attendees
     recurrence: list[str] = []
     if event.rrule:
         recurrence.append("RRULE:" + event.rrule)
@@ -192,7 +207,35 @@ def _to_body(settings: Settings, event: store.Event) -> dict:
     return body
 
 
+def _google_participant(value: object) -> dict:
+    if not isinstance(value, dict):
+        return {}
+    participant: dict = {
+        "email": store.normalize_email(value.get("email")),
+    }
+    if not participant["email"]:
+        return {}
+    if value.get("displayName"):
+        participant["name"] = str(value["displayName"]).strip()
+    if value.get("responseStatus"):
+        participant["status"] = str(value["responseStatus"]).strip().lower()
+    if "optional" in value:
+        participant["role"] = "optional" if bool(value["optional"]) else "required"
+    if isinstance(value.get("self"), bool):
+        participant["self"] = value["self"]
+    return participant
+
+
+def _google_participants(g: dict) -> tuple[str, str]:
+    organizer = store.dump_organizer(_google_participant(g.get("organizer")))
+    attendees = store.dump_attendees(
+        [_google_participant(value) for value in g.get("attendees") or []]
+    )
+    return organizer, attendees
+
+
 def _from_google(g: dict, settings: Settings) -> store.Event:
+    organizer, attendees = _google_participants(g)
     event = store.Event(
         id=str(g["id"]),
         title=str(g.get("summary") or "(untitled)"),
@@ -200,6 +243,8 @@ def _from_google(g: dict, settings: Settings) -> store.Event:
         end=_gtime_to_iso(g.get("end"), settings),
         location=str(g.get("location") or ""),
         notes=str(g.get("description") or ""),
+        organizer=organizer,
+        attendees=attendees,
         caldav_href=str(g["id"]),
         caldav_etag=str(g.get("etag") or ""),
     )
@@ -252,17 +297,25 @@ def list_events(settings: Settings) -> list[store.Event]:
         if master is None or not occurrence:
             continue
         overrides = json.loads(master.overrides or "{}")
-        overrides[occurrence] = {
-            k: v
-            for k, v in {
-                "title": g.get("summary"),
-                "start": _gtime_to_iso(g.get("start"), settings),
-                "end": _gtime_to_iso(g.get("end"), settings),
-                "location": g.get("location"),
-            }.items()
-            if v
+        fields = {
+            "title": g.get("summary"),
+            "start": _gtime_to_iso(g.get("start"), settings),
+            "end": _gtime_to_iso(g.get("end"), settings),
+            "location": g.get("location"),
+            "notes": g.get("description"),
         }
-        master.overrides = json.dumps(overrides)
+        organizer, attendees = _google_participants(g)
+        # Google omits unchanged participant fields on ordinary instances. An
+        # explicitly supplied empty object/list remains a deliberate clear.
+        if "organizer" in g:
+            fields["organizer"] = organizer
+        if "attendees" in g:
+            fields["attendees"] = attendees
+        overrides[occurrence] = {
+            k: v for k, v in fields.items()
+            if v or k in ("organizer", "attendees")
+        }
+        master.overrides = json.dumps(overrides, sort_keys=True, separators=(",", ":"))
     return list(masters.values())
 
 

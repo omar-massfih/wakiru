@@ -37,8 +37,6 @@ def _event(settings: Settings, title: str, minutes_from_now: int, **kwargs):
         end=end.isoformat(timespec="seconds"),
         **kwargs,
     )
-
-
 # --- matching ----------------------------------------------------------------- #
 
 
@@ -76,6 +74,76 @@ def test_no_match_renders_nothing(settings) -> None:
     people_store.create_person(settings, name="Kari Nordmann")
     _event(settings, "Dentist", 30)
     assert meeting_prep_context(settings) == ""
+
+
+def test_generic_title_matches_attendee_email_before_misleading_name(settings) -> None:
+    kari = people_store.create_person(
+        settings, name="Kari Nordmann", email="kari@example.com",
+        relationship="client", notes="renewal is due",
+    )
+    people_store.create_person(settings, name="Ola Hansen", relationship="vendor")
+    event = _event(settings, "Catch-up with Ola Hansen", 30)
+    event.attendees = calendar_store.dump_attendees([
+        {"email": " MAILTO:KARI@EXAMPLE.COM ", "status": "accepted"},
+        {"email": "kari@example.com"},
+    ])
+    calendar_store.restore_event(settings, event)
+    block = meeting_prep_context(settings)
+    assert kari.name in block and "renewal is due" in block
+    assert "Ola Hansen — vendor" not in block
+
+
+def test_organizer_and_multiple_attendees_match_in_people_order(settings) -> None:
+    alpha = people_store.create_person(settings, "Alpha One", email="alpha@example.com")
+    beta = people_store.create_person(settings, "Beta Two", email="beta@example.com")
+    event = _event(settings, "Planning", 15)
+    event.organizer = calendar_store.dump_organizer({"email": "beta@example.com"})
+    event.attendees = calendar_store.dump_attendees([
+        {"email": "alpha@example.com"}, {"email": "beta@example.com"},
+    ])
+    calendar_store.restore_event(settings, event)
+    block = meeting_prep_context(settings)
+    assert block.index(alpha.name) < block.index(beta.name)
+    assert block.count(beta.name) == 1
+
+
+def test_ambiguous_or_malformed_email_does_not_guess(settings) -> None:
+    people_store.create_person(settings, "Alex One", email="shared@example.com")
+    people_store.create_person(settings, "Alex Two", email="shared@example.com")
+    event = _event(settings, "Catch-up", 10)
+    event.attendees = calendar_store.dump_attendees([{"email": "shared@example.com"}])
+    calendar_store.restore_event(settings, event)
+    assert meeting_prep_context(settings) == ""
+    event.attendees = "not-json"
+    event.title = "Catch-up with Alex One"
+    calendar_store.restore_event(settings, event)
+    assert "Alex One" in meeting_prep_context(settings)  # safe name fallback
+
+
+def test_imported_ics_attendee_drives_meeting_prep(settings) -> None:
+    from datetime import UTC
+
+    from assistant.calendar import sync
+
+    people_store.create_person(
+        settings, "Kari Nordmann", email="kari@example.com",
+        relationship="partner", notes="ask about launch",
+    )
+    start = (now(settings) + timedelta(minutes=20)).astimezone(UTC)
+    end = start + timedelta(minutes=30)
+    ical = (
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:prep-1\r\n"
+        f"DTSTART:{start.strftime('%Y%m%dT%H%M%SZ')}\r\n"
+        f"DTEND:{end.strftime('%Y%m%dT%H%M%SZ')}\r\n"
+        "SUMMARY:Catch-up\r\nATTENDEE:mailto:kari@example.com\r\n"
+        "END:VEVENT\r\nEND:VCALENDAR\r\n"
+    )
+    event = next(iter(sync.parse_vevents(ical, settings).values()))
+    event.id = "ics-prep"
+    calendar_store.restore_event(settings, event)
+    block = meeting_prep_context(settings)
+    assert "Kari Nordmann — partner" in block
+    assert "ask about launch" in block
 
 
 # --- the window ---------------------------------------------------------------- #

@@ -7,10 +7,12 @@ store round-trip run for real against a tmp SQLite calendar.
 from __future__ import annotations
 
 import json
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import pytest
 
-from assistant.calendar import store, sync
+from assistant.calendar import recurrence, store, sync
 from assistant.config import Settings
 
 FEED_URL = "https://calendar.example.com/secret/basic.ics"
@@ -71,6 +73,41 @@ def test_pull_mirrors_events(settings, monkeypatch) -> None:
     assert all(sync.is_synced_id(e.id) for e in events)
 
 
+def test_pull_retains_participants_and_detects_metadata_changes(settings, monkeypatch) -> None:
+    extra = (
+        "ORGANIZER;CN=Taylor Owner:mailto:OWNER@Example.com\r\n"
+        "ATTENDEE;CN=Kari Nordmann;PARTSTAT=ACCEPTED;ROLE=REQ-PARTICIPANT;RSVP=TRUE:"
+        "mailto:KARI@example.com\r\n"
+        "ATTENDEE;CN=Pat;PARTSTAT=TENTATIVE;ROLE=OPT-PARTICIPANT:mailto:pat@example.com\r\n"
+    )
+    _feed(monkeypatch, _ics(_vevent("uid-p", "Catch-up", "20260715T090000Z", extra=extra)))
+    sync.pull_feed(settings, FEED_URL)
+    event = store.list_events(settings)[0]
+    assert store.load_organizer(event) == {
+        "email": "owner@example.com", "name": "Taylor Owner",
+    }
+    assert store.load_attendees(event) == [
+        {"email": "kari@example.com", "name": "Kari Nordmann", "status": "accepted",
+         "role": "required", "rsvp": True},
+        {"email": "pat@example.com", "name": "Pat", "status": "tentative",
+         "role": "optional"},
+    ]
+
+    changed = extra.replace("PARTSTAT=ACCEPTED", "PARTSTAT=DECLINED")
+    _feed(monkeypatch, _ics(_vevent("uid-p", "Catch-up", "20260715T090000Z", extra=changed)))
+    assert sync.pull_feed(settings, FEED_URL)["updated"] == 1
+    assert store.load_attendees(store.list_events(settings)[0])[0]["status"] == "declined"
+
+    reordered = (
+        "ORGANIZER;CN=Taylor Owner:mailto:OWNER@Example.com\r\n"
+        "ATTENDEE;CN=Pat;PARTSTAT=TENTATIVE;ROLE=OPT-PARTICIPANT:mailto:pat@example.com\r\n"
+        "ATTENDEE;CN=Kari Nordmann;PARTSTAT=DECLINED;ROLE=REQ-PARTICIPANT;RSVP=TRUE:"
+        "mailto:KARI@example.com\r\n"
+    )
+    _feed(monkeypatch, _ics(_vevent("uid-p", "Catch-up", "20260715T090000Z", extra=reordered)))
+    assert sync.pull_feed(settings, FEED_URL)["updated"] == 0
+
+
 def test_repull_is_idempotent_and_updates_changes(settings, monkeypatch) -> None:
     _feed(monkeypatch, _ics(_vevent("uid-1", "Dentist", "20260715T090000Z")))
     sync.pull_feed(settings, FEED_URL)
@@ -128,6 +165,37 @@ def test_recurring_event_keeps_rrule_and_exdates(settings, monkeypatch) -> None:
     event = store.list_events(settings)[0]
     assert "FREQ=WEEKLY" in event.rrule
     assert json.loads(event.exdates) and "2026-07-13" in json.loads(event.exdates)[0]
+
+
+def test_recurring_exception_inherits_master_participants(settings, monkeypatch) -> None:
+    participants = (
+        "ORGANIZER:mailto:owner@example.com\r\n"
+        "ATTENDEE:mailto:regular@example.com\r\n"
+    )
+    master = _vevent(
+        "uid-r", "Weekly", "20260706T090000Z",
+        extra="RRULE:FREQ=WEEKLY;BYDAY=MO\r\n" + participants,
+    )
+    exception = _vevent(
+        "uid-r", "Weekly (moved)", "20260713T110000Z",
+        extra="RECURRENCE-ID:20260713T090000Z\r\nLOCATION:New room\r\n",
+    )
+    _feed(monkeypatch, _ics(master + exception))
+    sync.pull_feed(settings, FEED_URL)
+
+    event = store.list_events(settings)[0]
+    change = next(iter(store.load_overrides(event).values()))
+    assert "organizer" not in change and "attendees" not in change
+    oslo = ZoneInfo("Europe/Oslo")
+    occurrences = recurrence.expand(
+        event,
+        datetime(2026, 7, 12, tzinfo=oslo),
+        datetime(2026, 7, 14, tzinfo=oslo),
+    )
+    assert len(occurrences) == 1
+    assert occurrences[0].title == "Weekly (moved)"
+    assert store.load_organizer(occurrences[0])["email"] == "owner@example.com"
+    assert store.load_attendees(occurrences[0])[0]["email"] == "regular@example.com"
 
 
 def test_all_day_event_becomes_local_midnight(settings, monkeypatch) -> None:

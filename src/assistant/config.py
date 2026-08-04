@@ -501,7 +501,7 @@ class Settings(BaseSettings):
     # A birthday within this many days is flagged in the roster and the briefing.
     people_birthday_lead_days: int = 7
     # Meeting prep: when a calendar event starting (or running) within this
-    # many minutes names someone from the people store in its title or notes,
+    # many minutes identifies someone by attendee email or names them in its text,
     # a "Meeting prep" block with their stored detail rides into each turn.
     # Needs both enable_calendar and enable_people; 0 disables the block.
     meeting_prep_minutes: int = 60

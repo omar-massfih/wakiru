@@ -8,10 +8,12 @@ the shared push/pull/undo machinery run for real offline.
 from __future__ import annotations
 
 import json
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import pytest
 
-from assistant.calendar import google_calendar, ops, outbox, remote, store, sync, undo
+from assistant.calendar import google_calendar, ops, outbox, recurrence, remote, store, sync, undo
 from assistant.config import Settings
 
 
@@ -94,6 +96,40 @@ def test_pull_maps_google_events(settings, gserver) -> None:
     assert not sync.is_synced_id(events["Dentist"].id)  # writable
 
 
+def test_google_participants_survive_pull_and_reschedule(settings, gserver) -> None:
+    gserver.list_items = [{
+        "id": "meeting", "summary": "Catch-up",
+        "start": {"dateTime": "2026-12-01T09:00:00+01:00"},
+        "end": {"dateTime": "2026-12-01T10:00:00+01:00"}, "etag": '"e1"',
+        "organizer": {"email": "OWNER@Example.com", "displayName": "Owner", "self": True},
+        "attendees": [
+            {"email": "KARI@Example.com", "displayName": "Kari",
+             "responseStatus": "needsAction", "optional": True},
+        ],
+    }]
+    sync.pull_caldav(settings)
+    event = store.find_event(settings, "Catch-up")
+    assert store.load_organizer(event) == {
+        "email": "owner@example.com", "name": "Owner", "self": True,
+    }
+    assert store.load_attendees(event) == [{
+        "email": "kari@example.com", "name": "Kari", "status": "needsaction",
+        "role": "optional",
+    }]
+
+    gserver.calls.clear()
+    ops.apply_op(
+        settings,
+        {"op": "reschedule", "query": "Catch-up", "start": "2026-12-01T11:00:00+01:00"},
+    )
+    payload = json.loads(gserver.of("PUT")[0]["body"])
+    assert "organizer" not in payload
+    assert payload["attendees"] == [{
+        "email": "kari@example.com", "displayName": "Kari",
+        "responseStatus": "needsAction", "optional": True,
+    }]
+
+
 def test_pull_skips_cancelled_and_folds_instances(settings, gserver) -> None:
     gserver.list_items = [
         {"id": "gone", "status": "cancelled"},
@@ -102,13 +138,67 @@ def test_pull_skips_cancelled_and_folds_instances(settings, gserver) -> None:
          "recurrence": ["RRULE:FREQ=WEEKLY;BYDAY=MO"], "etag": '"s1"'},
         {"id": "inst", "summary": "Weekly (moved)", "recurringEventId": "series",
          "originalStartTime": {"dateTime": "2026-12-14T09:00:00+01:00"},
-         "start": {"dateTime": "2026-12-14T11:00:00+01:00"}, "etag": '"i1"'},
+         "start": {"dateTime": "2026-12-14T11:00:00+01:00"}, "etag": '"i1"',
+         "organizer": {"email": "other-owner@example.com"},
+         "attendees": [{"email": "guest@example.com", "responseStatus": "accepted"}]},
     ]
     sync.pull_caldav(settings)
     rows = store.list_events(settings)
     assert [e.title for e in rows] == ["Weekly"]
     overrides = store.load_overrides(rows[0])
     assert any(v.get("title") == "Weekly (moved)" for v in overrides.values())
+    changed = next(v for v in overrides.values() if v.get("title") == "Weekly (moved)")
+    occurrence = store.Event(id="o", title="o", start="2026-01-01T00:00:00+00:00",
+                             organizer=changed["organizer"], attendees=changed["attendees"])
+    assert store.load_organizer(occurrence)["email"] == "other-owner@example.com"
+    assert store.load_attendees(occurrence)[0]["email"] == "guest@example.com"
+
+
+def test_google_instance_can_clear_master_participants(settings, gserver) -> None:
+    gserver.list_items = [
+        {"id": "series", "summary": "Weekly",
+         "start": {"dateTime": "2026-12-07T09:00:00+01:00"},
+         "recurrence": ["RRULE:FREQ=WEEKLY;BYDAY=MO"], "etag": '"s1"',
+         "organizer": {"email": "owner@example.com"},
+         "attendees": [{"email": "regular@example.com"}]},
+        {"id": "inst", "summary": "Weekly", "recurringEventId": "series",
+         "originalStartTime": {"dateTime": "2026-12-14T09:00:00+01:00"},
+         "start": {"dateTime": "2026-12-14T09:00:00+01:00"},
+         "organizer": {}, "attendees": [], "etag": '"i1"'},
+    ]
+    sync.pull_caldav(settings)
+    change = next(iter(store.load_overrides(store.list_events(settings)[0]).values()))
+    assert "organizer" in change and change["organizer"] == ""
+    assert "attendees" in change and change["attendees"] == ""
+
+
+def test_google_instance_inherits_omitted_master_participants(settings, gserver) -> None:
+    gserver.list_items = [
+        {"id": "series", "summary": "Weekly",
+         "start": {"dateTime": "2026-12-07T09:00:00+01:00"},
+         "recurrence": ["RRULE:FREQ=WEEKLY;BYDAY=MO"], "etag": '"s1"',
+         "organizer": {"email": "owner@example.com"},
+         "attendees": [{"email": "regular@example.com"}]},
+        {"id": "inst", "summary": "Weekly (moved)", "recurringEventId": "series",
+         "originalStartTime": {"dateTime": "2026-12-14T09:00:00+01:00"},
+         "start": {"dateTime": "2026-12-14T11:00:00+01:00"},
+         "location": "New room", "etag": '"i1"'},
+    ]
+    sync.pull_caldav(settings)
+
+    event = store.list_events(settings)[0]
+    change = next(iter(store.load_overrides(event).values()))
+    assert "organizer" not in change and "attendees" not in change
+    oslo = ZoneInfo("Europe/Oslo")
+    occurrences = recurrence.expand(
+        event,
+        datetime(2026, 12, 13, tzinfo=oslo),
+        datetime(2026, 12, 15, tzinfo=oslo),
+    )
+    assert len(occurrences) == 1
+    assert occurrences[0].title == "Weekly (moved)"
+    assert store.load_organizer(occurrences[0])["email"] == "owner@example.com"
+    assert store.load_attendees(occurrences[0])[0]["email"] == "regular@example.com"
 
 
 def test_create_posts_with_our_id(settings, gserver) -> None:

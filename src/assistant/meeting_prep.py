@@ -1,13 +1,14 @@
 """Meeting prep — who the user is about to meet, injected just in time.
 
 A context provider joining two stores that already exist: when a calendar
-event starts (or is running) within ``meeting_prep_minutes``, and someone
-from the people store is named in its title or notes, the block carries the
+event starts (or is running) within ``meeting_prep_minutes``, and an organizer,
+attendee, or named person matches the people store, the block carries the
 event plus each matched person's stored detail (relationship, last contact,
 birthday, notes). "What do I need to know for this meeting?" then answers
 itself — and the persona can brief the user unprompted.
 
-Matching is deterministic and token-free: a person matches an event when
+Matching is deterministic and token-free. Participant emails are authoritative
+when they identify exactly one stored person; otherwise a person matches when
 their full name appears in the event's title or notes (case-insensitive), or
 when their first name appears as a whole word *and* no one else in the store
 shares that first name — "1:1 with Kari" finds Kari Nordmann, but an
@@ -21,6 +22,7 @@ from __future__ import annotations
 import re
 from datetime import timedelta
 
+from .calendar import store as calendar_store
 from .calendar.context import busy_events, format_when, now
 from .calendar.store import Event
 from .config import Settings, get_settings
@@ -34,7 +36,28 @@ _MAX_EVENTS = 2
 
 
 def matched_people(people: list[Person], event: Event) -> list[Person]:
-    """Everyone named in the event's title or notes, store order preserved."""
+    """Known participants, falling back to names; store order preserved."""
+    email_owners: dict[str, list[Person]] = {}
+    for person in people:
+        email = calendar_store.normalize_email(person.email)
+        if email:
+            email_owners.setdefault(email, []).append(person)
+    event_emails = {
+        participant["email"]
+        for participant in [
+            calendar_store.load_organizer(event),
+            *calendar_store.load_attendees(event),
+        ]
+        if participant.get("email")
+    }
+    email_matches = {
+        owners[0].id
+        for email in event_emails
+        if len(owners := email_owners.get(email, [])) == 1
+    }
+    if email_matches:
+        return [person for person in people if person.id in email_matches]
+
     text = f"{event.title} {event.notes}".lower()
     words = set(re.findall(r"[^\W\d_]+", text, re.UNICODE))
     first_names: dict[str, int] = {}
@@ -55,7 +78,7 @@ def matched_people(people: list[Person], event: Event) -> list[Person]:
 
 def meeting_prep_context(settings: Settings | None = None) -> str:
     """The Meeting-prep block for the next ``meeting_prep_minutes`` — empty
-    (and cheap) whenever no imminent event names a known person."""
+    (and cheap) whenever no imminent event identifies a known person."""
     settings = settings or get_settings()
     lead = settings.meeting_prep_minutes
     if lead <= 0:
