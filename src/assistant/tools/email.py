@@ -54,15 +54,156 @@ def _read_email(ctx: ToolContext, uid: str) -> str:
         f"Date: {message.date}\n{attachments}\n{message.body}"
     )
 
-def _draft_email(ctx: ToolContext, to: str, subject: str, body: str, cc: str = "") -> str:
+def _recipient_entries(value: object, field: str) -> tuple[list[str] | None, str | None]:
+    """Accept the array schema plus legacy single/address-list strings."""
+    if isinstance(value, list):
+        return list(value), None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return [], None
+        if "," in text:
+            from ..mail import client as mail_client
+
+            try:
+                canonical = mail_client._require_address_list(text, field=field)
+            except ValueError:
+                pass  # A People name may itself contain a comma.
+            else:
+                return canonical.split(", "), None
+        return [text], None
+    return None, f"{field} recipients must be a list of People names or email addresses."
+
+
+def _resolve_recipients(
+    ctx: ToolContext, value: object, field: str, *, required: bool
+) -> tuple[list[str] | None, str | None]:
+    """Resolve a complete recipient field without performing any mail writes."""
+    from ..mail import client as mail_client
+    from ..people import store as people_store
+
+    entries, error = _recipient_entries(value, field)
+    if error:
+        return None, error
+    if required and not entries:
+        return None, f"{field} must contain at least one People name or email address."
+
+    resolved: dict[str, None] = {}
+    for raw in entries or []:
+        if not isinstance(raw, str) or not raw.strip():
+            return None, (
+                f"Every {field} recipient must be a non-empty People name or email address."
+            )
+        text = raw.strip()
+        try:
+            canonical = mail_client._require_address_list(text, field=field)
+        except ValueError:
+            canonical = ""
+        if canonical and "," not in canonical:
+            email = canonical.lower()
+        else:
+            if "@" in text or text.lower().startswith("mailto:"):
+                return None, f"Invalid {field} email address: {text}."
+            matches = people_store.find_people(ctx.settings, text)
+            if not matches:
+                return None, (
+                    f'No Person matches {field} recipient "{text}". Use a stored '
+                    "People name or a direct email address."
+                )
+            if len(matches) > 1:
+                candidates = ", ".join(
+                    f'{person.name} ({person.id}, {person.email or "no email"})'
+                    for person in matches[:5]
+                )
+                more = f", +{len(matches) - 5} more" if len(matches) > 5 else ""
+                return None, (
+                    f'Ambiguous {field} recipient "{text}" — matches: '
+                    f"{candidates}{more}. Use a more specific People name, exact "
+                    "Person id, or direct email."
+                )
+            person = matches[0]
+            if not person.email:
+                return None, (
+                    f'Person "{person.name}" ({person.id}) has no email. Add one '
+                    "to the Person or use a direct email address."
+                )
+            try:
+                email = mail_client._require_address_list(person.email, field=field).lower()
+            except ValueError:
+                return None, (
+                    f'Person "{person.name}" ({person.id}) has an invalid email. '
+                    "Update the Person or use a direct email address."
+                )
+            if "," in email:
+                return None, (
+                    f'Person "{person.name}" ({person.id}) has an invalid email. '
+                    "Update the Person or use a direct email address."
+                )
+        resolved.setdefault(email, None)
+    return list(resolved), None
+
+
+def _resolved_email_fields(
+    ctx: ToolContext, to: object, cc: object
+) -> tuple[str | None, str | None, str | None]:
+    """Resolve both fields atomically; To wins over Cc for duplicate addresses."""
+    resolved_to, error = _resolve_recipients(ctx, to, "To", required=True)
+    if error:
+        return None, None, error
+    resolved_cc, error = _resolve_recipients(ctx, cc, "Cc", required=False)
+    if error:
+        return None, None, error
+    to_addresses = resolved_to or []
+    to_set = set(to_addresses)
+    cc_addresses = [address for address in (resolved_cc or []) if address not in to_set]
+    return ", ".join(to_addresses), ", ".join(cc_addresses), None
+
+
+def _draft_email(
+    ctx: ToolContext, to: object, subject: str, body: str, cc: object = ""
+) -> str:
     from ..mail import client as mail_client
 
-    return mail_client.save_draft(ctx.settings, str(to), str(subject), str(body), str(cc))
+    resolved_to, resolved_cc, error = _resolved_email_fields(ctx, to, cc)
+    if error:
+        return error
+    return mail_client.save_draft(
+        ctx.settings, resolved_to or "", str(subject), str(body), resolved_cc or ""
+    )
 
-def _send_email(ctx: ToolContext, to: str, subject: str, body: str, cc: str = "") -> str:
+def _send_email(
+    ctx: ToolContext, to: object, subject: str, body: str, cc: object = ""
+) -> str:
     from ..mail import client as mail_client
 
-    return mail_client.send_message(ctx.settings, str(to), str(subject), str(body), str(cc))
+    resolved_to, resolved_cc, error = _resolved_email_fields(ctx, to, cc)
+    if error:
+        return error
+    return mail_client.send_message(
+        ctx.settings, resolved_to or "", str(subject), str(body), resolved_cc or ""
+    )
+
+
+def _email_recipient_params() -> dict:
+    schema = _params(
+        {
+            "subject": ("string", "Subject line"),
+            "body": ("string", "Plain-text body"),
+        },
+        ["to", "subject", "body"],
+    )
+    item_description = "Direct email address, People name, or exact Person ID"
+    schema["properties"]["to"] = {
+        "type": "array",
+        "items": {"type": "string"},
+        "description": f"One or more recipients; each item is a {item_description}",
+    }
+    schema["properties"]["cc"] = {
+        "type": "array",
+        "items": {"type": "string"},
+        "description": f"Optional Cc recipients; each item is a {item_description}",
+    }
+    return schema
 
 def _ingest_attachment(ctx: ToolContext, uid: str, name: str = "") -> str:
     from ..docs import extract as docs_extract
@@ -208,15 +349,7 @@ def _email_tools(settings: Settings) -> list[ToolSpec]:
         ToolSpec(
             "draft_email",
             "Save an email draft to the drafts folder (does not send).",
-            _params(
-                {
-                    "to": ("string", "Recipient address"),
-                    "subject": ("string", "Subject line"),
-                    "body": ("string", "Plain-text body"),
-                    "cc": ("string", "Optional Cc address(es), comma-separated"),
-                },
-                ["to", "subject", "body"],
-            ),
+            _email_recipient_params(),
             _draft_email,
         ),
         ToolSpec(
@@ -300,15 +433,7 @@ def _email_tools(settings: Settings) -> list[ToolSpec]:
                 "send_email",
                 "Send an email. Only after the user explicitly confirmed sending "
                 "this exact message in this conversation.",
-                _params(
-                    {
-                        "to": ("string", "Recipient address"),
-                        "subject": ("string", "Subject line"),
-                        "body": ("string", "Plain-text body"),
-                        "cc": ("string", "Optional Cc address(es), comma-separated"),
-                    },
-                    ["to", "subject", "body"],
-                ),
+                _email_recipient_params(),
                 _send_email,
                 chat_only=True,
             )
