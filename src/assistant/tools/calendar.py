@@ -1,4 +1,4 @@
-"""Calendar tools — create/reschedule/cancel/skip/move + free-time search."""
+"""Calendar tools — event writes, invitation responses, and free-time search."""
 from __future__ import annotations
 
 from ._base import _ISO, _NO_MATCH, ToolContext, ToolSpec, _int_arg, _op_runner, _params
@@ -124,6 +124,23 @@ def _calendar_tools() -> list[ToolSpec]:
                 ["id"],
             ),
             _op_runner(_calendar_op, "reschedule"),
+        ),
+        ToolSpec(
+            "respond_to_invitation",
+            "Set your attendee status on an invitation.",
+            {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "response": {
+                        "type": "string",
+                        "enum": ["accepted", "tentative", "declined"],
+                    },
+                },
+                "required": ["id", "response"],
+            },
+            _op_runner(_calendar_op, "respond"),
+            chat_only=True,
         ),
         ToolSpec(
             "cancel_event",

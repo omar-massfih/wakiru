@@ -131,6 +131,85 @@ def test_google_participants_survive_pull_and_reschedule(settings, gserver) -> N
     }]
 
 
+def _google_invitation() -> dict:
+    return {
+        "id": "invitation", "summary": "Planning review",
+        "start": {"dateTime": "2026-12-01T09:00:00+01:00"},
+        "end": {"dateTime": "2026-12-01T10:00:00+01:00"}, "etag": '"invite-1"',
+        "organizer": {"email": "owner@example.com", "displayName": "Owner"},
+        "attendees": [
+            {"email": "me@example.com", "displayName": "Me",
+             "responseStatus": "needsAction", "self": True},
+            {"email": "guest@example.com", "responseStatus": "accepted"},
+        ],
+    }
+
+
+@pytest.mark.parametrize("response", ["accepted", "tentative", "declined"])
+def test_google_invitation_response_round_trip(settings, gserver, response) -> None:
+    gserver.list_items = [_google_invitation()]
+    sync.pull_caldav(settings)
+    event = store.find_event(settings, "Planning review")
+    gserver.calls.clear()
+
+    assert ops.apply_op(
+        settings, {"op": "respond", "id": event.id, "response": response}
+    ) == f"{response} invitation: Planning review"
+    payload = json.loads(gserver.of("PUT")[-1]["body"])
+    by_email = {item["email"]: item for item in payload["attendees"]}
+    assert by_email["me@example.com"]["responseStatus"] == response
+    assert "self" not in by_email["me@example.com"]
+    assert by_email["guest@example.com"]["responseStatus"] == "accepted"
+    local_self = next(
+        item for item in store.load_attendees(store.get_event(settings, event.id))
+        if item.get("self")
+    )
+    assert local_self["status"] == response
+
+    remote_copy = _google_invitation()
+    remote_copy["attendees"][0]["responseStatus"] = response
+    gserver.list_items = [remote_copy]
+    sync.pull_caldav(settings)
+    pulled_self = next(
+        item for item in store.load_attendees(store.get_event(settings, event.id))
+        if item.get("self")
+    )
+    assert pulled_self["status"] == response
+
+
+def test_google_invitation_retry_and_undo(settings, gserver) -> None:
+    gserver.list_items = [_google_invitation()]
+    sync.pull_caldav(settings)
+    event = store.find_event(settings, "Planning review")
+    gserver.calls.clear()
+
+    ops.apply_op(
+        settings, {"op": "respond", "id": event.id, "response": "accepted"},
+        "thread", "accepted-batch",
+    )
+    undo.undo_latest(settings, "thread", 60)
+    restored = json.loads(gserver.of("PUT")[-1]["body"])
+    me = next(item for item in restored["attendees"] if item["email"] == "me@example.com")
+    assert me["responseStatus"] == "needsAction"
+    assert next(
+        item for item in store.load_attendees(store.get_event(settings, event.id))
+        if item.get("self")
+    )["status"] == "needsaction"
+
+    gserver.update_status = 500
+    summary = ops.apply_op(
+        settings, {"op": "respond", "id": event.id, "response": "tentative"}
+    )
+    assert summary and "will retry" in summary
+    assert len(outbox.pending(settings)) == 1
+    gserver.update_status = 200
+    gserver.calls.clear()
+    assert sync.reconcile_caldav(settings)["reconciled"] == 1
+    retried = json.loads(gserver.of("PUT")[-1]["body"])
+    me = next(item for item in retried["attendees"] if item["email"] == "me@example.com")
+    assert me["responseStatus"] == "tentative"
+
+
 def test_pull_skips_cancelled_and_folds_instances(settings, gserver) -> None:
     gserver.list_items = [
         {"id": "gone", "status": "cancelled"},

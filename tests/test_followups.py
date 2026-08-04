@@ -219,5 +219,6 @@ def test_heartbeat_mode_never_offers_send_email(tmp_path) -> None:
     triage_only = {"reply_email", "archive_email", "mark_email_read", "label_email"}
     chat_only_docs = {"ingest_attachment", "summarize_document", "save_note"}
     assert heartbeat_names == (
-        chat_names - {"send_email", "send_reply", "undo"} - triage_only - chat_only_docs
+        chat_names - {"send_email", "send_reply", "undo", "respond_to_invitation"}
+        - triage_only - chat_only_docs
     ) | {"set_next_wake", "recall_conversation"}

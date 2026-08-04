@@ -5,7 +5,8 @@ Each operation arrives as a parsed dict —
 * ``create``     — schedule a new event,
 * ``reschedule`` — change an existing event's time/details (an in-place update),
 * ``cancel``     — remove an event,
-* ``skip``/``move`` — single-occurrence exceptions on a recurring series.
+* ``skip``/``move`` — single-occurrence exceptions on a recurring series,
+* ``respond``       — accept, tentatively accept, or decline an invitation.
 
 Existing events are targeted by id (with a fuzzy title fallback that refuses
 ambiguity — cancelling nothing beats cancelling the wrong appointment). Every
@@ -21,7 +22,7 @@ import re
 from .. import write_ops
 from ..config import Settings
 from ..people import store as people_store
-from . import recurrence, store, sync, undo
+from . import invitations, recurrence, store, sync, undo
 from .context import format_when, overlapping_events, resolve_tz
 
 logger = logging.getLogger(__name__)
@@ -249,6 +250,9 @@ def apply_op(
     ambiguous-match message for the model to act on, or ``None`` (nothing
     found/nothing to do)."""
     kind = op["op"]
+    if kind == "respond":
+        return _apply_invitation_response(settings, op, thread_id, batch_id)
+
     if kind == "create" and op.get("title") and op.get("start"):
         attendees: list[dict] = []
         if "attendees" in op:
@@ -329,6 +333,62 @@ def apply_op(
         return _apply_occurrence_op(settings, kind, op, thread_id, batch_id)
 
     return None
+
+
+def _apply_invitation_response(
+    settings: Settings, op: dict, thread_id: str = "", batch_id: str = ""
+) -> str | None:
+    """Update only the current user's attendee response on a remote invitation."""
+    response = str(op.get("response") or "").strip().lower()
+    if response not in invitations.RESPONSES:
+        return "Response must be accepted, tentative, or declined."
+
+    ident = str(op.get("id") or op.get("query") or "").strip()
+    matches = store.find_events(settings, ident)
+    if len(matches) > 1:
+        return _ambiguous_message(settings, matches)
+    if not matches:
+        return None
+    before = matches[0]
+
+    if sync.is_synced_id(before.id):
+        return "This invitation is read-only because it comes from an ICS feed."
+    if not before.caldav_href:
+        return "This invitation is local-only and cannot send a response."
+    from . import remote
+
+    if not remote.is_configured(settings) or not settings.enable_caldav_write:
+        return "Calendar writes are disabled; this invitation is read-only."
+
+    attendees, error = invitations.updated_attendees(settings, before, response)
+    if error:
+        return {
+            "ambiguous self attendee": (
+                "Cannot respond because the user's attendee identity is ambiguous."
+            ),
+            "self attendee not found": (
+                "Cannot respond because the user's attendee entry was not found."
+            ),
+            "not an invitation": "This event is not an invitation from another organizer.",
+        }.get(error, "Cannot respond to this invitation.")
+    assert attendees is not None
+    classification = invitations.classify(settings, before)
+    assert classification.attendee is not None
+    if classification.attendee.get("status") == response:
+        return f"already {response}: {before.title}"
+
+    revised = store.update_event(
+        settings, before.id, attendees=store.dump_attendees(attendees)
+    )
+    if revised is None:
+        return None
+    summary = f"{response} invitation: {revised.title}"
+    if not _push_caldav(settings, revised, "reschedule", before):
+        summary += _UNSYNCED_NOTE
+    _log_write(
+        settings, thread_id, batch_id, revised.id, "respond", summary, before
+    )
+    return summary
 
 
 def _apply_occurrence_op(

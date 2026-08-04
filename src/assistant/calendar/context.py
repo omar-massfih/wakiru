@@ -15,7 +15,7 @@ from datetime import UTC, datetime, time, timedelta, tzinfo
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from ..config import Settings, get_settings
-from . import recurrence, store
+from . import invitations, recurrence, store
 from .store import Event
 
 # Assumed duration for an event that has no explicit end, when reasoning about
@@ -309,7 +309,49 @@ def agenda_context(settings: Settings | None = None) -> str:
         "## Current date and time",
         f"It is currently {stamp} ({_part_of_day(current.hour)}).",
         "",
-        "## Upcoming events",
-        render_events(settings, upcoming_events(settings)),
     ]
+    pending = _pending_invitations(settings, current)
+    if pending:
+        parts.extend(("## Pending invitations", *pending, ""))
+    parts.extend(("## Upcoming events", render_events(settings, upcoming_events(settings))))
     return "\n".join(parts)
+
+
+def _pending_invitations(settings: Settings, current: datetime) -> list[str]:
+    """Render one actionable-or-read-only line per pending invitation series."""
+    # Lazy import: sync imports resolve_tz from this module.
+    from . import remote, sync
+
+    horizon = current + timedelta(days=settings.calendar_upcoming_days)
+    occurrences = recurrence.occurrences_in(settings, current, horizon)
+    masters = {event.id: event for event in store.list_events(settings)}
+    lines: list[str] = []
+    seen: set[str] = set()
+    for occurrence in occurrences:
+        if occurrence.id in seen:
+            continue
+        master = masters.get(occurrence.id, occurrence)
+        classification = invitations.classify(settings, master)
+        if not classification.is_invitation or not classification.pending:
+            continue
+        seen.add(occurrence.id)
+        organizer = store.load_organizer(master)
+        organizer_text = organizer.get("name") or organizer.get("email") or "unknown organizer"
+        if organizer.get("name") and organizer.get("email"):
+            organizer_text += f" <{organizer['email']}>"
+        line = (
+            f"- {format_when(settings, occurrence.start)} — {master.title}"
+            f" — organizer: {organizer_text}  [id: {master.id}]"
+        )
+        actionable = (
+            not sync.is_synced_id(master.id)
+            and bool(master.caldav_href)
+            and remote.is_configured(settings)
+            and settings.enable_caldav_write
+        )
+        if actionable:
+            line += " — respond: accept, tentatively accept, or decline"
+        else:
+            line += " — read-only/non-actionable"
+        lines.append(line)
+    return lines
