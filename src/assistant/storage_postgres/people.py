@@ -21,6 +21,7 @@ def ensure_people_schema(settings: Settings) -> None:
               id TEXT PRIMARY KEY,
               name TEXT NOT NULL,
               relationship TEXT NOT NULL DEFAULT '',
+              email TEXT NOT NULL DEFAULT '',
               cadence_days INTEGER NOT NULL DEFAULT 0,
               last_contact TEXT NOT NULL DEFAULT '',
               birthday TEXT NOT NULL DEFAULT '',
@@ -29,6 +30,10 @@ def ensure_people_schema(settings: Settings) -> None:
               updated TEXT NOT NULL DEFAULT ''
             )
             """
+        )
+        conn.execute(
+            "ALTER TABLE assistant_people"
+            " ADD COLUMN IF NOT EXISTS email TEXT NOT NULL DEFAULT ''"
         )
         conn.execute(
             """
@@ -55,6 +60,7 @@ def _person_from_row(row: dict):
         id=str(row["id"]),
         name=str(row["name"]),
         relationship=str(row.get("relationship") or ""),
+        email=str(row.get("email") or ""),
         cadence_days=int(row.get("cadence_days") or 0),
         last_contact=str(row.get("last_contact") or ""),
         birthday=str(row.get("birthday") or ""),
@@ -64,7 +70,7 @@ def _person_from_row(row: dict):
     )
 
 
-_COLS = "id, name, relationship, cadence_days, last_contact, birthday, notes, created, updated"
+_COLS = "id, name, relationship, email, cadence_days, last_contact, birthday, notes, created, updated"
 
 
 def create_person(
@@ -74,6 +80,7 @@ def create_person(
     cadence_days: int = 0,
     birthday: str = "",
     notes: str = "",
+    email: str = "",
 ):
     import uuid
 
@@ -85,6 +92,7 @@ def create_person(
         id=uuid.uuid4().hex[:12],
         name=name.strip(),
         relationship=relationship.strip(),
+        email=people_store.normalize_email(email),
         cadence_days=people_store._coerce_cadence(cadence_days),
         birthday=birthday.strip(),
         notes=notes.strip(),
@@ -94,9 +102,9 @@ def create_person(
     with connect(settings) as conn:
         conn.execute(
             "INSERT INTO assistant_people"
-            " (id, name, relationship, cadence_days, last_contact, birthday, notes, created, updated)"
-            " VALUES (%s, %s, %s, %s, '', %s, %s, %s, %s)",
-            (person.id, person.name, person.relationship, person.cadence_days,
+            " (id, name, relationship, email, cadence_days, last_contact, birthday, notes, created, updated)"
+            " VALUES (%s, %s, %s, %s, %s, '', %s, %s, %s, %s)",
+            (person.id, person.name, person.relationship, person.email, person.cadence_days,
              person.birthday, person.notes, person.created, person.updated),
         )
     return person
@@ -132,6 +140,8 @@ def update_person(settings: Settings, person_id: str, fields: dict):
         for k, v in fields.items()
         if k in people_store._TEXT_FIELDS and v is not None
     }
+    if "email" in updates:
+        updates["email"] = people_store.normalize_email(updates["email"])
     if fields.get("cadence_days") is not None:
         updates["cadence_days"] = people_store._coerce_cadence(fields["cadence_days"])
     if fields.get("last_contact") is not None:
@@ -156,11 +166,12 @@ def restore_person(settings: Settings, person) -> object:
         conn.execute(
             """
             INSERT INTO assistant_people
-              (id, name, relationship, cadence_days, last_contact, birthday, notes, created, updated)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+              (id, name, relationship, email, cadence_days, last_contact, birthday, notes, created, updated)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT(id) DO UPDATE SET
               name = excluded.name,
               relationship = excluded.relationship,
+              email = excluded.email,
               cadence_days = excluded.cadence_days,
               last_contact = excluded.last_contact,
               birthday = excluded.birthday,
@@ -168,7 +179,7 @@ def restore_person(settings: Settings, person) -> object:
               created = excluded.created,
               updated = excluded.updated
             """,
-            (person.id, person.name, person.relationship, person.cadence_days,
+            (person.id, person.name, person.relationship, person.email, person.cadence_days,
              person.last_contact, person.birthday, person.notes,
              person.created, person.updated),
         )

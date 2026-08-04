@@ -33,7 +33,7 @@ def _people_tools() -> list[ToolSpec]:
         ToolSpec(
             "find_person",
             "Look up a person's full stored details (relationship, keep-in-touch "
-            "cadence, last contact, birthday, notes) by name or id. Use it when "
+            "cadence, last contact, email, birthday, notes) by name or id. Use it when "
             "you need to recall someone who may not be in the People block, or "
             "details beyond the one-line roster entry.",
             _params({"query": ("string", "The person's name or id")}, ["query"]),
@@ -52,6 +52,7 @@ def _people_tools() -> list[ToolSpec]:
                         "How the user knows them (e.g. \"sister\", "
                         "\"colleague at Acme\", \"dentist\")",
                     ),
+                    "email": ("string", "Their email address"),
                     "cadence_days": (
                         "string",
                         "Keep-in-touch interval in days (e.g. \"14\"); omit if "
@@ -67,13 +68,14 @@ def _people_tools() -> list[ToolSpec]:
         ),
         ToolSpec(
             "update_person",
-            "Change a person's name, relationship, keep-in-touch cadence, "
+            "Change a person's name, relationship, email, keep-in-touch cadence, "
             "birthday, or notes.",
             _params(
                 {
                     "query": ("string", _ref),
                     "name": ("string", "New name"),
                     "relationship": ("string", "New relationship"),
+                    "email": ("string", "New email address"),
                     "cadence_days": ("string", "New keep-in-touch interval in days"),
                     "birthday": ("string", "New birthday, MM-DD or YYYY-MM-DD"),
                     "notes": ("string", "New notes"),

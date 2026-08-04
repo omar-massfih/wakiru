@@ -30,7 +30,10 @@ _FIELDS = ("title", "start", "end", "location", "notes", "rrule", "exdates", "ov
 
 # Columns added after the table's first release, migrated in on connect (see
 # :func:`assistant.sqlite_util.ensure_columns`). All are TEXT DEFAULT ''.
-_ADDED_COLUMNS = ("rrule", "exdates", "overrides", "caldav_href", "caldav_etag")
+_ADDED_COLUMNS = (
+    "rrule", "exdates", "overrides", "organizer", "attendees",
+    "caldav_href", "caldav_etag",
+)
 
 
 @dataclass
@@ -46,6 +49,10 @@ class Event:
     ``exdates`` is a JSON list of occurrence-start ISO strings to skip; ``overrides``
     is a JSON object mapping an occurrence-start ISO string to the changed fields for
     just that occurrence (a moved/edited single instance). Both empty on a plain event.
+
+    ``organizer`` and ``attendees`` are stable provider-neutral JSON retained from
+    imported calendars. They carry participant email identity and common scheduling
+    attributes; malformed legacy values are treated as empty by the load helpers.
 
     ``caldav_href``/``caldav_etag`` map a CalDAV-backed row to its remote resource:
     ``caldav_href`` is the server path, ``caldav_etag`` the last-seen validator used as
@@ -66,6 +73,8 @@ class Event:
     caldav_etag: str = ""
     created: str = ""
     updated: str = ""
+    organizer: str = ""
+    attendees: str = ""
 
 
 def _open(settings: Settings) -> sqlite3.Connection:
@@ -75,6 +84,7 @@ def _open(settings: Settings) -> sqlite3.Connection:
         " id TEXT PRIMARY KEY, title TEXT NOT NULL, start TEXT NOT NULL,"
         " end TEXT DEFAULT '', location TEXT DEFAULT '', notes TEXT DEFAULT '',"
         " rrule TEXT DEFAULT '', exdates TEXT DEFAULT '', overrides TEXT DEFAULT '',"
+        " organizer TEXT DEFAULT '', attendees TEXT DEFAULT '',"
         " caldav_href TEXT DEFAULT '', caldav_etag TEXT DEFAULT '',"
         " created TEXT DEFAULT '', updated TEXT DEFAULT '')"
     )
@@ -98,6 +108,8 @@ def _row_to_event(row: sqlite3.Row) -> Event:
         rrule=row["rrule"] or "",
         exdates=row["exdates"] or "",
         overrides=row["overrides"] or "",
+        organizer=row["organizer"] or "",
+        attendees=row["attendees"] or "",
         caldav_href=row["caldav_href"] or "",
         caldav_etag=row["caldav_etag"] or "",
         created=row["created"] or "",
@@ -257,11 +269,12 @@ def restore_event(settings: Settings, event: Event) -> Event:
         conn.execute(
             "INSERT OR REPLACE INTO events"
             " (id, title, start, end, location, notes, rrule, exdates, overrides,"
-            " caldav_href, caldav_etag, created, updated)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " organizer, attendees, caldav_href, caldav_etag, created, updated)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 event.id, event.title, event.start, event.end, event.location,
                 event.notes, event.rrule, event.exdates, event.overrides,
+                event.organizer, event.attendees,
                 event.caldav_href, event.caldav_etag, event.created, event.updated,
             ),
         )
@@ -358,6 +371,71 @@ def load_overrides(event: Event) -> dict[str, dict]:
     if not isinstance(data, dict):
         return {}
     return {str(k): v for k, v in data.items() if isinstance(v, dict)}
+
+
+def normalize_email(value: object) -> str:
+    """A provider calendar address as a lowercase bare email address."""
+    email = str(value or "").strip()
+    if email.lower().startswith("mailto:"):
+        email = email[7:].strip()
+    return email.lower()
+
+
+def _canonical_participant(value: object) -> dict:
+    """Normalize one provider-neutral participant, or return an empty value."""
+    if not isinstance(value, dict):
+        return {}
+    email = normalize_email(value.get("email"))
+    if not email:
+        return {}
+    participant: dict = {"email": email}
+    for key in ("name", "status", "role"):
+        item = str(value.get(key) or "").strip()
+        if item:
+            participant[key] = item.lower() if key in ("status", "role") else item
+    for key in ("rsvp", "self"):
+        flag = value.get(key)
+        if isinstance(flag, bool):
+            participant[key] = flag
+    return participant
+
+
+def dump_organizer(value: object) -> str:
+    """Stable JSON for one organizer; empty when it has no usable email."""
+    participant = _canonical_participant(value)
+    return json.dumps(participant, sort_keys=True, separators=(",", ":")) if participant else ""
+
+
+def dump_attendees(value: object) -> str:
+    """Stable JSON for an unordered attendee collection.
+
+    Providers may return the same attendees in a different order.  Sort their
+    canonical representations so mirrored-field comparisons do not treat that
+    as a change; sorting a list retains any intentional duplicate entries.
+    """
+    if not isinstance(value, list):
+        return ""
+    attendees = [participant for item in value if (participant := _canonical_participant(item))]
+    attendees.sort(key=lambda participant: json.dumps(participant, sort_keys=True, separators=(",", ":")))
+    return json.dumps(attendees, sort_keys=True, separators=(",", ":")) if attendees else ""
+
+
+def load_organizer(event: Event) -> dict:
+    try:
+        data = json.loads(event.organizer or "{}")
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return _canonical_participant(data)
+
+
+def load_attendees(event: Event) -> list[dict]:
+    try:
+        data = json.loads(event.attendees or "[]")
+    except (json.JSONDecodeError, TypeError):
+        return []
+    if not isinstance(data, list):
+        return []
+    return [participant for item in data if (participant := _canonical_participant(item))]
 
 
 def add_exdate(settings: Settings, event_id: str, occurrence: str) -> Event | None:

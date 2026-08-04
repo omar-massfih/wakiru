@@ -120,6 +120,40 @@ def test_pull_creates_writable_rows(settings, server) -> None:
     assert events["Dentist"].caldav_etag == "e-a"
 
 
+def test_participants_survive_pull_reschedule_and_ical_round_trip(settings, server) -> None:
+    participants = (
+        "ORGANIZER;CN=Owner:mailto:owner@example.com\n"
+        "ATTENDEE;CN=Kari;PARTSTAT=ACCEPTED;ROLE=REQ-PARTICIPANT;RSVP=TRUE:"
+        "mailto:kari@example.com\n"
+    )
+    server.report_body = _multistatus(
+        ("/cal/p.ics", '"e-p"', _vcal(
+            _vevent("uid-p", "Catch-up", "20261201T090000Z", extra=participants)
+        )),
+    )
+    sync.pull_caldav(settings)
+    event = store.find_event(settings, "Catch-up")
+    assert store.load_organizer(event)["email"] == "owner@example.com"
+    assert store.load_attendees(event)[0] == {
+        "email": "kari@example.com", "name": "Kari", "status": "accepted",
+        "role": "required", "rsvp": True,
+    }
+
+    serialized = caldav.event_to_ical(settings, event)
+    assert "ORGANIZER;CN=Owner:MAILTO:owner@example.com" in serialized
+    assert "ATTENDEE;CN=Kari;PARTSTAT=ACCEPTED;ROLE=REQ-PARTICIPANT;RSVP=TRUE" in serialized
+    reparsed = next(iter(sync.parse_vevents(serialized, settings).values()))
+    assert store.load_organizer(reparsed)["email"] == "owner@example.com"
+    assert store.load_attendees(reparsed)[0]["email"] == "kari@example.com"
+
+    server.calls.clear()
+    ops.apply_op(
+        settings,
+        {"op": "reschedule", "query": "Catch-up", "start": "2026-12-01T11:00:00+01:00"},
+    )
+    assert "ATTENDEE;CN=Kari" in server.of_method("PUT")[0]["body"]
+
+
 def test_repull_is_idempotent_by_etag(settings, server) -> None:
     server.report_body = _multistatus(
         ("/cal/a.ics", '"e-a"', _vcal(_vevent("uid-a", "Dentist", "20261201T090000Z"))),
@@ -323,6 +357,8 @@ def test_recurring_round_trip(settings) -> None:
         rrule="FREQ=WEEKLY;BYDAY=MO",
         exdates=json.dumps(["2026-12-14T09:00:00+01:00"]),
         overrides=json.dumps({"2026-12-21T09:00:00+01:00": {"title": "Weekly sync (moved)"}}),
+        organizer=store.dump_organizer({"email": "owner@example.com"}),
+        attendees=store.dump_attendees([{"email": "regular@example.com"}]),
     )
     ical = caldav.event_to_ical(settings, event)
     parsed = sync.parse_vevents(ical, settings)
@@ -332,6 +368,33 @@ def test_recurring_round_trip(settings) -> None:
     assert "2026-12-14" in store.load_exdates(master)[0]
     overrides = store.load_overrides(master)
     assert any(v.get("title") == "Weekly sync (moved)" for v in overrides.values())
+    assert store.load_organizer(master)["email"] == "owner@example.com"
+    assert store.load_attendees(master)[0]["email"] == "regular@example.com"
+
+
+def test_recurring_override_inherits_participants_on_caldav_round_trip(settings) -> None:
+    event = store.Event(
+        id="clear-participants", title="Weekly", start="2026-12-07T09:00:00+01:00",
+        end="2026-12-07T10:00:00+01:00", rrule="FREQ=WEEKLY;BYDAY=MO",
+        organizer=store.dump_organizer({"email": "owner@example.com"}),
+        attendees=store.dump_attendees([{"email": "regular@example.com"}]),
+        overrides=json.dumps({
+            "2026-12-14T09:00:00+01:00": {"title": "Weekly (moved)"},
+        }),
+    )
+    ical = caldav.event_to_ical(settings, event)
+    override = ical.split("RECURRENCE-ID", 1)[1]
+    assert "ORGANIZER:MAILTO:owner@example.com" in override
+    assert "ATTENDEE:MAILTO:regular@example.com" in override
+
+    reparsed = next(iter(sync.parse_vevents(ical, settings).values()))
+    change = next(iter(store.load_overrides(reparsed).values()))
+    assert store.load_organizer(
+        store.Event(id="o", title="o", start="2026-01-01", organizer=change["organizer"])
+    )["email"] == "owner@example.com"
+    assert store.load_attendees(
+        store.Event(id="o", title="o", start="2026-01-01", attendees=change["attendees"])
+    )[0]["email"] == "regular@example.com"
 
 
 # --- google oauth --------------------------------------------------------------

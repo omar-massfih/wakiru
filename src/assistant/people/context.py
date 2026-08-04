@@ -173,6 +173,8 @@ def describe_person(settings: Settings, person: Person, current: datetime | None
     current = current or now(settings)
     header = person.name + (f" — {person.relationship}" if person.relationship else "")
     lines = [header]
+    if person.email:
+        lines.append(f"  email: {person.email}")
     if person.cadence_days > 0:
         lines.append(f"  keep-in-touch: every {person.cadence_days} days")
     gap = contact_gap_days(person, current)

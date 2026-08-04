@@ -8,6 +8,7 @@ the people tools do — matching test_tasks.py / test_calendar.py.
 
 from __future__ import annotations
 
+import sqlite3
 import uuid
 from datetime import timedelta
 
@@ -56,11 +57,15 @@ def _apply(settings: Settings, ops_list: list[dict]) -> list[str]:
 
 
 def test_create_and_list(settings) -> None:
-    store.create_person(settings, "Kari", relationship="sister", cadence_days=14)
+    store.create_person(
+        settings, "Kari", relationship="sister", cadence_days=14,
+        email="  KARI@Example.COM ",
+    )
     people = store.list_people(settings)
     assert [p.name for p in people] == ["Kari"]
     assert people[0].relationship == "sister"
     assert people[0].cadence_days == 14
+    assert people[0].email == "kari@example.com"
 
 
 def test_update_and_delete(settings) -> None:
@@ -69,6 +74,21 @@ def test_update_and_delete(settings) -> None:
     assert store.get_person(settings, p.id).relationship == "colleague"
     assert store.delete_person(settings, p.id) is not None
     assert store.get_person(settings, p.id) is None
+
+
+def test_email_update_and_legacy_sqlite_migration(settings) -> None:
+    settings.memory_path.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(settings.people_db_path) as conn:
+        conn.execute(
+            "CREATE TABLE people (id TEXT PRIMARY KEY, name TEXT NOT NULL,"
+            " relationship TEXT DEFAULT '', cadence_days INTEGER DEFAULT 0,"
+            " last_contact TEXT DEFAULT '', birthday TEXT DEFAULT '', notes TEXT DEFAULT '',"
+            " created TEXT DEFAULT '', updated TEXT DEFAULT '')"
+        )
+        conn.execute("INSERT INTO people (id, name) VALUES ('p1', 'Legacy')")
+    assert store.get_person(settings, "p1").email == ""
+    updated = store.update_person(settings, "p1", email=" New@Example.COM ")
+    assert updated.email == "new@example.com"
 
 
 def test_log_contact_stamps_last_contact(settings) -> None:
@@ -102,6 +122,21 @@ def test_update_op_by_name(settings) -> None:
     assert store.find_person(settings, "Ola").cadence_days == 30
 
 
+def test_email_flows_through_ops_tools_and_undo(settings) -> None:
+    _apply(settings, [{"op": "add", "name": "Ola", "email": " OLA@EXAMPLE.COM "}])
+    assert store.find_person(settings, "Ola").email == "ola@example.com"
+    _apply(settings, [{"op": "update", "query": "Ola", "email": "other@example.com"}])
+    assert store.find_person(settings, "Ola").email == "other@example.com"
+    undo_latest(settings, THREAD, 15)
+    assert store.find_person(settings, "Ola").email == "ola@example.com"
+
+    from assistant.tools import tool_map
+
+    schemas = {tool.name: tool.parameters for tool in tool_map(settings).values()}
+    assert "email" in schemas["add_person"]["properties"]
+    assert "email" in schemas["update_person"]["properties"]
+
+
 def test_log_contact_op(settings) -> None:
     _apply(settings, [{"op": "add", "name": "Ola", "cadence_days": "7"}])
     result = _apply(settings, [{"op": "log_contact", "query": "Ola"}])
@@ -126,7 +161,8 @@ def test_find_person_tool(settings) -> None:
     from assistant.tools import ToolContext, tool_map
 
     store.create_person(
-        settings, "Kari", relationship="sister", cadence_days=14, notes="likes hiking"
+        settings, "Kari", relationship="sister", cadence_days=14, notes="likes hiking",
+        email="kari@example.com",
     )
     spec = tool_map(settings)["find_person"]
     ctx = ToolContext(settings=settings)
@@ -134,6 +170,7 @@ def test_find_person_tool(settings) -> None:
     assert "Kari — sister" in out
     assert "every 14 days" in out
     assert "likes hiking" in out
+    assert "kari@example.com" in out
     # Unknown name and ambiguity are handled, not guessed.
     assert "No person found" in spec.run(ctx, query="nobody")
     store.create_person(settings, "Kari Hansen")

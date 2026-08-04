@@ -27,6 +27,8 @@ def ensure_calendar_schema(settings: Settings) -> None:
               rrule TEXT NOT NULL DEFAULT '',
               exdates TEXT NOT NULL DEFAULT '',
               overrides TEXT NOT NULL DEFAULT '',
+              organizer TEXT NOT NULL DEFAULT '',
+              attendees TEXT NOT NULL DEFAULT '',
               caldav_href TEXT NOT NULL DEFAULT '',
               caldav_etag TEXT NOT NULL DEFAULT '',
               created TEXT NOT NULL DEFAULT '',
@@ -36,6 +38,14 @@ def ensure_calendar_schema(settings: Settings) -> None:
         )
         # Migrate deployments whose table predates the CalDAV columns (the SQLite
         # backend does the same via _ensure_columns). Runs once per process.
+        conn.execute(
+            "ALTER TABLE assistant_calendar_events"
+            " ADD COLUMN IF NOT EXISTS organizer TEXT NOT NULL DEFAULT ''"
+        )
+        conn.execute(
+            "ALTER TABLE assistant_calendar_events"
+            " ADD COLUMN IF NOT EXISTS attendees TEXT NOT NULL DEFAULT ''"
+        )
         conn.execute(
             "ALTER TABLE assistant_calendar_events"
             " ADD COLUMN IF NOT EXISTS caldav_href TEXT NOT NULL DEFAULT ''"
@@ -98,6 +108,8 @@ def _event_from_row(row: dict):
         rrule=str(row.get("rrule") or ""),
         exdates=str(row.get("exdates") or ""),
         overrides=str(row.get("overrides") or ""),
+        organizer=str(row.get("organizer") or ""),
+        attendees=str(row.get("attendees") or ""),
         caldav_href=str(row.get("caldav_href") or ""),
         caldav_etag=str(row.get("caldav_etag") or ""),
         created=str(row.get("created") or ""),
@@ -136,14 +148,14 @@ def create_event(settings: Settings, title: str, start: str, end: str = "", loca
 def get_event(settings: Settings, event_id: str):
     ensure_calendar_schema(settings)
     with connect(settings) as conn:
-        rows = _rows(conn.execute("SELECT id, title, start, \"end\", location, notes, rrule, exdates, overrides, caldav_href, caldav_etag, created, updated FROM assistant_calendar_events WHERE id = %s", (event_id,)))
+        rows = _rows(conn.execute("SELECT id, title, start, \"end\", location, notes, rrule, exdates, overrides, organizer, attendees, caldav_href, caldav_etag, created, updated FROM assistant_calendar_events WHERE id = %s", (event_id,)))
     return _event_from_row(rows[0]) if rows else None
 
 
 def list_events(settings: Settings):
     ensure_calendar_schema(settings)
     with connect(settings) as conn:
-        rows = _rows(conn.execute("SELECT id, title, start, \"end\", location, notes, rrule, exdates, overrides, caldav_href, caldav_etag, created, updated FROM assistant_calendar_events"))
+        rows = _rows(conn.execute("SELECT id, title, start, \"end\", location, notes, rrule, exdates, overrides, organizer, attendees, caldav_href, caldav_etag, created, updated FROM assistant_calendar_events"))
     return [_event_from_row(r) for r in rows]
 
 
@@ -177,8 +189,8 @@ def restore_event(settings: Settings, event) -> object:
         conn.execute(
             """
             INSERT INTO assistant_calendar_events
-              (id, title, start, "end", location, notes, rrule, exdates, overrides, caldav_href, caldav_etag, created, updated)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+              (id, title, start, "end", location, notes, rrule, exdates, overrides, organizer, attendees, caldav_href, caldav_etag, created, updated)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT(id) DO UPDATE SET
               title = excluded.title,
               start = excluded.start,
@@ -188,12 +200,14 @@ def restore_event(settings: Settings, event) -> object:
               rrule = excluded.rrule,
               exdates = excluded.exdates,
               overrides = excluded.overrides,
+              organizer = excluded.organizer,
+              attendees = excluded.attendees,
               caldav_href = excluded.caldav_href,
               caldav_etag = excluded.caldav_etag,
               created = excluded.created,
               updated = excluded.updated
             """,
-            (event.id, event.title, event.start, event.end, event.location, event.notes, event.rrule, event.exdates, event.overrides, event.caldav_href, event.caldav_etag, event.created, event.updated),
+            (event.id, event.title, event.start, event.end, event.location, event.notes, event.rrule, event.exdates, event.overrides, event.organizer, event.attendees, event.caldav_href, event.caldav_etag, event.created, event.updated),
         )
     return event
 
@@ -221,7 +235,7 @@ def find_by_href(settings: Settings, href: str):
         return None
     ensure_calendar_schema(settings)
     with connect(settings) as conn:
-        rows = _rows(conn.execute("SELECT id, title, start, \"end\", location, notes, rrule, exdates, overrides, caldav_href, caldav_etag, created, updated FROM assistant_calendar_events WHERE caldav_href = %s", (href,)))
+        rows = _rows(conn.execute("SELECT id, title, start, \"end\", location, notes, rrule, exdates, overrides, organizer, attendees, caldav_href, caldav_etag, created, updated FROM assistant_calendar_events WHERE caldav_href = %s", (href,)))
     return _event_from_row(rows[0]) if rows else None
 
 

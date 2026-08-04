@@ -8,6 +8,7 @@ offline.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import timedelta
 
@@ -223,10 +224,65 @@ def test_migration_adds_rrule_to_legacy_db(settings) -> None:
 
     back = store.get_event(settings, "legacy1")  # _connect adds the column
     assert back is not None and back.rrule == ""
+    assert back.organizer == "" and back.attendees == ""
     new = store.create_event(
         settings, title="New", start="2030-01-01T09:00:00+01:00", rrule="FREQ=DAILY"
     )
     assert store.get_event(settings, new.id).rrule == "FREQ=DAILY"
+
+
+def test_participants_restore_round_trip(settings) -> None:
+    event = store.Event(
+        id="participant-event", title="Catch-up", start=_iso_in(settings, days=1),
+        organizer=store.dump_organizer({"email": "Owner@Example.com", "name": "Owner"}),
+        attendees=store.dump_attendees([
+            {"email": "Kari@Example.com", "status": "accepted", "rsvp": True},
+        ]),
+    )
+    store.restore_event(settings, event)
+    restored = store.get_event(settings, event.id)
+    assert store.load_organizer(restored) == {"email": "owner@example.com", "name": "Owner"}
+    assert store.load_attendees(restored) == [
+        {"email": "kari@example.com", "status": "accepted", "rsvp": True}
+    ]
+
+
+def test_attendees_are_canonical_across_provider_order() -> None:
+    kari = {"email": "kari@example.com", "status": "accepted"}
+    pat = {"email": "pat@example.com", "role": "optional"}
+    assert store.dump_attendees([pat, kari, kari]) == store.dump_attendees([kari, pat, kari])
+    assert store.dump_attendees([kari, pat, kari]).count("kari@example.com") == 2
+
+
+def test_occurrence_participants_inherit_and_override(settings) -> None:
+    start = _past_monday(settings)
+    master = store.Event(
+        id="series-participants", title="Weekly", start=start.isoformat(),
+        end=(start + timedelta(hours=1)).isoformat(), rrule="FREQ=WEEKLY",
+        organizer=store.dump_organizer({"email": "owner@example.com"}),
+        attendees=store.dump_attendees([{"email": "regular@example.com"}]),
+    )
+    occurrences = recurrence.expand(master, start, start + timedelta(days=14))
+    target = occurrences[1].start
+    master.overrides = json.dumps({
+        target: {
+            "organizer": store.dump_organizer({"email": "other@example.com"}),
+            "attendees": store.dump_attendees([{"email": "guest@example.com"}]),
+        }
+    })
+    occurrences = recurrence.expand(master, start, start + timedelta(days=14))
+    assert store.load_attendees(occurrences[0])[0]["email"] == "regular@example.com"
+    changed = next(item for item in occurrences if item.start == target)
+    assert store.load_organizer(changed)["email"] == "other@example.com"
+    assert store.load_attendees(changed)[0]["email"] == "guest@example.com"
+
+    master.overrides = json.dumps({target: {"organizer": "", "attendees": ""}})
+    cleared = next(
+        item for item in recurrence.expand(master, start, start + timedelta(days=14))
+        if item.start == target
+    )
+    assert store.load_organizer(cleared) == {}
+    assert store.load_attendees(cleared) == []
 
 
 def test_occurrences_expand_weekly_past_dtstart(settings) -> None:

@@ -12,8 +12,8 @@ Synced rows are ordinary events with a *stable, feed-derived id*
 
 * re-pulls upsert in place (via :func:`store.restore_event`) instead of
   duplicating, and deletions in the feed delete the mirrored row;
-* the id prefix itself marks the event as synced (:func:`is_synced_id`) — no
-  schema change, so the Postgres backend works unchanged;
+* the id prefix itself marks the event as synced (:func:`is_synced_id`), while
+  organizer and attendee metadata live on the ordinary event row;
 * agenda context, conflict checks, reminders, and the daily briefing all pick
   synced events up automatically, because they read the same store.
 
@@ -42,7 +42,10 @@ _FETCH_TIMEOUT_SECONDS = 30
 _MAX_FEED_BYTES = 10_000_000
 
 # Fields that participate in change detection between pulls.
-_MIRRORED_FIELDS = ("title", "start", "end", "location", "notes", "rrule", "exdates", "overrides")
+_MIRRORED_FIELDS = (
+    "title", "start", "end", "location", "notes", "rrule", "exdates",
+    "overrides", "organizer", "attendees",
+)
 
 
 def is_synced_id(event_id: str) -> bool:
@@ -126,6 +129,45 @@ def _exdates(component, settings: Settings) -> list[str]:
     return out
 
 
+_ICAL_ROLES = {
+    "REQ-PARTICIPANT": "required",
+    "OPT-PARTICIPANT": "optional",
+    "NON-PARTICIPANT": "non-participant",
+    "CHAIR": "chair",
+}
+
+
+def _participant(value) -> dict:
+    """One iCalendar address plus its common scheduling parameters."""
+    if value is None:
+        return {}
+    email = store.normalize_email(value)
+    if not email:
+        return {}
+    params = getattr(value, "params", {})
+    participant: dict = {"email": email}
+    name = str(params.get("CN") or "").strip()
+    status = str(params.get("PARTSTAT") or "").strip().lower()
+    raw_role = str(params.get("ROLE") or "").strip().upper()
+    if name:
+        participant["name"] = name
+    if status:
+        participant["status"] = status
+    if raw_role:
+        participant["role"] = _ICAL_ROLES.get(raw_role, raw_role.lower())
+    if "RSVP" in params:
+        participant["rsvp"] = str(params["RSVP"]).strip().upper() == "TRUE"
+    return participant
+
+
+def _participants(component) -> tuple[str, str]:
+    organizer = store.dump_organizer(_participant(component.get("organizer")))
+    raw = component.get("attendee")
+    values = raw if isinstance(raw, list) else ([raw] if raw is not None else [])
+    attendees = store.dump_attendees([_participant(value) for value in values])
+    return organizer, attendees
+
+
 def parse_vevents(text: str, settings: Settings) -> dict[str, store.Event]:
     """Parse a VCALENDAR into events keyed by their **raw UID**, id left blank.
 
@@ -169,9 +211,19 @@ def parse_vevents(text: str, settings: Settings) -> dict[str, store.Event]:
             "notes": _text(component, "description"),
         }
         recurrence_id = _iso(component.get("recurrence-id"), settings)
+        organizer, attendees = _participants(component)
         if recurrence_id:  # a moved/edited single occurrence of a series
+            # An omitted participant property inherits from the master. Keep an
+            # explicit (even empty) property as an override, but do not turn
+            # ordinary exceptions into participant-clearing overrides.
+            if component.get("organizer") is not None:
+                fields["organizer"] = organizer
+            if component.get("attendee") is not None:
+                fields["attendees"] = attendees
             overrides.append((uid, recurrence_id, fields))
             continue
+        fields["organizer"] = organizer
+        fields["attendees"] = attendees
         exdates = _exdates(component, settings)
         events[uid] = store.Event(
             id="",
@@ -185,8 +237,13 @@ def parse_vevents(text: str, settings: Settings) -> dict[str, store.Event]:
         if master is None:
             continue  # override without its master in the window — skip
         data = json.loads(master.overrides or "{}")
-        data[occurrence] = {k: v for k, v in fields.items() if v}
-        master.overrides = json.dumps(data)
+        # Participant fields are presence-sensitive: only source properties
+        # added above participate in the override.
+        data[occurrence] = {
+            k: v for k, v in fields.items()
+            if v or k in ("organizer", "attendees")
+        }
+        master.overrides = json.dumps(data, sort_keys=True, separators=(",", ":"))
     return events
 
 

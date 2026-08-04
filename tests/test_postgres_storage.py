@@ -168,6 +168,13 @@ def test_postgres_connect_pools_and_schema_runs_once(monkeypatch: pytest.MonkeyP
     storage_postgres.ensure_tasks_schema(settings)
     assert len(executed) == first_pass
 
+    storage_postgres.ensure_people_schema(settings)
+    storage_postgres.ensure_calendar_schema(settings)
+    sql = "\n".join(executed)
+    assert "ADD COLUMN IF NOT EXISTS email TEXT NOT NULL DEFAULT ''" in sql
+    assert "ADD COLUMN IF NOT EXISTS organizer TEXT NOT NULL DEFAULT ''" in sql
+    assert "ADD COLUMN IF NOT EXISTS attendees TEXT NOT NULL DEFAULT ''" in sql
+
 
 def test_postgres_calendar_and_task_stores_delegate(monkeypatch: pytest.MonkeyPatch) -> None:
     settings = Settings(storage_backend="postgres", database_url="postgres://example")
