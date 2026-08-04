@@ -8,7 +8,7 @@ real against a tmp SQLite file.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 
 import pytest
 
@@ -57,6 +57,60 @@ def test_not_due_before_briefing_time(settings, delivered, monkeypatch) -> None:
     _freeze_clock(monkeypatch, settings, "06:00")
     assert briefing.run_briefing(settings) == {"sent": False, "reason": "not due yet"}
     assert delivered == []
+
+
+def test_due_gate_and_ledger_date_use_trip_local_time(settings, delivered, monkeypatch) -> None:
+    from assistant.calendar import context as calendar_context
+    from assistant.trips import store as trips_store
+
+    traveling = settings.model_copy(
+        update={"timezone": "Europe/Oslo", "enable_trips": True, "briefing_time": "07:30"}
+    )
+    trips_store.create_trip(
+        traveling, "New York", start="2026-03-08", end="2026-03-08",
+        timezone="America/New_York",
+    )
+    instant = datetime(2026, 3, 8, 10, 0, tzinfo=UTC)  # 06:00 EDT, 11:00 home
+    real_datetime = datetime
+
+    class FrozenDateTime(real_datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return instant.astimezone(tz) if tz is not None else instant.replace(tzinfo=None)
+
+    monkeypatch.setattr(calendar_context, "datetime", FrozenDateTime)
+    assert briefing.run_briefing(traveling) == {"sent": False, "reason": "not due yet"}
+
+    instant = datetime(2026, 3, 8, 12, 0, tzinfo=UTC)  # 08:00 EDT
+    result = briefing.run_briefing(traveling)
+    assert result["sent"] and result["date"] == "2026-03-08"
+
+
+def test_due_gate_reverts_to_home_time_after_trip_ends(settings, delivered, monkeypatch) -> None:
+    from assistant.calendar import context as calendar_context
+    from assistant.trips import store as trips_store
+
+    traveling = settings.model_copy(
+        update={"timezone": "Europe/Oslo", "enable_trips": True, "briefing_time": "07:00"}
+    )
+    trips_store.create_trip(
+        traveling, "New York", start="2026-03-08", end="2026-03-08",
+        timezone="America/New_York",
+    )
+    # The trip ended at 04:00 UTC. At 06:30 it is 07:30 at home, so the home
+    # briefing is due even though New York's clock would only read 02:30.
+    instant = datetime(2026, 3, 9, 6, 30, tzinfo=UTC)
+    real_datetime = datetime
+
+    class FrozenDateTime(real_datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return instant.astimezone(tz) if tz is not None else instant.replace(tzinfo=None)
+
+    monkeypatch.setattr(calendar_context, "datetime", FrozenDateTime)
+    result = briefing.run_briefing(traveling)
+
+    assert result["sent"] and result["date"] == "2026-03-09"
 
 
 def test_fires_once_after_due_time(settings, delivered, monkeypatch) -> None:

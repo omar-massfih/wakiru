@@ -15,10 +15,10 @@ from __future__ import annotations
 
 import sqlite3
 import uuid
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, suppress
 from dataclasses import dataclass
-from datetime import date
-from zoneinfo import ZoneInfo
+from datetime import date, datetime, time, tzinfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from ..config import Settings, postgres_backend
 from ..sqlite_util import connect, open_db
@@ -239,6 +239,66 @@ def active_trip(settings: Settings, today: date | None = None) -> Trip | None:
         if started is not None and ends is not None and started <= today <= ends:
             return trip
     return None
+
+
+def active_trip_at(settings: Settings, instant: datetime, home_tz: tzinfo) -> Trip | None:
+    """Return the trip active at an absolute instant.
+
+    Timezone-bearing trip ranges are destination-local calendar dates.  A trip
+    with no timezone (or a corrupt legacy timezone) uses the home-local date,
+    which keeps it visible without changing the assistant's clock.
+    """
+    if instant.tzinfo is None:
+        raise ValueError("instant must be timezone-aware")
+
+    # Ask for all rows with an explicit cutoff so this path never calls
+    # timeutil.today(), which would recurse through resolve_tz().  Re-sort the
+    # complete set with the store's existing soonest-first key: a destination
+    # may still be on its final date after that date has ended at home.
+    home_date = instant.astimezone(home_tz).date()
+    trips = sorted(
+        list_trips(settings, include_past=True, today=home_date),
+        key=lambda trip: (trip.start or "9999", trip.created),
+    )
+    for trip in trips:
+        started, ends = parse_date(trip.start), parse_date(trip.end)
+        if started is None or ends is None:
+            continue
+        trip_tz = home_tz
+        if trip.timezone:
+            with suppress(ValueError, ZoneInfoNotFoundError):
+                trip_tz = ZoneInfo(trip.timezone)
+        local_date = instant.astimezone(trip_tz).date()
+        if started <= local_date <= ends:
+            return trip
+    return None
+
+
+def next_trip_at(settings: Settings, instant: datetime, home_tz: tzinfo) -> Trip | None:
+    """Return the next trip whose local start boundary is after ``instant``.
+
+    Unlike :func:`next_trip`, this comparison is made against an absolute
+    instant.  Each destination-local start date therefore remains upcoming
+    until midnight in that trip's timezone, even when home time has already
+    advanced to the same calendar date.
+    """
+    if instant.tzinfo is None:
+        raise ValueError("instant must be timezone-aware")
+
+    home_date = instant.astimezone(home_tz).date()
+    candidates: list[tuple[datetime, str, str, Trip]] = []
+    for trip in list_trips(settings, include_past=True, today=home_date):
+        started = parse_date(trip.start)
+        if started is None:
+            continue
+        trip_tz = home_tz
+        if trip.timezone:
+            with suppress(ValueError, ZoneInfoNotFoundError):
+                trip_tz = ZoneInfo(trip.timezone)
+        boundary = datetime.combine(started, time.min, tzinfo=trip_tz)
+        if boundary > instant:
+            candidates.append((boundary, trip.start or "9999", trip.created, trip))
+    return min(candidates, default=None, key=lambda item: item[:3])[-1] if candidates else None
 
 
 def next_trip(settings: Settings, today: date | None = None) -> Trip | None:

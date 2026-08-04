@@ -10,7 +10,8 @@ already booked.
 
 from __future__ import annotations
 
-from datetime import datetime, time, timedelta, tzinfo
+from contextlib import suppress
+from datetime import UTC, datetime, time, timedelta, tzinfo
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from ..config import Settings, get_settings
@@ -22,8 +23,8 @@ from .store import Event
 _DEFAULT_EVENT_MINUTES = 60
 
 
-def resolve_tz(settings: Settings) -> tzinfo:
-    """The timezone the assistant reasons in (configured, else system-local)."""
+def resolve_home_tz(settings: Settings) -> tzinfo:
+    """The configured home timezone, falling back to the system-local zone."""
     if settings.timezone:
         try:
             return ZoneInfo(settings.timezone)
@@ -33,9 +34,92 @@ def resolve_tz(settings: Settings) -> tzinfo:
     return local or ZoneInfo("UTC")
 
 
+def resolve_tz(settings: Settings, instant: datetime | None = None) -> tzinfo:
+    """The effective timezone: an active trip's zone, otherwise home time.
+
+    ``instant`` is an absolute, aware datetime when supplied.  Passing it lets
+    :func:`now` select the trip and render the clock from exactly the same
+    instant, including at midnight activation boundaries.
+    """
+    home_tz = resolve_home_tz(settings)
+    if not settings.enable_trips:
+        return home_tz
+
+    absolute = instant or datetime.now(UTC)
+    if absolute.tzinfo is None:
+        absolute = absolute.replace(tzinfo=UTC)
+    try:
+        from ..trips.store import active_trip_at
+
+        trip = active_trip_at(settings, absolute, home_tz)
+        if trip is not None and trip.timezone:
+            return ZoneInfo(trip.timezone)
+    except (ValueError, ZoneInfoNotFoundError):
+        # Legacy/corrupt rows must never make the assistant clock unusable.
+        pass
+    return home_tz
+
+
 def now(settings: Settings) -> datetime:
     """Current timezone-aware ``datetime`` in the assistant's timezone."""
-    return datetime.now(resolve_tz(settings))
+    absolute = datetime.now(UTC)
+    return absolute.astimezone(resolve_tz(settings, absolute))
+
+
+def next_timezone_boundary(settings: Settings, instant: datetime) -> datetime | None:
+    """The next trip selection boundary that changes the effective timezone.
+
+    Trip dates are destination-local and inclusive, so activation is midnight
+    at the destination on ``start`` and reversion is midnight after ``end``.
+    The heartbeat treats these instants as scheduling boundaries and recomputes
+    all later wall-clock work once the boundary has been crossed.
+    """
+    if not settings.enable_trips:
+        return None
+    if instant.tzinfo is None:
+        raise ValueError("instant must be timezone-aware")
+
+    from ..timeutil import parse_date
+    from ..trips.store import list_trips
+
+    candidates: set[datetime] = set()
+    home_tz = resolve_home_tz(settings)
+    home_date = instant.astimezone(home_tz).date()
+    for trip in list_trips(settings, include_past=True, today=home_date):
+        trip_tz = home_tz
+        if trip.timezone:
+            with suppress(ValueError, ZoneInfoNotFoundError):
+                trip_tz = ZoneInfo(trip.timezone)
+        started, ended = parse_date(trip.start), parse_date(trip.end)
+        if started is None or ended is None:
+            continue
+        candidates.update(
+            (
+                datetime.combine(started, time.min, tzinfo=trip_tz),
+                datetime.combine(ended + timedelta(days=1), time.min, tzinfo=trip_tz),
+            )
+        )
+
+    def zone_at(candidate: datetime) -> tzinfo:
+        from ..trips.store import active_trip_at
+
+        selected = active_trip_at(settings, candidate, home_tz)
+        if selected is not None and selected.timezone:
+            try:
+                return ZoneInfo(selected.timezone)
+            except (ValueError, ZoneInfoNotFoundError):
+                pass
+        return home_tz
+
+    # A timezone-less trip can still change the selected trip and thereby
+    # reveal or suppress another trip's timezone.  Compare the effective zone
+    # on both sides of every selection boundary instead of dropping those rows.
+    for candidate in sorted(value for value in candidates if value > instant):
+        before = zone_at(candidate - timedelta(microseconds=1))
+        after = zone_at(candidate)
+        if getattr(before, "key", before) != getattr(after, "key", after):
+            return candidate
+    return None
 
 
 def format_when(settings: Settings, iso: str) -> str:

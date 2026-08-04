@@ -25,12 +25,19 @@ def trips_context(settings: Settings) -> str:
     Runs on the reply path, so it only reads the local store; destination
     weather stays behind the on-demand ``get_weather`` tool.
     """
-    from ..calendar.context import now
+    if not settings.enable_trips:
+        return ""
+
+    from ..calendar.context import now, resolve_home_tz
 
     current = now(settings)
-    today = current.date()
-    active = store.active_trip(settings, today)
+    active = store.active_trip_at(settings, current, resolve_home_tz(settings))
     if active is not None:
+        try:
+            active_tz = ZoneInfo(active.timezone) if active.timezone else resolve_home_tz(settings)
+        except Exception:
+            active_tz = resolve_home_tz(settings)
+        today = current.astimezone(active_tz).date()
         started = store.parse_date(active.start)
         ends = store.parse_date(active.end)
         if started is None or ends is None:  # unreachable: active implies both
@@ -50,13 +57,18 @@ def trips_context(settings: Settings) -> str:
             "knows the destination's forecast."
         )
         return "\n".join(lines)
-    upcoming = store.next_trip(settings, today)
+    home_tz = resolve_home_tz(settings)
+    upcoming = store.next_trip_at(settings, current, home_tz)
     if upcoming is None:
         return ""
     departs = store.parse_date(upcoming.start)
     if departs is None:  # unreachable: next_trip implies a parseable start
         return ""
-    days_out = (departs - today).days
+    try:
+        upcoming_tz = ZoneInfo(upcoming.timezone) if upcoming.timezone else home_tz
+    except Exception:
+        upcoming_tz = home_tz
+    days_out = (departs - current.astimezone(upcoming_tz).date()).days
     if days_out > max(settings.trips_context_days, 0):
         return ""
     lines = [

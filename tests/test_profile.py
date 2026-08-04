@@ -6,7 +6,7 @@ the model, so notes are created via store.write_note directly, not save_memory.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 
 import pytest
 
@@ -88,6 +88,41 @@ def test_in_quiet_hours_crossing_midnight(settings) -> None:
     assert not profile.in_quiet_hours(settings, _at(12))
     assert profile.in_quiet_hours(settings, _at(22, 0))
     assert not profile.in_quiet_hours(settings, _at(7, 0))
+
+
+def test_heartbeat_quiet_hold_uses_trip_local_clock(settings, monkeypatch) -> None:
+    from assistant import heartbeat
+    from assistant.calendar import context as calendar_context
+    from assistant.trips import store as trips_store
+
+    traveling = settings.model_copy(
+        update={
+            "timezone": "Europe/Oslo",
+            "enable_trips": True,
+            "enable_heartbeat": True,
+            "quiet_hours_default": "22:00-01:00",
+        }
+    )
+    trips_store.create_trip(
+        traveling, "New York", start="2026-03-07", end="2026-03-08",
+        timezone="America/New_York",
+    )
+    instant = datetime(2026, 3, 8, 4, 0, tzinfo=UTC)  # 23:00 EST, but 05:00 in Oslo
+    real_datetime = datetime
+
+    class FrozenDateTime(real_datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return instant.astimezone(tz) if tz is not None else instant.replace(tzinfo=None)
+
+    monkeypatch.setattr(calendar_context, "datetime", FrozenDateTime)
+    assert heartbeat.gather_situation(traveling) is None
+
+    # The same held work is eligible on the first wake at the destination-local
+    # end boundary (01:00 EST), without changing the trip or home configuration.
+    released = datetime(2026, 3, 8, 6, 0, tzinfo=UTC)
+    instant = released
+    assert heartbeat.gather_situation(traveling) is not None
 
 
 def test_in_quiet_hours_without_notes_or_default_is_false(settings) -> None:

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -18,6 +18,8 @@ from assistant.calendar import context, ops, recurrence, store, undo
 from assistant.config import Settings
 from assistant.ops_parse import parse_ops
 from assistant.people import store as people_store
+from assistant.timeutil import normalize_stamp
+from assistant.trips import store as trips_store
 
 
 @pytest.fixture
@@ -38,6 +40,17 @@ def _past_monday(settings: Settings, weeks_ago: int = 3, hour: int = 9):
     current = context.now(settings)
     monday = current - timedelta(days=current.weekday(), weeks=weeks_ago)
     return monday.replace(hour=hour, minute=0, second=0, microsecond=0)
+
+
+def _freeze_absolute(monkeypatch, instant: datetime) -> None:
+    real_datetime = datetime
+
+    class FrozenDateTime(real_datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return instant.astimezone(tz) if tz is not None else instant.replace(tzinfo=None)
+
+    monkeypatch.setattr(context, "datetime", FrozenDateTime)
 
 
 # --- store ---------------------------------------------------------------- #
@@ -137,6 +150,65 @@ def test_format_when(settings) -> None:
     assert context.format_when(settings, "2026-07-08T23:00:00+00:00") == "Thu 09 Jul 2026 01:00"
     assert "2026-07-08T23:00:00" not in context.format_when(settings, "2026-07-08T23:00:00+00:00")
     assert context.format_when(settings, "not-a-date") == "not-a-date"
+
+
+@pytest.mark.parametrize(
+    ("instant", "event_time", "expected"),
+    [
+        (datetime(2026, 3, 8, 6, 30, tzinfo=UTC), "2026-03-08T06:30:00+00:00", "01:30"),
+        (datetime(2026, 3, 8, 7, 30, tzinfo=UTC), "2026-03-08T07:30:00+00:00", "03:30"),
+    ],
+)
+def test_trip_event_rendering_tracks_destination_dst(
+    settings, monkeypatch, instant, event_time, expected
+) -> None:
+    traveling = settings.model_copy(update={"enable_trips": True})
+    trips_store.create_trip(
+        traveling, "New York", start="2026-03-08", end="2026-03-08",
+        timezone="America/New_York",
+    )
+    _freeze_absolute(monkeypatch, instant)
+
+    assert expected in context.format_when(traveling, event_time)
+    assert context.now(traveling).tzname() in {"EST", "EDT"}
+
+
+def test_naive_schedule_uses_post_transition_trip_offset(settings, monkeypatch) -> None:
+    traveling = settings.model_copy(update={"enable_trips": True})
+    trips_store.create_trip(
+        traveling, "New York", start="2026-03-08", end="2026-03-08",
+        timezone="America/New_York",
+    )
+    _freeze_absolute(monkeypatch, datetime(2026, 3, 8, 16, tzinfo=UTC))
+
+    assert normalize_stamp(traveling, "2026-03-08T15:00:00").endswith("-04:00")
+
+
+def test_trip_recurrence_keeps_destination_wall_time_across_dst(settings, monkeypatch) -> None:
+    traveling = settings.model_copy(update={"enable_trips": True})
+    trips_store.create_trip(
+        traveling, "New York", start="2026-03-07", end="2026-03-10",
+        timezone="America/New_York",
+    )
+    _freeze_absolute(monkeypatch, datetime(2026, 3, 7, 15, tzinfo=UTC))
+    store.create_event(
+        traveling,
+        title="Breakfast",
+        start="2026-03-07T09:00:00-05:00",
+        rrule="FREQ=DAILY",
+    )
+
+    occurrences = recurrence.occurrences_in(
+        traveling,
+        datetime(2026, 3, 7, tzinfo=UTC),
+        datetime(2026, 3, 10, tzinfo=UTC),
+    )
+    local = [store.parse_dt(item.start).astimezone(context.resolve_tz(traveling)) for item in occurrences]
+    assert [(item.hour, item.utcoffset()) for item in local] == [
+        (9, timedelta(hours=-5)),
+        (9, timedelta(hours=-4)),
+        (9, timedelta(hours=-4)),
+    ]
 
 
 def test_apply_op_summary_human_dates(settings) -> None:

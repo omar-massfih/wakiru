@@ -8,7 +8,7 @@ them to the heartbeat's situation report (delivery lives in test_heartbeat.py
 
 from __future__ import annotations
 
-from datetime import UTC, timedelta
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -16,6 +16,7 @@ from assistant import fired_ledger
 from assistant.calendar import context, reminders, store
 from assistant.config import Settings
 from assistant.reminder_windows import START_GRACE, next_band_change
+from assistant.trips import store as trips_store
 
 
 @pytest.fixture
@@ -41,6 +42,17 @@ def _ledger_rows(settings: Settings) -> list[dict]:
         return [dict(r) for r in conn.execute("SELECT * FROM reminders_fired").fetchall()]
 
 
+def _freeze_absolute(monkeypatch, instant: datetime) -> None:
+    real_datetime = datetime
+
+    class FrozenDateTime(real_datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return instant.astimezone(tz) if tz is not None else instant.replace(tzinfo=None)
+
+    monkeypatch.setattr(context, "datetime", FrozenDateTime)
+
+
 # --- due computation ------------------------------------------------------ #
 
 
@@ -53,6 +65,40 @@ def test_surfaces_within_lead(settings) -> None:
     assert "Dentist" in surfaced[0]["message"]
     assert "30 min" in surfaced[0]["message"]
     assert surfaced[0]["lead_minutes"] == 60
+
+
+def test_trip_reminder_claims_absolute_window_and_uses_dst_clock(
+    settings, monkeypatch
+) -> None:
+    traveling = settings.model_copy(update={"enable_trips": True})
+    trips_store.create_trip(
+        traveling, "New York", start="2026-03-08", end="2026-03-08",
+        timezone="America/New_York",
+    )
+    _freeze_absolute(monkeypatch, datetime(2026, 3, 8, 6, 30, tzinfo=UTC))
+    store.create_event(
+        traveling, title="DST breakfast", start="2026-03-08T07:00:00+00:00"
+    )
+
+    surfaced = reminders.surface_due(traveling)
+    assert len(surfaced) == 1
+    assert "03:00" in surfaced[0]["message"]
+    assert "30 min" in surfaced[0]["message"]
+
+
+def test_timezone_less_trip_preserves_home_reminder_clock(settings, monkeypatch) -> None:
+    traveling = settings.model_copy(update={"enable_trips": True})
+    trips_store.create_trip(
+        traveling, "Bergen", start="2026-03-08", end="2026-03-08", timezone=""
+    )
+    _freeze_absolute(monkeypatch, datetime(2026, 3, 8, 6, 30, tzinfo=UTC))
+    store.create_event(
+        traveling, title="Home breakfast", start="2026-03-08T07:00:00+00:00"
+    )
+
+    surfaced = reminders.surface_due(traveling)
+    assert len(surfaced) == 1
+    assert "08:00" in surfaced[0]["message"]
 
 
 def test_event_outside_lead_not_surfaced(settings) -> None:
