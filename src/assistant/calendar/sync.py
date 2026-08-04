@@ -44,7 +44,7 @@ _MAX_FEED_BYTES = 10_000_000
 # Fields that participate in change detection between pulls.
 _MIRRORED_FIELDS = (
     "title", "start", "end", "location", "notes", "rrule", "exdates",
-    "overrides", "organizer", "attendees",
+    "overrides", "organizer", "attendees", "availability",
 )
 
 
@@ -104,6 +104,11 @@ def _iso(value: object, settings: Settings) -> str:
 def _text(component, key: str) -> str:
     value = component.get(key)
     return str(value).strip() if value is not None else ""
+
+
+def _availability(component) -> str:
+    """Map RFC 5545 TRANSP to provider-neutral availability."""
+    return "free" if _text(component, "transp").upper() == "TRANSPARENT" else "busy"
 
 
 def _rrule(component) -> str:
@@ -220,10 +225,13 @@ def parse_vevents(text: str, settings: Settings) -> dict[str, store.Event]:
                 fields["organizer"] = organizer
             if component.get("attendee") is not None:
                 fields["attendees"] = attendees
+            if component.get("transp") is not None:
+                fields["availability"] = _availability(component)
             overrides.append((uid, recurrence_id, fields))
             continue
         fields["organizer"] = organizer
         fields["attendees"] = attendees
+        fields["availability"] = _availability(component)
         exdates = _exdates(component, settings)
         events[uid] = store.Event(
             id="",

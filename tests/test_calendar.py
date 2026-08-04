@@ -79,6 +79,38 @@ def test_event_attendees_create_and_update_roundtrip(settings) -> None:
     assert store.update_event(settings, event.id, attendees="").attendees == ""
 
 
+def test_event_availability_roundtrip_update_and_restore(settings) -> None:
+    event = store.create_event(
+        settings, title="Focus", start=_iso_in(settings, days=1), availability=" FREE "
+    )
+    assert event.availability == "free"
+    snapshot = store.get_event(settings, event.id)
+    assert store.update_event(settings, event.id, availability="busy").availability == "busy"
+    assert store.restore_event(settings, snapshot).availability == "free"
+    assert store.get_event(settings, event.id).availability == "free"
+
+
+def test_legacy_sqlite_rows_migrate_as_busy(settings) -> None:
+    from pathlib import Path
+
+    path = Path(settings.calendar_db_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "CREATE TABLE events (id TEXT PRIMARY KEY, title TEXT NOT NULL, "
+            "start TEXT NOT NULL, end TEXT DEFAULT '', location TEXT DEFAULT '', "
+            "notes TEXT DEFAULT '', created TEXT DEFAULT '', updated TEXT DEFAULT '')"
+        )
+        conn.execute(
+            "INSERT INTO events (id, title, start) VALUES (?, ?, ?)",
+            ("legacy", "Old", _iso_in(settings, days=1)),
+        )
+    assert store.get_event(settings, "legacy").availability == "busy"
+    with sqlite3.connect(path) as conn:
+        column = next(row for row in conn.execute("PRAGMA table_info(events)") if row[1] == "availability")
+    assert column[3] == 1 and column[4] == "'busy'"
+
+
 def test_list_events_orders_and_bounds(settings) -> None:
     store.create_event(settings, title="Later", start=_iso_in(settings, days=3))
     store.create_event(settings, title="Sooner", start=_iso_in(settings, days=1))
@@ -931,6 +963,53 @@ def test_busy_events_finds_overlap(settings) -> None:
     q_end = q_start + timedelta(hours=1)
     busy = context.busy_events(settings, q_start, q_end)
     assert [e.title for e in busy] == ["Meeting"]
+
+
+def test_free_events_stay_in_agenda_but_do_not_block(settings) -> None:
+    start = _iso_in(settings, days=1)
+    event = store.create_event(settings, "Hold", start=start, availability="free")
+    q_start = store.parse_dt(start)
+    assert context.busy_events(settings, q_start, q_start + timedelta(hours=1)) == []
+    slots = context.free_slots(
+        settings, q_start, q_start + timedelta(hours=1), timedelta(hours=1),
+        earliest_hour=0, latest_hour=24,
+    )
+    assert slots == [(q_start, q_start + timedelta(hours=1))]
+    assert "Hold (free)" in context.agenda_context(settings)
+    busy = store.create_event(settings, "Meeting", start=start)
+    assert context.overlapping_events(settings, busy, ignore_id=busy.id) == []
+    assert context.overlapping_events(settings, event, ignore_id=event.id) == []
+
+
+def test_free_op_has_no_conflict_and_invalid_availability_does_not_mutate(settings) -> None:
+    start = _iso_in(settings, days=1)
+    store.create_event(settings, "Meeting", start=start)
+    summary = ops.apply_op(
+        settings, {"op": "create", "title": "FYI", "start": start, "availability": "free"}
+    )
+    assert summary is not None and "conflicts" not in summary
+    event = store.find_event(settings, "FYI")
+    before = event.updated
+    result = ops.apply_op(
+        settings, {"op": "reschedule", "id": event.id, "availability": "tentative"}
+    )
+    assert result == "Availability must be busy or free."
+    assert store.get_event(settings, event.id).updated == before
+
+
+def test_recurring_availability_inherits_and_can_be_overridden(settings) -> None:
+    start = _tomorrow_at(settings, 9)
+    master = store.create_event(
+        settings, "Open office", start=start.isoformat(), rrule="FREQ=DAILY",
+        availability="free",
+    )
+    occurrence = (start + timedelta(days=1)).isoformat()
+    store.set_override(settings, master.id, occurrence, {"availability": "busy"})
+    expanded = recurrence.expand(
+        store.get_event(settings, master.id), start, start + timedelta(days=2),
+        context.resolve_tz(settings),
+    )
+    assert [event.availability for event in expanded] == ["free", "busy", "free"]
 
 
 def test_busy_events_free_slot_is_empty(settings) -> None:

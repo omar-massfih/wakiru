@@ -250,6 +250,12 @@ def apply_op(
     ambiguous-match message for the model to act on, or ``None`` (nothing
     found/nothing to do)."""
     kind = op["op"]
+    if "availability" in op:
+        availability = str(op["availability"] or "").strip().lower()
+        if availability not in ("busy", "free"):
+            return "Availability must be busy or free."
+    else:
+        availability = None
     if kind == "respond":
         return _apply_invitation_response(settings, op, thread_id, batch_id)
 
@@ -272,6 +278,7 @@ def apply_op(
             notes=str(op.get("notes", "") or ""),
             rrule=rrule,
             attendees=store.dump_attendees(attendees),
+            availability=availability or "busy",
         )
         suffix = f" ({recurrence.humanize_rrule(event.rrule)})" if event.rrule else ""
         summary = f"created: {event.title} @ {format_when(settings, event.start)}{suffix}"
@@ -304,6 +311,7 @@ def apply_op(
             location=op.get("location"),
             notes=op.get("notes"),
             attendees=attendee_update,
+            availability=availability,
         )
         if revised is None:
             return None

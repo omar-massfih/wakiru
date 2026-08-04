@@ -165,6 +165,10 @@ def _utc_basic(value: str) -> str:
 
 def _to_body(settings: Settings, event: store.Event) -> dict:
     body: dict = {"summary": event.title, "colorId": _color_id(event.id)}
+    body["transparency"] = (
+        "transparent" if store.normalize_availability(event.availability) == "free"
+        else "opaque"
+    )
     body["start"] = _iso_to_gtime(event.start)
     end = event.end
     if not end:
@@ -245,6 +249,10 @@ def _from_google(g: dict, settings: Settings) -> store.Event:
         notes=str(g.get("description") or ""),
         organizer=organizer,
         attendees=attendees,
+        availability=(
+            "free" if str(g.get("transparency") or "").lower() == "transparent"
+            else "busy"
+        ),
         caldav_href=str(g["id"]),
         caldav_etag=str(g.get("etag") or ""),
     )
@@ -311,6 +319,11 @@ def list_events(settings: Settings) -> list[store.Event]:
             fields["organizer"] = organizer
         if "attendees" in g:
             fields["attendees"] = attendees
+        if "transparency" in g:
+            fields["availability"] = (
+                "free" if str(g.get("transparency") or "").lower() == "transparent"
+                else "busy"
+            )
         overrides[occurrence] = {
             k: v for k, v in fields.items()
             if v or k in ("organizer", "attendees")

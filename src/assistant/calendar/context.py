@@ -134,6 +134,8 @@ def _render_event(event: Event, settings: Settings, with_id: bool) -> str:
     when = format_when(settings, event.start)
     tz = resolve_tz(settings)
     line = f"- {when} — {event.title}"
+    if event.availability == "free":
+        line += " (free)"
     if event.location:
         line += f" @ {event.location}"
     end = store.parse_dt(event.end)
@@ -209,6 +211,8 @@ def busy_events(settings: Settings, start: datetime, end: datetime) -> list[Even
     pad = timedelta(days=1)
     busy: list[Event] = []
     for event in recurrence.occurrences_in(settings, start - pad, end + pad):
+        if event.availability == "free":
+            continue
         interval = event_interval(settings, event)
         if interval is None:
             continue
@@ -280,6 +284,8 @@ def overlapping_events(
     """Existing events that overlap ``event``'s time span. ``ignore_id`` excludes
     a given event id (and all its recurring occurrences) — pass the event's own id
     when checking an already-stored event so it doesn't conflict with itself."""
+    if event.availability == "free":
+        return []
     interval = event_interval(settings, event)
     if interval is None:
         return []

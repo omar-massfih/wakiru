@@ -19,6 +19,16 @@ def _attendee_params(props: dict[str, tuple[str, str]], required: list[str]) -> 
     return schema
 
 
+def _availability_params(schema: dict, *, create: bool) -> dict:
+    default = "Defaults to busy." if create else "Omit to preserve the existing value."
+    schema["properties"]["availability"] = {
+        "type": "string",
+        "enum": ["busy", "free"],
+        "description": f"Whether this event blocks calendar time. {default}",
+    }
+    return schema
+
+
 def _calendar_op(ctx: ToolContext, op: dict) -> str:
     from ..calendar import ops as calendar_ops
 
@@ -96,7 +106,7 @@ def _calendar_tools() -> list[ToolSpec]:
         ToolSpec(
             "create_event",
             "Schedule a new calendar event.",
-            _attendee_params(
+            _availability_params(_attendee_params(
                 {
                     "title": ("string", "Short event title"),
                     "start": ("string", _ISO),
@@ -106,13 +116,13 @@ def _calendar_tools() -> list[ToolSpec]:
                     "rrule": ("string", "RFC 5545 RRULE for a repeating event"),
                 },
                 ["title", "start"],
-            ),
+            ), create=True),
             _op_runner(_calendar_op, "create"),
         ),
         ToolSpec(
             "reschedule_event",
             "Change an existing event's time or details (whole series if recurring).",
-            _attendee_params(
+            _availability_params(_attendee_params(
                 {
                     "id": ("string", "Exact event id from Upcoming events"),
                     "start": ("string", _ISO),
@@ -122,7 +132,7 @@ def _calendar_tools() -> list[ToolSpec]:
                     "notes": ("string", "New notes"),
                 },
                 ["id"],
-            ),
+            ), create=False),
             _op_runner(_calendar_op, "reschedule"),
         ),
         ToolSpec(

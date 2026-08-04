@@ -67,11 +67,33 @@ def test_pull_mirrors_events(settings, monkeypatch) -> None:
     )
     result = sync.pull_feed(settings, FEED_URL)
     assert result["added"] == 2 and result["removed"] == 0
-
     events = store.list_events(settings)
     assert {e.title for e in events} == {"Dentist", "Standup"}
     assert all(sync.is_synced_id(e.id) for e in events)
 
+
+def test_transp_import_and_recurrence_inheritance(settings) -> None:
+    text = _ics(
+        _vevent(
+            "series", "Open office", "20260715T090000Z",
+            extra="RRULE:FREQ=DAILY\r\nTRANSP:TRANSPARENT\r\n",
+        )
+        + _vevent(
+            "series", "Busy exception", "20260716T090000Z",
+            extra="RECURRENCE-ID:20260716T090000Z\r\nTRANSP:OPAQUE\r\n",
+        )
+    )
+    event = sync.parse_vevents(text, settings)["series"]
+    assert event.availability == "free"
+    change = next(iter(store.load_overrides(event).values()))
+    assert change["availability"] == "busy"
+    occurrences = recurrence.expand(
+        event,
+        datetime(2026, 7, 15, tzinfo=ZoneInfo("UTC")),
+        datetime(2026, 7, 17, 23, 59, tzinfo=ZoneInfo("UTC")),
+        ZoneInfo("UTC"),
+    )
+    assert [item.availability for item in occurrences] == ["free", "busy", "free"]
 
 def test_pull_retains_participants_and_detects_metadata_changes(settings, monkeypatch) -> None:
     extra = (

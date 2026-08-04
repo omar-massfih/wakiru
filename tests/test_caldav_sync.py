@@ -486,6 +486,26 @@ def test_recurring_round_trip(settings) -> None:
     assert store.load_attendees(master)[0]["email"] == "regular@example.com"
 
 
+def test_availability_round_trip_and_override_inheritance(settings) -> None:
+    event = store.Event(
+        id="open", title="Open office", start="2026-12-07T09:00:00+01:00",
+        rrule="FREQ=WEEKLY;BYDAY=MO", availability="free",
+        overrides=json.dumps({
+            "2026-12-14T09:00:00+01:00": {"title": "Inherited"},
+            "2026-12-21T09:00:00+01:00": {"availability": "busy"},
+        }),
+    )
+    ical = caldav.event_to_ical(settings, event)
+    assert ical.count("TRANSP:TRANSPARENT") == 2
+    assert ical.count("TRANSP:OPAQUE") == 1
+    reparsed = next(iter(sync.parse_vevents(ical, settings).values()))
+    assert reparsed.availability == "free"
+    assert sorted(
+        change.get("availability", "free")
+        for change in store.load_overrides(reparsed).values()
+    ) == ["busy", "free"]
+
+
 def test_recurring_override_inherits_participants_on_caldav_round_trip(settings) -> None:
     event = store.Event(
         id="clear-participants", title="Weekly", start="2026-12-07T09:00:00+01:00",

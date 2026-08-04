@@ -174,6 +174,7 @@ def test_postgres_connect_pools_and_schema_runs_once(monkeypatch: pytest.MonkeyP
     assert "ADD COLUMN IF NOT EXISTS email TEXT NOT NULL DEFAULT ''" in sql
     assert "ADD COLUMN IF NOT EXISTS organizer TEXT NOT NULL DEFAULT ''" in sql
     assert "ADD COLUMN IF NOT EXISTS attendees TEXT NOT NULL DEFAULT ''" in sql
+    assert "ADD COLUMN IF NOT EXISTS availability TEXT NOT NULL DEFAULT 'busy'" in sql
 
 
 def test_postgres_calendar_and_task_stores_delegate(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -208,7 +209,7 @@ def test_postgres_calendar_and_task_stores_delegate(monkeypatch: pytest.MonkeyPa
     assert calendar_store.list_events(settings) == [event]
     assert calendar_store.update_event(settings, "e1", title="New", attendees="") == event
     assert calendar_calls == [
-        ("create", "Dentist", event.start, "", "", "", "", attendees),
+        ("create", "Dentist", event.start, "", "", "", "", attendees, "busy"),
         ("update", "e1", {"title": "New", "attendees": ""}),
     ]
     assert task_store.create_task(settings, "Pay bill") == task
@@ -239,9 +240,11 @@ def test_postgres_calendar_create_sql_includes_attendees(monkeypatch: pytest.Mon
     )
 
     sql, params = captured[0]
-    assert "rrule, attendees, created" in sql
+    assert "rrule, attendees, availability, created" in sql
     assert params[7] == attendees
+    assert params[8] == "busy"
     assert event.attendees == attendees
+    assert event.availability == "busy"
 
 
 def test_postgres_undo_ledgers_delegate(monkeypatch: pytest.MonkeyPatch) -> None:
