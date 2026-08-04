@@ -181,6 +181,9 @@ def expand(
                 notes=change.get("notes") or item.notes,
                 organizer=change.get("organizer", item.organizer),
                 attendees=change.get("attendees", item.attendees),
+                availability=store.normalize_availability(
+                    change.get("availability", item.availability)
+                ),
             )
         occurrences.append(item)
     return occurrences

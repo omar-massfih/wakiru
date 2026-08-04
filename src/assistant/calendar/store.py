@@ -28,7 +28,7 @@ from ..timeutil import stamp_now as _stamp_now
 # Columns a caller may set on create/update (id + timestamps are managed here).
 _FIELDS = (
     "title", "start", "end", "location", "notes", "rrule", "exdates", "overrides",
-    "attendees",
+    "attendees", "availability",
 )
 
 # Columns added after the table's first release, migrated in on connect (see
@@ -78,6 +78,12 @@ class Event:
     updated: str = ""
     organizer: str = ""
     attendees: str = ""
+    availability: str = "busy"
+
+
+def normalize_availability(value: object) -> str:
+    """Canonical provider-neutral availability (legacy/unknown values are busy)."""
+    return "free" if str(value or "").strip().lower() == "free" else "busy"
 
 
 def _open(settings: Settings) -> sqlite3.Connection:
@@ -88,10 +94,16 @@ def _open(settings: Settings) -> sqlite3.Connection:
         " end TEXT DEFAULT '', location TEXT DEFAULT '', notes TEXT DEFAULT '',"
         " rrule TEXT DEFAULT '', exdates TEXT DEFAULT '', overrides TEXT DEFAULT '',"
         " organizer TEXT DEFAULT '', attendees TEXT DEFAULT '',"
+        " availability TEXT NOT NULL DEFAULT 'busy',"
         " caldav_href TEXT DEFAULT '', caldav_etag TEXT DEFAULT '',"
         " created TEXT DEFAULT '', updated TEXT DEFAULT '')"
     )
     ensure_columns(conn, "events", _ADDED_COLUMNS)
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(events)")}
+    if "availability" not in columns:
+        conn.execute(
+            "ALTER TABLE events ADD COLUMN availability TEXT NOT NULL DEFAULT 'busy'"
+        )
     return conn
 
 
@@ -113,6 +125,7 @@ def _row_to_event(row: sqlite3.Row) -> Event:
         overrides=row["overrides"] or "",
         organizer=row["organizer"] or "",
         attendees=row["attendees"] or "",
+        availability=normalize_availability(row["availability"]),
         caldav_href=row["caldav_href"] or "",
         caldav_etag=row["caldav_etag"] or "",
         created=row["created"] or "",
@@ -154,11 +167,12 @@ def create_event(
     notes: str = "",
     rrule: str = "",
     attendees: str = "",
+    availability: str = "busy",
 ) -> Event:
     """Insert a new event and return it (with a generated id and timestamps)."""
     if storage_postgres := postgres_backend(settings):
         return storage_postgres.create_event(
-            settings, title, start, end, location, notes, rrule, attendees
+            settings, title, start, end, location, notes, rrule, attendees, availability
         )
     now = _stamp_now(settings)
     event = Event(
@@ -170,17 +184,20 @@ def create_event(
         notes=notes.strip(),
         rrule=rrule.strip(),
         attendees=attendees.strip(),
+        availability=normalize_availability(availability),
         created=now,
         updated=now,
     )
     with _connect(settings) as conn:
         conn.execute(
             "INSERT INTO events"
-            " (id, title, start, end, location, notes, rrule, attendees, created, updated)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " (id, title, start, end, location, notes, rrule, attendees, availability,"
+            " created, updated)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 event.id, event.title, event.start, event.end,
                 event.location, event.notes, event.rrule, event.attendees,
+                event.availability,
                 event.created, event.updated,
             ),
         )
@@ -246,6 +263,8 @@ def update_event(settings: Settings, event_id: str, **fields: str | None) -> Eve
     for key in ("start", "end"):
         if key in updates:
             updates[key] = _normalize_stamp(settings, updates[key])
+    if "availability" in updates:
+        updates["availability"] = normalize_availability(updates["availability"])
     existing = get_event(settings, event_id)
     if existing is None:
         return None
@@ -273,16 +292,18 @@ def restore_event(settings: Settings, event: Event) -> Event:
     """
     if storage_postgres := postgres_backend(settings):
         return storage_postgres.restore_event(settings, event)
+    event.availability = normalize_availability(event.availability)
     with _connect(settings) as conn:
         conn.execute(
             "INSERT OR REPLACE INTO events"
             " (id, title, start, end, location, notes, rrule, exdates, overrides,"
-            " organizer, attendees, caldav_href, caldav_etag, created, updated)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " organizer, attendees, availability, caldav_href, caldav_etag, created, updated)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 event.id, event.title, event.start, event.end, event.location,
                 event.notes, event.rrule, event.exdates, event.overrides,
                 event.organizer, event.attendees,
+                normalize_availability(event.availability),
                 event.caldav_href, event.caldav_etag, event.created, event.updated,
             ),
         )

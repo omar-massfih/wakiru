@@ -422,6 +422,30 @@ def test_calendar_tools_expose_and_dispatch_attendees(settings) -> None:
     assert calendar_store.load_attendees(calendar_store.get_event(settings, event.id)) == []
 
 
+def test_calendar_tools_expose_and_dispatch_availability(settings) -> None:
+    tools = tool_map(settings)
+    for name in ("create_event", "reschedule_event"):
+        assert tools[name].parameters["properties"]["availability"]["enum"] == [
+            "busy", "free",
+        ]
+
+    execute_tool(
+        tools["create_event"], _ctx(settings),
+        {"title": "Focus", "start": _iso_in(settings, days=2), "availability": "free"},
+    )
+    event = calendar_store.find_event(settings, "Focus")
+    assert event.availability == "free"
+    execute_tool(
+        tools["reschedule_event"], _ctx(settings), {"id": event.id, "title": "Focus time"}
+    )
+    assert calendar_store.get_event(settings, event.id).availability == "free"
+    execute_tool(
+        tools["reschedule_event"], _ctx(settings),
+        {"id": event.id, "availability": "busy"},
+    )
+    assert calendar_store.get_event(settings, event.id).availability == "busy"
+
+
 def test_invitation_response_tool_schema_dispatch_and_heartbeat_gate(settings, monkeypatch) -> None:
     writable = settings.model_copy(update={
         "enable_caldav": True, "enable_caldav_write": True,

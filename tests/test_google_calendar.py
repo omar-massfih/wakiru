@@ -81,6 +81,23 @@ def test_provider_selected(settings) -> None:
     assert remote.is_google(settings) and remote.is_configured(settings)
 
 
+def test_google_availability_mapping_and_payload(settings) -> None:
+    free = google_calendar._from_google(
+        {"id": "free", "summary": "Open", "transparency": "transparent",
+         "start": {"dateTime": "2026-12-01T09:00:00+01:00"}},
+        settings,
+    )
+    assert free.availability == "free"
+    assert google_calendar._to_body(settings, free)["transparency"] == "transparent"
+    busy = google_calendar._from_google(
+        {"id": "busy", "summary": "Meeting",
+         "start": {"dateTime": "2026-12-01T10:00:00+01:00"}},
+        settings,
+    )
+    assert busy.availability == "busy"
+    assert google_calendar._to_body(settings, busy)["transparency"] == "opaque"
+
+
 def test_pull_maps_google_events(settings, gserver) -> None:
     gserver.list_items = [
         {"id": "aaa", "summary": "Dentist",

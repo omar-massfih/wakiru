@@ -127,6 +127,17 @@ def test_undo_latest_reverts_reschedule(settings) -> None:
     assert store.get_event(settings, event_id).start == start
 
 
+@pytest.mark.parametrize(("before", "after"), [("free", "busy"), ("busy", "free")])
+def test_undo_latest_restores_availability(settings, before, after) -> None:
+    event = store.create_event(
+        settings, title="Focus", start=_iso_in(settings, days=2), availability=before
+    )
+    _apply(settings, [{"op": "reschedule", "id": event.id, "availability": after}])
+    assert store.get_event(settings, event.id).availability == after
+    assert undo.undo_latest(settings, THREAD, 15).startswith("Undone:")
+    assert store.get_event(settings, event.id).availability == before
+
+
 def test_undo_latest_restores_attendee_metadata(settings) -> None:
     original = store.dump_attendees([{
         "email": "guest@example.com", "name": "Guest", "status": "tentative",

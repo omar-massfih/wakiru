@@ -127,12 +127,13 @@ def test_tool_schemas_stay_small() -> None:
     # reminder guidance in add_task / schedule_followup, from 14k for
     # save_note, and from 15k once the heartbeat became default-on and its
     # tools — schedule_followup, the goal/watch verbs, set_next_wake — ride
-    # in every chat turn's registry.)
+        # in every chat turn's registry, and from 22k when busy/free availability
+        # was added to both calendar write tools.)
     schemas = [
         s.to_openai_tool()
         for s in available_tools(Settings(enable_email=True, enable_email_send=True))
     ]
-    assert len(json.dumps(schemas)) < 22_000
+    assert len(json.dumps(schemas)) < 22_500
 
 
 # --- streaming hold-and-flush -------------------------------------------------- #

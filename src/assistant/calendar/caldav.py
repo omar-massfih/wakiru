@@ -299,6 +299,8 @@ def _build_vevent(event: store.Event, *, recurrence_id: str | None, fields: dict
         start = event.start
 
     ve.add("summary", fields.get("title") or event.title)
+    availability = store.normalize_availability(fields.get("availability", event.availability))
+    ve.add("transp", "TRANSPARENT" if availability == "free" else "OPAQUE")
     dtstart = _as_utc(start)
     if dtstart is not None:
         ve.add("dtstart", dtstart)
