@@ -14,6 +14,7 @@ import pytest
 
 from assistant.calendar import caldav, caldav_oauth, ops, outbox, store, sync, undo
 from assistant.config import Settings
+from assistant.people import store as people_store
 
 CALDAV_URL = "https://dav.example.com/cal/"
 
@@ -178,6 +179,58 @@ def test_pull_removes_vanished_resource(settings, server) -> None:
 
 
 # --- push ----------------------------------------------------------------------
+
+
+def test_attendee_edits_push_and_clear_caldav(settings, server) -> None:
+    people_store.create_person(settings, "Kari Nord", email="kari@example.com")
+    ops.apply_op(
+        settings,
+        {
+            "op": "create", "title": "Lunch", "start": "2026-12-01T12:00:00+01:00",
+            "attendees": ["Kari Nord", "guest@example.com"],
+        },
+        "t1", "b1",
+    )
+    event = store.find_event(settings, "Lunch")
+    first = server.of_method("PUT")[-1]["body"]
+    assert 'ATTENDEE;CN="Kari Nord":MAILTO:kari@example.com' in first
+    assert "ATTENDEE:MAILTO:guest@example.com" in first
+
+    ops.apply_op(settings, {"op": "reschedule", "id": event.id, "attendees": []})
+    assert "ATTENDEE" not in server.of_method("PUT")[-1]["body"]
+    assert store.get_event(settings, event.id).attendees == ""
+
+
+def test_ambiguous_attendee_does_not_push_or_queue_caldav(settings, server) -> None:
+    people_store.create_person(settings, "Alex One", email="one@example.com")
+    people_store.create_person(settings, "Alex Two", email="two@example.com")
+    result = ops.apply_op(
+        settings,
+        {
+            "op": "create", "title": "No write", "start": "2026-12-01T12:00:00+01:00",
+            "attendees": ["Alex"],
+        },
+    )
+    assert "Ambiguous attendee" in result
+    assert server.of_method("PUT") == []
+    assert outbox.pending(settings) == []
+
+
+@pytest.mark.parametrize("address", ["a..b@example.com", "foo,bar@example.com"])
+def test_malformed_attendee_does_not_write_caldav(settings, server, address) -> None:
+    result = ops.apply_op(
+        settings,
+        {
+            "op": "create", "title": "No write", "start": "2026-12-01T12:00:00+01:00",
+            "attendees": [address],
+        },
+        "thread", "malformed-batch",
+    )
+    assert "Invalid attendee email address" in result
+    assert store.list_events(settings) == []
+    assert undo.undo_latest(settings, "thread", 60) == "Nothing to undo."
+    assert outbox.pending(settings) == []
+    assert server.of_method("PUT") == []
 
 
 def test_push_create_puts_with_if_none_match(settings, server) -> None:

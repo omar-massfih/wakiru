@@ -26,7 +26,10 @@ from ..timeutil import normalize_stamp as _normalize_stamp
 from ..timeutil import stamp_now as _stamp_now
 
 # Columns a caller may set on create/update (id + timestamps are managed here).
-_FIELDS = ("title", "start", "end", "location", "notes", "rrule", "exdates", "overrides")
+_FIELDS = (
+    "title", "start", "end", "location", "notes", "rrule", "exdates", "overrides",
+    "attendees",
+)
 
 # Columns added after the table's first release, migrated in on connect (see
 # :func:`assistant.sqlite_util.ensure_columns`). All are TEXT DEFAULT ''.
@@ -150,10 +153,13 @@ def create_event(
     location: str = "",
     notes: str = "",
     rrule: str = "",
+    attendees: str = "",
 ) -> Event:
     """Insert a new event and return it (with a generated id and timestamps)."""
     if storage_postgres := postgres_backend(settings):
-        return storage_postgres.create_event(settings, title, start, end, location, notes, rrule)
+        return storage_postgres.create_event(
+            settings, title, start, end, location, notes, rrule, attendees
+        )
     now = _stamp_now(settings)
     event = Event(
         id=uuid.uuid4().hex[:12],
@@ -163,17 +169,19 @@ def create_event(
         location=location.strip(),
         notes=notes.strip(),
         rrule=rrule.strip(),
+        attendees=attendees.strip(),
         created=now,
         updated=now,
     )
     with _connect(settings) as conn:
         conn.execute(
             "INSERT INTO events"
-            " (id, title, start, end, location, notes, rrule, created, updated)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " (id, title, start, end, location, notes, rrule, attendees, created, updated)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 event.id, event.title, event.start, event.end,
-                event.location, event.notes, event.rrule, event.created, event.updated,
+                event.location, event.notes, event.rrule, event.attendees,
+                event.created, event.updated,
             ),
         )
     return event

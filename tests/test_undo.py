@@ -127,6 +127,21 @@ def test_undo_latest_reverts_reschedule(settings) -> None:
     assert store.get_event(settings, event_id).start == start
 
 
+def test_undo_latest_restores_attendee_metadata(settings) -> None:
+    original = store.dump_attendees([{
+        "email": "guest@example.com", "name": "Guest", "status": "tentative",
+        "role": "optional", "rsvp": True,
+    }])
+    event = store.create_event(
+        settings, title="Lunch", start=_iso_in(settings, days=2), attendees=original
+    )
+    _apply(settings, [{"op": "reschedule", "id": event.id, "attendees": []}])
+    assert store.get_event(settings, event.id).attendees == ""
+
+    assert undo.undo_latest(settings, THREAD, 15).startswith("Undone:")
+    assert store.get_event(settings, event.id).attendees == original
+
+
 def test_undo_latest_reverts_cancel_by_recreating(settings) -> None:
     event = store.create_event(settings, title="Dentist", start=_iso_in(settings, days=2))
     _apply(settings, [{"op": "cancel", "id": event.id}])
