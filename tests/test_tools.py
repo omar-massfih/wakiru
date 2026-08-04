@@ -95,6 +95,155 @@ def test_email_manage_tools_and_send_reply_gating() -> None:
     assert "send_reply" in gated
 
 
+def test_email_recipient_schemas_use_string_arrays() -> None:
+    tools = tool_map(Settings(enable_email=True, enable_email_send=True))
+    for name in ("draft_email", "send_email"):
+        properties = tools[name].parameters["properties"]
+        for field in ("to", "cc"):
+            assert properties[field]["type"] == "array"
+            assert properties[field]["items"] == {"type": "string"}
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "client_name"),
+    [("draft_email", "save_draft"), ("send_email", "send_message")],
+)
+def test_email_resolves_mixed_recipients_and_deduplicates(
+    settings, monkeypatch, tool_name, client_name
+) -> None:
+    enabled = settings.model_copy(
+        update={"enable_email": True, "enable_email_send": True}
+    )
+    kari = people_store.create_person(enabled, "Kari Nord", email="KARI@example.com")
+    ola = people_store.create_person(enabled, "Ola Sør", email="ola@example.com")
+    calls: list[tuple[str, str, str, str]] = []
+
+    def record(_settings, to, subject, body, cc=""):
+        calls.append((to, subject, body, cc))
+        return "ok"
+
+    monkeypatch.setattr(f"assistant.mail.client.{client_name}", record)
+    result = execute_tool(
+        tool_map(enabled)[tool_name],
+        _ctx(enabled),
+        {
+            "to": ["FIRST@Example.com", kari.name, "first@example.com"],
+            "cc": [ola.id, "KARI@example.com", "LAST@example.com", ola.name],
+            "subject": "Hello",
+            "body": "Body",
+        },
+    )
+
+    assert result == "ok"
+    assert calls == [
+        (
+            "first@example.com, kari@example.com",
+            "Hello",
+            "Body",
+            "ola@example.com, last@example.com",
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "client_name"),
+    [("draft_email", "save_draft"), ("send_email", "send_message")],
+)
+def test_email_missing_contact_email_refuses_without_write(
+    settings, monkeypatch, tool_name, client_name
+) -> None:
+    enabled = settings.model_copy(
+        update={"enable_email": True, "enable_email_send": True}
+    )
+    person = people_store.create_person(enabled, "No Mail")
+    monkeypatch.setattr(
+        f"assistant.mail.client.{client_name}",
+        lambda *args, **kwargs: pytest.fail("must not draft or send"),
+    )
+
+    result = execute_tool(
+        tool_map(enabled)[tool_name],
+        _ctx(enabled),
+        {"to": [person.name], "subject": "Hello", "body": "Body"},
+    )
+
+    assert person.name in result and person.id in result and "has no email" in result
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "client_name"),
+    [("draft_email", "save_draft"), ("send_email", "send_message")],
+)
+def test_email_late_ambiguity_refuses_without_partial_write(
+    settings, monkeypatch, tool_name, client_name
+) -> None:
+    enabled = settings.model_copy(
+        update={"enable_email": True, "enable_email_send": True}
+    )
+    first = people_store.create_person(enabled, "Alex North", email="north@example.com")
+    second = people_store.create_person(enabled, "Alex South", email="south@example.com")
+    monkeypatch.setattr(
+        f"assistant.mail.client.{client_name}",
+        lambda *args, **kwargs: pytest.fail("must not draft or send"),
+    )
+
+    result = execute_tool(
+        tool_map(enabled)[tool_name],
+        _ctx(enabled),
+        {
+            "to": ["valid@example.com"],
+            "cc": ["also-valid@example.com", "Alex"],
+            "subject": "Hello",
+            "body": "Body",
+        },
+    )
+
+    assert "Ambiguous Cc recipient" in result
+    for person in (first, second):
+        assert person.name in result and person.id in result and person.email in result
+
+
+def test_email_legacy_address_lists_remain_accepted(settings, monkeypatch) -> None:
+    enabled = settings.model_copy(update={"enable_email": True})
+    calls: list[tuple[str, str]] = []
+
+    def record(_settings, to, _subject, _body, cc=""):
+        calls.append((to, cc))
+        return "ok"
+
+    monkeypatch.setattr("assistant.mail.client.save_draft", record)
+    result = execute_tool(
+        tool_map(enabled)["draft_email"],
+        _ctx(enabled),
+        {
+            "to": "FIRST@example.com, second@example.com",
+            "cc": "THIRD@example.com",
+            "subject": "Hello",
+            "body": "Body",
+        },
+    )
+    assert result == "ok"
+    assert calls == [("first@example.com, second@example.com", "third@example.com")]
+
+
+def test_email_direct_recipient_without_cc(settings, monkeypatch) -> None:
+    enabled = settings.model_copy(update={"enable_email": True})
+    calls: list[tuple[str, str]] = []
+
+    def record(_settings, to, _subject, _body, cc=""):
+        calls.append((to, cc))
+        return "ok"
+
+    monkeypatch.setattr("assistant.mail.client.save_draft", record)
+    result = execute_tool(
+        tool_map(enabled)["draft_email"],
+        _ctx(enabled),
+        {"to": ["DIRECT@Example.com"], "subject": "Hello", "body": "Body"},
+    )
+    assert result == "ok"
+    assert calls == [("direct@example.com", "")]
+
+
 def test_heartbeat_registry_never_sends_and_gates_triage() -> None:
     enabled = Settings(enable_email=True, enable_email_send=True)
     beat = {s.name for s in available_tools(enabled, mode="heartbeat")}

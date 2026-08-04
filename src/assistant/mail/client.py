@@ -337,6 +337,24 @@ def _require_address(to: str) -> str:
     return addr
 
 
+def _require_address_list(
+    value: str, *, field: str = "recipient", required: bool = True
+) -> str:
+    """Validate every address in a To/Cc value and return a bare canonical list."""
+    text = str(value or "").strip()
+    if not text:
+        if required:
+            raise ValueError(f"{field} must contain at least one email address")
+        return ""
+    parsed = getaddresses([text])
+    if not parsed:
+        raise ValueError(f"{field} must contain at least one email address")
+    addresses = [_require_address(address).lower() for _, address in parsed]
+    if required and not addresses:
+        raise ValueError(f"{field} must contain at least one email address")
+    return ", ".join(addresses)
+
+
 def _build(settings: Settings, to: str, subject: str, body: str, cc: str = "") -> EmailMessage:
     message = EmailMessage()
     message["From"] = settings.email_address
@@ -386,15 +404,16 @@ def save_draft(settings: Settings, to: str, subject: str, body: str, cc: str = "
 
     Returns a short confirmation summary.
     """
-    _require_address(to)
-    message = _build(settings, to, subject, body, cc)
+    canonical_to = _require_address_list(to, field="To")
+    canonical_cc = _require_address_list(cc, field="Cc", required=False)
+    message = _build(settings, canonical_to, subject, body, canonical_cc)
     conn = imap_connect(settings)
     try:
         _append_draft(conn, settings, message)
     finally:
         _close(conn)
-    cc_note = f" (cc {cc.strip()})" if cc.strip() else ""
-    return f"drafted: “{subject}” to {to}{cc_note}"
+    cc_note = f" (cc {canonical_cc})" if canonical_cc else ""
+    return f"drafted: “{subject}” to {canonical_to}{cc_note}"
 
 
 def send_message(settings: Settings, to: str, subject: str, body: str, cc: str = "") -> str:
@@ -404,11 +423,12 @@ def send_message(settings: Settings, to: str, subject: str, body: str, cc: str =
     only when the user explicitly asks for it.
     """
     _require_send_enabled(settings)
-    _require_address(to)
-    message = _build(settings, to, subject, body, cc)
+    canonical_to = _require_address_list(to, field="To")
+    canonical_cc = _require_address_list(cc, field="Cc", required=False)
+    message = _build(settings, canonical_to, subject, body, canonical_cc)
     _smtp_send(settings, message)
-    cc_note = f" (cc {cc.strip()})" if cc.strip() else ""
-    return f"sent: “{subject}” to {to}{cc_note}"
+    cc_note = f" (cc {canonical_cc})" if canonical_cc else ""
+    return f"sent: “{subject}” to {canonical_to}{cc_note}"
 
 
 # --------------------------------------------------------------------------- #

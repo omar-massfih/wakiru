@@ -378,9 +378,46 @@ def test_save_draft_appends_to_drafts_folder(settings, monkeypatch) -> None:
 
 
 def test_save_draft_rejects_bad_address(settings, monkeypatch) -> None:
-    monkeypatch.setattr(client, "imap_connect", lambda s: _FakeIMAP())
+    monkeypatch.setattr(
+        client, "imap_connect", lambda s: pytest.fail("must not open IMAP")
+    )
     with pytest.raises(ValueError):
         client.save_draft(settings, "not-an-address", "Hi", "body")
+
+
+def test_save_draft_accepts_multiple_to_and_cc(settings, monkeypatch) -> None:
+    fake = _FakeIMAP()
+    monkeypatch.setattr(client, "imap_connect", lambda s: fake)
+
+    summary = client.save_draft(
+        settings,
+        "BOB@x.com, alice@x.com",
+        "Hi",
+        "body",
+        cc="CAROL@x.com, dave@x.com",
+    )
+
+    message = client.message_from_bytes(fake.appended[0][2])
+    assert message["To"] == "bob@x.com, alice@x.com"
+    assert message["Cc"] == "carol@x.com, dave@x.com"
+    assert "to bob@x.com, alice@x.com" in summary
+
+
+@pytest.mark.parametrize(
+    ("to", "cc"),
+    [
+        ("bob@x.com, broken", ""),
+        ("bob@x.com", "carol@x.com, broken"),
+    ],
+)
+def test_save_draft_rejects_invalid_address_anywhere_before_imap(
+    settings, monkeypatch, to, cc
+) -> None:
+    monkeypatch.setattr(
+        client, "imap_connect", lambda s: pytest.fail("must not open IMAP")
+    )
+    with pytest.raises(ValueError):
+        client.save_draft(settings, to, "Hi", "body", cc=cc)
 
 
 # --- send (gated independently) ---------------------------------------------- #
@@ -430,12 +467,28 @@ def test_send_sets_cc_header(settings, monkeypatch) -> None:
     enabled = settings.model_copy(update={"enable_email_send": True})
     monkeypatch.setattr(client, "_smtp_connect", lambda s: _FakeSMTP())
     summary = client.send_message(
-        enabled, "bob@x.com", "Hi", "body", cc="carol@x.com, dave@x.com"
+        enabled,
+        "BOB@x.com, alice@x.com",
+        "Hi",
+        "body",
+        cc="carol@x.com, dave@x.com",
     )
     # send_message derives envelope recipients from To + Cc, so the header alone
     # makes the copy go out.
+    assert sent[0]["To"] == "bob@x.com, alice@x.com"
     assert sent[0]["Cc"] == "carol@x.com, dave@x.com"
     assert "cc carol@x.com" in summary
+
+
+def test_send_rejects_invalid_cc_before_smtp(settings, monkeypatch) -> None:
+    enabled = settings.model_copy(update={"enable_email_send": True})
+    monkeypatch.setattr(
+        client, "_smtp_connect", lambda s: pytest.fail("must not open SMTP")
+    )
+    with pytest.raises(ValueError):
+        client.send_message(
+            enabled, "bob@x.com, alice@x.com", "Hi", "body", cc="broken"
+        )
 
 
 def test_draft_sets_cc_header(settings, monkeypatch) -> None:
