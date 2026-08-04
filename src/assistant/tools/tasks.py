@@ -1,7 +1,17 @@
 """Task tools — add/complete/update/remove over the to-do store."""
 from __future__ import annotations
 
-from ._base import _ISO, _NO_MATCH, ToolContext, ToolSpec, _op_runner, _params
+from datetime import timedelta
+
+from ._base import (
+    _ISO,
+    _NO_MATCH,
+    ToolContext,
+    ToolSpec,
+    _int_arg,
+    _op_runner,
+    _params,
+)
 
 
 def _task_op(ctx: ToolContext, op: dict) -> str:
@@ -10,14 +20,60 @@ def _task_op(ctx: ToolContext, op: dict) -> str:
     result = task_ops.apply_op(ctx.settings, op, ctx.thread_id, ctx.batch_id)
     return result or _NO_MATCH
 
+
+def _task_history(
+    ctx: ToolContext, days: object = 7, query: object = "", limit: object = 25
+) -> str:
+    from ..calendar.context import format_when, now
+    from ..tasks import store
+
+    parsed_days = _int_arg(days, 7)
+    parsed_limit = _int_arg(limit, 25)
+    if parsed_days is None or parsed_days < 1:
+        return "Tool failed: days must be a positive integer."
+    if parsed_limit is None or parsed_limit < 1:
+        return "Tool failed: limit must be a positive integer."
+    parsed_days = min(parsed_days, 3650)
+    parsed_limit = min(parsed_limit, 100)
+    current = now(ctx.settings)
+    completions = store.list_task_completions(
+        ctx.settings,
+        since=current - timedelta(days=parsed_days),
+        until=current,
+        query=str(query or ""),
+        limit=parsed_limit,
+    )
+    if not completions:
+        return "No completed tasks found."
+    lines = []
+    for item in completions:
+        line = f"- {format_when(ctx.settings, item.completed_at)} — {item.title}"
+        if item.due:
+            line += f" (occurrence due {format_when(ctx.settings, item.due)})"
+        if item.rrule:
+            line += " (recurring)"
+        line += f"  [task id: {item.task_id}]"
+        lines.append(line)
+    return "Completed tasks:\n" + "\n".join(lines)
+
 def _task_tools() -> list[ToolSpec]:
     return [
         ToolSpec(
+            "task_history",
+            "List completed task occurrences.",
+            _params(
+                {
+                    "days": ("integer", "Lookback days; default 7"),
+                    "query": ("string", "Title text or task id"),
+                    "limit": ("integer", "Result cap; default 25, max 100"),
+                },
+                [],
+            ),
+            _task_history,
+        ),
+        ToolSpec(
             "add_task",
-            "Add a to-do, optionally with a due time. Not a meeting with other "
-            "people (use the calendar for those) — but a plain \"remind me at "
-            "TIME that X\" IS this: add it with that due time, called "
-            "immediately, not schedule_followup.",
+            "Add a to-do, optionally with a due time. Use the calendar for meetings.",
             _params(
                 {
                     "title": ("string", "Short task title"),
@@ -41,8 +97,7 @@ def _task_tools() -> list[ToolSpec]:
         ),
         ToolSpec(
             "complete_task",
-            "Mark a task done (also stops its reminder nagging). A recurring "
-            "task rolls to its next due instead of closing.",
+            "Complete a task; recurring tasks roll to their next due.",
             _params({"id": ("string", "Exact task id from Open tasks")}, ["id"]),
             _op_runner(_task_op, "complete"),
         ),

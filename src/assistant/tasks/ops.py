@@ -14,6 +14,8 @@ logged to the undo ledger under the turn's batch.
 
 from __future__ import annotations
 
+import uuid
+
 from .. import write_ops
 from ..calendar import recurrence
 from ..config import Settings
@@ -80,8 +82,17 @@ def _log_write(
     op: str,
     summary: str,
     before: store.Task | None,
+    completion_id: str | None = None,
 ) -> None:
-    write_ops.log_write(_SPEC, settings, thread_id, batch_id, task_id, op, summary, before)
+    if completion_id:
+        undo.record_write(
+            settings, thread_id, batch_id, task_id, op, summary, before,
+            completion_id,
+        )
+    else:
+        write_ops.log_write(
+            _SPEC, settings, thread_id, batch_id, task_id, op, summary, before
+        )
 
 
 def apply_op(
@@ -126,9 +137,16 @@ def apply_op(
             # A doubled complete in one turn would roll the due forward twice,
             # silently skipping an occurrence — treat it as the duplicate it is.
             return f"already completed this turn: {before.title}"
-        done = store.complete_task(settings, target)
+        completion_id = (
+            f"request:{batch_id}:{target}" if batch_id else f"request:{uuid.uuid4().hex}"
+        )
+        done, applied = store.complete_task_occurrence(
+            settings, target, completion_id
+        )
         if done is None:
             return None
+        if not applied:
+            return f"already completed: {done.title}"
         if not done.done:
             # Recurring task rolled forward instead of closing.
             from ..calendar.context import format_when
@@ -136,7 +154,10 @@ def apply_op(
             summary = f"completed: {done.title} (recurs — next due {format_when(settings, done.due)})"
         else:
             summary = f"completed: {done.title}"
-        _log_write(settings, thread_id, batch_id, target, "complete", summary, before)
+        _log_write(
+            settings, thread_id, batch_id, target, "complete", summary, before,
+            completion_id,
+        )
         return summary
 
     if kind == "update":

@@ -17,6 +17,7 @@ import sqlite3
 import uuid
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
+from datetime import datetime
 
 from ..calendar.store import parse_dt  # shared tz-aware ISO parsing
 from ..config import Settings, postgres_backend
@@ -63,6 +64,20 @@ class Task:
     notify_only: bool = False
 
 
+@dataclass
+class TaskCompletion:
+    """Snapshot of one completed occurrence, retained even after task deletion."""
+
+    id: str
+    task_id: str
+    title: str
+    due: str = ""
+    rrule: str = ""
+    completed_at: str = ""
+    undone_at: str = ""
+    occurrence_seq: int = 0
+
+
 def _open(settings: Settings) -> sqlite3.Connection:
     conn = open_db(settings.tasks_db_path)
     conn.execute(
@@ -73,6 +88,49 @@ def _open(settings: Settings) -> sqlite3.Connection:
         " notify_only TEXT DEFAULT '')"
     )
     ensure_columns(conn, "tasks", _ADDED_COLUMNS)
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS task_completions ("
+        " id TEXT PRIMARY KEY, task_id TEXT NOT NULL, title TEXT NOT NULL,"
+        " due TEXT NOT NULL DEFAULT '', rrule TEXT NOT NULL DEFAULT '',"
+        " completed_at TEXT NOT NULL, undone_at TEXT NOT NULL DEFAULT '',"
+        " occurrence_seq INTEGER NOT NULL DEFAULT 0)"
+    )
+    completion_columns = {
+        row[1] for row in conn.execute("PRAGMA table_info(task_completions)")
+    }
+    if "occurrence_seq" not in completion_columns:
+        conn.execute(
+            "ALTER TABLE task_completions"
+            " ADD COLUMN occurrence_seq INTEGER NOT NULL DEFAULT 0"
+        )
+        # Old rows have no durable ordering beyond their insertion order.
+        # Assign once, as part of adding the column, preserving rowid for ties.
+        conn.execute(
+            "UPDATE task_completions AS c SET occurrence_seq ="
+            " (SELECT COUNT(*) FROM task_completions x WHERE x.task_id = c.task_id"
+            "   AND (x.completed_at < c.completed_at OR"
+            "        (x.completed_at = c.completed_at AND x.rowid <= c.rowid)))"
+        )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS task_completions_completed_at_idx"
+        " ON task_completions(completed_at)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS task_completions_task_completed_idx"
+        " ON task_completions(task_id, completed_at)"
+    )
+    conn.execute(
+        "INSERT OR IGNORE INTO task_completions"
+        " (id, task_id, title, due, rrule, completed_at, undone_at, occurrence_seq)"
+        " SELECT 'legacy:' || id, id, title, due, rrule, done_at, '',"
+        " COALESCE((SELECT MAX(c.occurrence_seq) FROM task_completions c"
+        " WHERE c.task_id = tasks.id), 0) + 1 FROM tasks"
+        " WHERE done = 1 AND done_at <> '' AND NOT EXISTS ("
+        " SELECT 1 FROM task_completions c WHERE c.task_id = tasks.id)"
+    )
+    # _open is also used by read operations; persist idempotent schema/backfill
+    # before callers begin their own transaction.
+    conn.commit()
     return conn
 
 
@@ -93,6 +151,19 @@ def _row_to_task(row: sqlite3.Row) -> Task:
         updated=row["updated"] or "",
         done_at=row["done_at"] or "",
         notify_only=_truthy(row["notify_only"] or ""),
+    )
+
+
+def _row_to_completion(row: sqlite3.Row | dict) -> TaskCompletion:
+    return TaskCompletion(
+        id=str(row["id"]),
+        task_id=str(row["task_id"]),
+        title=str(row["title"]),
+        due=str(row["due"] or ""),
+        rrule=str(row["rrule"] or ""),
+        completed_at=str(row["completed_at"]),
+        undone_at=str(row["undone_at"] or ""),
+        occurrence_seq=int(row["occurrence_seq"] or 0),
     )
 
 
@@ -220,24 +291,46 @@ def next_due(settings: Settings, task: Task) -> str:
     return upcoming.isoformat() if upcoming is not None else ""
 
 
-def complete_task(settings: Settings, task_id: str) -> Task | None:
-    """Mark a task done (idempotent); return it, or ``None`` if absent.
-
-    A recurring task (``rrule`` set, next occurrence available) is not closed:
-    its ``due`` rolls forward to that occurrence and it stays open — the fired
-    ledger keys on ``(task_id, due, lead)``, so reminders re-arm on the new due.
-    An exhausted or ruleless task completes normally.
-    """
+def complete_task_occurrence(
+    settings: Settings, task_id: str, completion_id: str | None = None
+) -> tuple[Task | None, bool]:
+    """Complete one occurrence and report whether a mutation was applied."""
+    completion_id = completion_id or uuid.uuid4().hex
     if storage_postgres := postgres_backend(settings):
-        return storage_postgres.complete_task(settings, task_id)
-    existing = get_task(settings, task_id)
-    if existing is None:
-        return None
-    if existing.done:
-        return existing
-    now = _stamp_now(settings)
-    upcoming = next_due(settings, existing)
-    with _connect(settings) as conn:
+        return storage_postgres.complete_task_occurrence(settings, task_id, completion_id)
+
+    conn = _open(settings)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        if row is None:
+            conn.rollback()
+            return None, False
+        existing = _row_to_task(row)
+        if existing.done:
+            conn.rollback()
+            return existing, False
+        duplicate = conn.execute(
+            "SELECT 1 FROM task_completions WHERE id = ?", (completion_id,)
+        ).fetchone()
+        if duplicate:
+            conn.rollback()
+            return existing, False
+
+        now = _stamp_now(settings)
+        upcoming = next_due(settings, existing)
+        occurrence_seq = int(conn.execute(
+            "SELECT COALESCE(MAX(occurrence_seq), 0) + 1"
+            " FROM task_completions WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()[0])
+        conn.execute(
+            "INSERT INTO task_completions"
+            " (id, task_id, title, due, rrule, completed_at, undone_at, occurrence_seq)"
+            " VALUES (?, ?, ?, ?, ?, ?, '', ?)",
+            (completion_id, existing.id, existing.title, existing.due, existing.rrule,
+             now, occurrence_seq),
+        )
         if upcoming:
             conn.execute(
                 "UPDATE tasks SET due = ?, updated = ? WHERE id = ?",
@@ -248,7 +341,111 @@ def complete_task(settings: Settings, task_id: str) -> Task | None:
                 "UPDATE tasks SET done = 1, done_at = ?, updated = ? WHERE id = ?",
                 (now, now, task_id),
             )
-    return get_task(settings, task_id)
+        updated_row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        conn.commit()
+        return _row_to_task(updated_row), True
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def complete_task(
+    settings: Settings, task_id: str, completion_id: str | None = None
+) -> Task | None:
+    """Mark a task done (idempotent); return it, or ``None`` if absent.
+
+    A recurring task (``rrule`` set, next occurrence available) is not closed:
+    its ``due`` rolls forward to that occurrence and it stays open — the fired
+    ledger keys on ``(task_id, due, lead)``, so reminders re-arm on the new due.
+    An exhausted or ruleless task completes normally.
+    """
+    # Preserve the long-standing backend adapter seam for direct callers and
+    # tests; the operation path supplies an id and uses the richer helper.
+    if completion_id is None and (storage_postgres := postgres_backend(settings)):
+        return storage_postgres.complete_task(settings, task_id)
+    task, _ = complete_task_occurrence(settings, task_id, completion_id)
+    return task
+
+
+def list_task_completions(
+    settings: Settings,
+    *,
+    since: datetime | str | None = None,
+    until: datetime | str | None = None,
+    query: str = "",
+    include_undone: bool = False,
+    limit: int | None = None,
+) -> list[TaskCompletion]:
+    """List occurrences by actual instant, using the interval ``(since, until]``."""
+    if storage_postgres := postgres_backend(settings):
+        rows = storage_postgres.list_task_completions(settings)
+    else:
+        with _connect(settings) as conn:
+            db_rows = conn.execute("SELECT * FROM task_completions").fetchall()
+        rows = [_row_to_completion(row) for row in db_rows]
+
+    def boundary(value: datetime | str | None) -> datetime | None:
+        if isinstance(value, datetime):
+            return value.astimezone() if value.tzinfo is None else value
+        return parse_dt(value or "")
+
+    after, through = boundary(since), boundary(until)
+    needle = query.strip().lower()
+    filtered: list[tuple[float, TaskCompletion]] = []
+    for completion in rows:
+        when = parse_dt(completion.completed_at)
+        if when is None or (completion.undone_at and not include_undone):
+            continue
+        if after is not None and when <= after:
+            continue
+        if through is not None and when > through:
+            continue
+        if needle and completion.task_id != query.strip() and needle not in completion.title.lower():
+            continue
+        filtered.append((when.timestamp(), completion))
+    filtered.sort(
+        key=lambda item: (item[0], item[1].occurrence_seq, item[1].id),
+        reverse=True,
+    )
+    completions = [item[1] for item in filtered]
+    if limit is not None:
+        completions = completions[: max(0, min(int(limit), 1000))]
+    return completions
+
+
+def restore_task_completion(settings: Settings, completion: TaskCompletion) -> TaskCompletion:
+    """Upsert a completion snapshot verbatim (used by local-to-Postgres import)."""
+    if storage_postgres := postgres_backend(settings):
+        return storage_postgres.restore_task_completion(settings, completion)
+    with _connect(settings) as conn:
+        legacy_id = f"legacy:{completion.task_id}"
+        if completion.id != legacy_id:
+            conn.execute(
+                "DELETE FROM task_completions WHERE id = ?", (legacy_id,)
+            )
+        occurrence_seq = completion.occurrence_seq
+        if occurrence_seq <= 0:
+            existing = conn.execute(
+                "SELECT occurrence_seq FROM task_completions WHERE id = ?",
+                (completion.id,),
+            ).fetchone()
+            occurrence_seq = int(existing[0]) if existing else int(conn.execute(
+                "SELECT COALESCE(MAX(occurrence_seq), 0) + 1"
+                " FROM task_completions WHERE task_id = ?",
+                (completion.task_id,),
+            ).fetchone()[0])
+            completion.occurrence_seq = occurrence_seq
+        conn.execute(
+            "INSERT OR REPLACE INTO task_completions"
+            " (id, task_id, title, due, rrule, completed_at, undone_at, occurrence_seq)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (completion.id, completion.task_id, completion.title, completion.due,
+             completion.rrule, completion.completed_at, completion.undone_at,
+             occurrence_seq),
+        )
+    return completion
 
 
 def restore_task(settings: Settings, task: Task) -> Task:
@@ -267,6 +464,71 @@ def restore_task(settings: Settings, task: Task) -> Task:
                 "1" if task.notify_only else "",
             ),
         )
+    return task
+
+
+def restore_task_and_undo_completion(
+    settings: Settings, task: Task, completion_id: str
+) -> Task:
+    """Atomically restore ``task`` and mark its exact completion occurrence undone."""
+    if storage_postgres := postgres_backend(settings):
+        return storage_postgres.restore_task_and_undo_completion(
+            settings, task, completion_id
+        )
+    with _connect(settings) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        completion_rows = conn.execute(
+            "SELECT * FROM task_completions WHERE task_id = ?",
+            (task.id,),
+        ).fetchall()
+        target = next(
+            (
+                row for row in completion_rows
+                if row["id"] == completion_id and not row["undone_at"]
+            ),
+            None,
+        )
+        if target is None:
+            raise ValueError(f"completion not found or already undone: {completion_id}")
+        target_seq = int(target["occurrence_seq"])
+        active_rows = [
+            row for row in completion_rows
+            if row["id"] != completion_id and not row["undone_at"]
+        ]
+        has_later = any(
+            int(row["occurrence_seq"]) > target_seq for row in active_rows
+        )
+        if not has_later:
+            # The write-ledger snapshot belongs to this completion's original
+            # pre-state.  If later occurrences were undone first, that due can
+            # still include advances from occurrences which are no longer
+            # active.  The first historical snapshot after the last remaining
+            # active occurrence is the exact due at that boundary.
+            last_active_seq = max(
+                (int(row["occurrence_seq"]) for row in active_rows), default=0
+            )
+            boundary = min(
+                (
+                    row for row in completion_rows
+                    if int(row["occurrence_seq"]) > last_active_seq
+                ),
+                key=lambda row: int(row["occurrence_seq"]),
+            )
+            task.due = str(boundary["due"] or "")
+            conn.execute(
+                "INSERT OR REPLACE INTO tasks"
+                " (id, title, done, due, notes, rrule, created, updated, done_at, notify_only)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (task.id, task.title, int(task.done), task.due, task.notes, task.rrule,
+                 task.created, task.updated, task.done_at,
+                 "1" if task.notify_only else ""),
+            )
+        cursor = conn.execute(
+            "UPDATE task_completions SET undone_at = ? WHERE id = ? AND undone_at = ''",
+            (_stamp_now(settings), completion_id),
+        )
+        if cursor.rowcount != 1:  # defensive: target was locked by this write txn
+            raise ValueError(f"completion could not be undone: {completion_id}")
     return task
 
 

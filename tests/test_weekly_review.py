@@ -170,6 +170,28 @@ def test_completed_and_due_tasks_ride_in(settings, delivered, monkeypatch) -> No
     assert "Prepare slides" in message
 
 
+def test_recurring_occurrences_are_counted_independently(settings, monkeypatch) -> None:
+    from assistant.tasks import store as tasks_store
+
+    frozen = _freeze_clock(monkeypatch, settings, day=6, hhmm="18:00")
+    monkeypatch.setattr(
+        tasks_store, "_stamp_now", lambda s: frozen.isoformat(timespec="seconds")
+    )
+    task = tasks_store.create_task(
+        settings,
+        title="Water plants",
+        due=(frozen - timedelta(days=2)).isoformat(timespec="seconds"),
+        rrule="FREQ=DAILY",
+    )
+    tasks_store.complete_task(settings, task.id, completion_id="one")
+    tasks_store.complete_task(settings, task.id, completion_id="two")
+
+    sections = "\n".join(weekly_review._tasks_sections(settings, frozen))
+    assert "Completed last week (2)" in sections
+    assert sections.count("- Water plants") == 2
+    assert tasks_store.get_task(settings, task.id).done is False
+
+
 def test_expenses_and_subscriptions_ride_in(settings, delivered, monkeypatch) -> None:
     settings.enable_expenses = True
     settings.enable_subscriptions = True
