@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 
+from assistant import weather
 from assistant.config import Settings
 from assistant.context_providers import ContextProvider, build_context
+from assistant.trips import store as trips_store
 
 
 @pytest.fixture
@@ -82,3 +86,46 @@ def test_default_registry_gates_follow_settings(settings, monkeypatch) -> None:
     lean = settings.model_copy(update={"enable_calendar": False, "enable_tasks": False})
     lean_blocks = build_context(lean, "q", "t1")
     assert "agenda" not in lean_blocks and "tasks" not in lean_blocks
+
+
+def test_weather_context_tracks_trip_and_withholds_failed_transition(
+    settings, monkeypatch
+) -> None:
+    traveling = settings.model_copy(
+        update={
+            "enable_weather": True,
+            "enable_trips": True,
+            "weather_latitude": 59.9,
+            "weather_longitude": 10.7,
+            "weather_location_name": "Oslo",
+            "weather_refresh_minutes": 60,
+        }
+    )
+    trips_store.create_trip(
+        traveling, "Tokyo", start="2026-08-04", end="2026-08-04", timezone="UTC"
+    )
+    payload = {
+        "current": {"temperature_2m": 20, "weather_code": 0},
+        "daily": {
+            "temperature_2m_max": [24],
+            "temperature_2m_min": [16],
+            "weather_code": [0],
+        },
+    }
+    instant = datetime(2026, 8, 4, 12, tzinfo=UTC)
+    monkeypatch.setattr(weather, "now", lambda s: instant)
+    monkeypatch.setattr(weather, "_geocode", lambda s, name: (35.68, 139.65))
+    monkeypatch.setattr(weather, "_fetch", lambda *args, **kwargs: payload)
+    weather.refresh(traveling)
+    assert "Location: Tokyo" in build_context(traveling, "q", "t1")["weather"]
+
+    instant = datetime(2026, 8, 5, 0, tzinfo=UTC)
+    monkeypatch.setattr(
+        weather, "_fetch", lambda *args, **kwargs: (_ for _ in ()).throw(OSError())
+    )
+    weather.refresh(traveling)
+    assert build_context(traveling, "q", "t1")["weather"] == ""
+
+    monkeypatch.setattr(weather, "_fetch", lambda *args, **kwargs: payload)
+    weather.refresh(traveling)
+    assert "Location: Oslo" in build_context(traveling, "q", "t1")["weather"]

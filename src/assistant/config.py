@@ -471,16 +471,18 @@ class Settings(BaseSettings):
     # --- Weather ---
     # Master switch: fetch a short forecast off the reply path and inject it
     # into each turn's context and the daily briefing. OFF by default — it
-    # needs a location and makes an outbound call (to Open-Meteo, keyless).
+    # uses an active trip destination when trips are enabled, otherwise needs a
+    # configured home location. Makes an outbound call (to Open-Meteo, keyless).
     enable_weather: bool = False
     # The location to forecast for, as decimal degrees. Optional: if unset but
     # weather_location_name is given, the name is geocoded (Open-Meteo, keyless)
-    # and the coordinates cached. Explicit coordinates, when set, take precedence.
+    # and the coordinates cached. Explicit coordinates take precedence at home;
+    # an active trip destination is geocoded and temporarily takes precedence.
     weather_latitude: float | None = None
     weather_longitude: float | None = None
     # A place name for the location ("Oslo"). Shown as the block's label, and —
     # when no explicit coordinates are set — geocoded to find them. Weather is a
-    # no-op when neither coordinates nor a name is configured.
+    # no-op when neither coordinates nor a name is configured and no trip is active.
     weather_location_name: str = ""
     # "metric" (°C, km/h) or "imperial" (°F, mph).
     weather_units: str = "metric"

@@ -298,7 +298,9 @@ def next_trip_at(settings: Settings, instant: datetime, home_tz: tzinfo) -> Trip
         boundary = datetime.combine(started, time.min, tzinfo=trip_tz)
         if boundary > instant:
             candidates.append((boundary, trip.start or "9999", trip.created, trip))
-    return min(candidates, default=None, key=lambda item: item[:3])[-1] if candidates else None
+    if not candidates:
+        return None
+    return min(candidates, key=lambda item: item[:3])[-1]
 
 
 def next_trip(settings: Settings, today: date | None = None) -> Trip | None:
