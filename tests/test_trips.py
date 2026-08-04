@@ -168,11 +168,21 @@ def test_context_surfaces_active_trip_with_local_time(settings) -> None:
         settings, "Lisbon", start=_day(settings, -1), end=_day(settings, 5),
         timezone="Europe/Lisbon",
     )
-    block = trips_context(settings)
+    block = trips_context(settings.model_copy(update={"enable_weather": True}))
     assert "Trip in progress" in block
     assert "day 2 of 7" in block
     assert "Local time in Lisbon" in block
     assert "get_weather" in block
+    assert "Cached weather follows" not in block
+
+
+def test_active_trip_context_does_not_claim_weather_when_disabled(settings) -> None:
+    store.create_trip(
+        settings, "Lisbon", start=_day(settings, -1), end=_day(settings, 1)
+    )
+    block = trips_context(settings.model_copy(update={"enable_weather": False}))
+    assert "Cached weather" not in block
+    assert "get_weather" not in block
 
 
 def test_context_mentions_packing_list_only_with_lists(settings) -> None:

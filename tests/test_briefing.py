@@ -12,7 +12,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from assistant import briefing
+from assistant import briefing, weather
 from assistant.calendar import context as calendar_context
 from assistant.calendar import store as calendar_store
 from assistant.config import Settings
@@ -260,3 +260,40 @@ def test_briefing_loop_in_disabled_records_nothing(settings, delivered, monkeypa
 def test_malformed_briefing_time_defaults(settings) -> None:
     settings.briefing_time = "not-a-time"
     assert briefing._due_time(settings).hour == 7
+
+
+def test_briefing_weather_tracks_trip_and_home(settings, monkeypatch) -> None:
+    from assistant.trips import store as trips_store
+
+    traveling = settings.model_copy(
+        update={
+            "enable_weather": True,
+            "enable_trips": True,
+            "weather_latitude": 59.9,
+            "weather_longitude": 10.7,
+            "weather_location_name": "Oslo",
+            "weather_refresh_minutes": 60,
+        }
+    )
+    trips_store.create_trip(
+        traveling, "Tokyo", start="2026-08-04", end="2026-08-04", timezone="UTC"
+    )
+    payload = {
+        "current": {"temperature_2m": 20, "weather_code": 0},
+        "daily": {
+            "temperature_2m_max": [24],
+            "temperature_2m_min": [16],
+            "weather_code": [0],
+        },
+    }
+    instant = datetime(2026, 8, 4, 12, tzinfo=UTC)
+    monkeypatch.setattr(weather, "now", lambda s: instant)
+    monkeypatch.setattr(weather, "_geocode", lambda s, name: (35.68, 139.65))
+    monkeypatch.setattr(weather, "_fetch", lambda *args, **kwargs: payload)
+    weather.refresh(traveling)
+    assert "Location: Tokyo" in briefing.build_briefing(traveling)
+
+    instant = datetime(2026, 8, 5, 0, tzinfo=UTC)
+    assert "## Weather" not in briefing.build_briefing(traveling)
+    weather.refresh(traveling)
+    assert "Location: Oslo" in briefing.build_briefing(traveling)

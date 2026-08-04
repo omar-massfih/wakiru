@@ -5,13 +5,15 @@ to return a canned Open-Meteo payload, matching how the mail-snapshot tests fake
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+import json
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from assistant import weather
 from assistant.calendar.context import now
 from assistant.config import Settings
+from assistant.trips import store as trips_store
 
 _PAYLOAD = {
     "current": {
@@ -209,3 +211,204 @@ def test_maybe_refresh_respects_cadence(settings, monkeypatch) -> None:
     monkeypatch.setattr(weather, "now", lambda s: later)
     weather.maybe_refresh(settings)
     assert calls["n"] == 2
+
+
+def test_trip_destination_follows_destination_local_inclusive_boundaries(
+    settings, monkeypatch
+) -> None:
+    traveling = settings.model_copy(update={"enable_trips": True})
+    trips_store.create_trip(
+        traveling,
+        "New York",
+        start="2026-08-10",
+        end="2026-08-10",
+        timezone="America/New_York",
+    )
+    geocodes: list[str] = []
+    fetches: list[tuple[float, float]] = []
+    monkeypatch.setattr(
+        weather,
+        "_geocode",
+        lambda s, name: geocodes.append(name) or (40.71, -74.0),
+    )
+    monkeypatch.setattr(
+        weather,
+        "_fetch",
+        lambda s, lat, lon, days=1: fetches.append((lat, lon)) or _PAYLOAD,
+    )
+
+    instant = datetime(2026, 8, 10, 3, 59, 59, tzinfo=UTC)
+    monkeypatch.setattr(weather, "now", lambda s: instant)
+    weather.refresh(traveling)
+    assert fetches[-1] == (59.9, 10.7)
+    assert "Location: Oslo" in weather.current(traveling)
+
+    instant = datetime(2026, 8, 10, 4, 0, tzinfo=UTC)
+    weather.maybe_refresh(traveling)  # location mismatch bypasses the cadence
+    assert fetches[-1] == (40.71, -74.0)
+    assert "Location: New York" in weather.current(traveling)
+
+    instant = datetime(2026, 8, 11, 3, 59, 59, tzinfo=UTC)
+    assert weather.effective_location_key(traveling) == "name:new york"
+    instant = datetime(2026, 8, 11, 4, 0, tzinfo=UTC)
+    weather.maybe_refresh(traveling)
+    assert fetches[-1] == (59.9, 10.7)
+    assert "Location: Oslo" in weather.current(traveling)
+    assert geocodes == ["New York"]
+
+
+@pytest.mark.parametrize("trip_timezone", ["", "Not/AZone"])
+def test_timezone_less_or_corrupt_trip_uses_home_boundaries(
+    settings, monkeypatch, trip_timezone
+) -> None:
+    traveling = settings.model_copy(update={"enable_trips": True})
+    trips_store.create_trip(
+        traveling,
+        "Bergen",
+        start="2026-08-10",
+        end="2026-08-10",
+        timezone=trip_timezone,
+    )
+    monkeypatch.setattr(weather, "_geocode", lambda s, name: (60.39, 5.32))
+    instant = datetime(2026, 8, 9, 21, 59, 59, tzinfo=UTC)  # 23:59:59 in Oslo
+    monkeypatch.setattr(weather, "now", lambda s: instant)
+    assert weather.effective_location_key(traveling).startswith("[\"coords\"")
+    instant = datetime(2026, 8, 9, 22, 0, tzinfo=UTC)  # home-local midnight
+    assert weather.effective_location_key(traveling) == "name:bergen"
+
+
+def test_trip_can_supply_location_without_home_and_trips_can_be_disabled(
+    settings, monkeypatch
+) -> None:
+    no_home = settings.model_copy(
+        update={
+            "enable_trips": True,
+            "weather_latitude": None,
+            "weather_longitude": None,
+            "weather_location_name": "",
+        }
+    )
+    trips_store.create_trip(
+        no_home, "Tokyo", start="2026-08-04", end="2026-08-04", timezone="UTC"
+    )
+    instant = datetime(2026, 8, 4, 12, tzinfo=UTC)
+    monkeypatch.setattr(weather, "now", lambda s: instant)
+    monkeypatch.setattr(weather, "_geocode", lambda s, name: (35.68, 139.65))
+    assert weather.refresh(no_home) is not None
+    assert "Location: Tokyo" in weather.current(no_home)
+    assert weather.enabled(no_home.model_copy(update={"enable_trips": False})) is False
+
+
+def test_named_geocode_cache_reuses_home_trip_and_normalized_destinations(
+    settings, monkeypatch
+) -> None:
+    traveling = settings.model_copy(
+        update={
+            "enable_trips": True,
+            "weather_latitude": None,
+            "weather_longitude": None,
+        }
+    )
+    trips_store.create_trip(
+        traveling, " New   York ", start="2026-08-10", end="2026-08-10", timezone="UTC"
+    )
+    calls: list[str] = []
+
+    def geocode(s, name):
+        calls.append(name)
+        return (40.7, -74.0) if "York" in name else (59.9, 10.7)
+
+    monkeypatch.setattr(weather, "_geocode", geocode)
+    instant = datetime(2026, 8, 9, 12, tzinfo=UTC)
+    monkeypatch.setattr(weather, "now", lambda s: instant)
+    weather.refresh(traveling)
+    instant = datetime(2026, 8, 10, 12, tzinfo=UTC)
+    weather.refresh(traveling)
+    weather.refresh(traveling)
+    instant = datetime(2026, 8, 11, 12, tzinfo=UTC)
+    weather.refresh(traveling)
+    assert calls == ["Oslo", "New   York"]
+
+
+def test_legacy_geocode_cache_is_read_and_upgraded(settings, monkeypatch) -> None:
+    named = settings.model_copy(
+        update={"weather_latitude": None, "weather_longitude": None}
+    )
+    named.memory_path.mkdir(parents=True)
+    (named.memory_path / "weather_geocode.json").write_text(
+        json.dumps({"name": "OSLO", "latitude": 59.91, "longitude": 10.75}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        weather, "_geocode", lambda s, name: pytest.fail("legacy entry should be reused")
+    )
+    assert weather.refresh(named) is not None
+
+
+def test_location_change_withholds_snapshot_and_failure_preserves_it(
+    settings, monkeypatch
+) -> None:
+    traveling = settings.model_copy(update={"enable_trips": True})
+    trips_store.create_trip(
+        traveling, "Tokyo", start="2026-08-04", end="2026-08-04", timezone="UTC"
+    )
+    instant = datetime(2026, 8, 3, 23, 59, tzinfo=UTC)
+    monkeypatch.setattr(weather, "now", lambda s: instant)
+    weather.refresh(traveling)
+    saved = weather._path(traveling).read_text(encoding="utf-8")
+
+    instant = datetime(2026, 8, 4, 0, tzinfo=UTC)
+    assert weather.current(traveling) == ""
+    monkeypatch.setattr(weather, "_geocode", lambda s, name: None)
+    assert weather.refresh(traveling) is None
+    assert weather.current(traveling) == ""
+    assert weather._path(traveling).read_text(encoding="utf-8") == saved
+
+
+def test_failed_home_restore_does_not_expose_trip_snapshot(settings, monkeypatch) -> None:
+    traveling = settings.model_copy(
+        update={
+            "enable_trips": True,
+            "weather_latitude": None,
+            "weather_longitude": None,
+        }
+    )
+    trips_store.create_trip(
+        traveling, "Tokyo", start="2026-08-04", end="2026-08-04", timezone="UTC"
+    )
+    monkeypatch.setattr(weather, "_geocode", lambda s, name: (35.68, 139.65))
+    instant = datetime(2026, 8, 4, 12, tzinfo=UTC)
+    monkeypatch.setattr(weather, "now", lambda s: instant)
+    weather.refresh(traveling)
+    assert "Tokyo" in weather.current(traveling)
+
+    instant = datetime(2026, 8, 5, 0, tzinfo=UTC)
+    monkeypatch.setattr(weather, "_geocode", lambda s, name: None)
+    assert weather.refresh(traveling) is None
+    assert weather.current(traveling) == ""
+
+
+def test_legacy_snapshot_is_unverified_and_location_inputs_invalidate(settings) -> None:
+    captured = now(settings)
+    settings.memory_path.mkdir(parents=True)
+    weather._path(settings).write_text(
+        json.dumps({"text": "old", "fetched_at": captured.isoformat()}), encoding="utf-8"
+    )
+    assert weather.current(settings) == ""
+
+    weather.refresh(settings)
+    moved = settings.model_copy(update={"weather_latitude": 60.0})
+    relabeled = settings.model_copy(update={"weather_location_name": "Oslo home"})
+    assert weather.current(moved) == ""
+    assert weather.current(relabeled) == ""
+
+
+def test_same_location_failed_refresh_keeps_fresh_honest_snapshot(
+    settings, monkeypatch
+) -> None:
+    weather.refresh(settings)
+    monkeypatch.setattr(
+        weather, "_fetch", lambda *args, **kwargs: (_ for _ in ()).throw(OSError("down"))
+    )
+    assert weather.refresh(settings) is None
+    assert "Location: Oslo" in weather.current(settings)

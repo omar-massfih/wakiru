@@ -22,8 +22,8 @@ def _local_time_note(trip: store.Trip, current: datetime) -> str:
 def trips_context(settings: Settings) -> str:
     """The active trip, or the next departure while it is imminent — else ``""``.
 
-    Runs on the reply path, so it only reads the local store; destination
-    weather stays behind the on-demand ``get_weather`` tool.
+    Runs on the reply path, so it only reads local stores. The cached weather
+    block follows an active destination when weather is enabled.
     """
     if not settings.enable_trips:
         return ""
@@ -52,10 +52,14 @@ def trips_context(settings: Settings) -> str:
         ]
         if active.notes:
             lines.append(f"Notes: {active.notes}")
-        lines.append(
-            "Keep this in mind for scheduling and suggestions; `get_weather` "
-            "knows the destination's forecast."
-        )
+        guidance = "Keep this in mind for scheduling and suggestions."
+        if settings.enable_weather:
+            from .. import weather
+
+            if weather.current(settings, current):
+                guidance += " Cached weather follows this destination."
+            guidance += " Use `get_weather` for places or days not covered by cached weather."
+        lines.append(guidance)
         return "\n".join(lines)
     home_tz = resolve_home_tz(settings)
     upcoming = store.next_trip_at(settings, current, home_tz)
