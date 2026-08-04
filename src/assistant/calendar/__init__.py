@@ -20,6 +20,7 @@ from .context import (
     busy_events,
     now,
     overlapping_events,
+    resolve_home_tz,
     resolve_tz,
     upcoming_events,
 )
@@ -34,6 +35,7 @@ __all__ = [
     "due_reminders",
     "now",
     "overlapping_events",
+    "resolve_home_tz",
     "resolve_tz",
     "store",
     "surface_due",

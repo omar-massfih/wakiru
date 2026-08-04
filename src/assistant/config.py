@@ -278,9 +278,9 @@ class Settings(BaseSettings):
     heartbeat_summary_as_tool: bool = True
 
     # --- Time & calendar ---
-    # IANA timezone name (e.g. "Europe/Oslo") the assistant reasons in. None =>
-    # the server's system-local timezone. Used for the current-time context it is
-    # given each turn and for resolving natural-language dates when scheduling.
+    # Home IANA timezone (e.g. "Europe/Oslo"). None => system-local. An active
+    # timezone-bearing trip temporarily supersedes it while ENABLE_TRIPS is on.
+    # Used for the clock and for resolving natural-language dates when scheduling.
     timezone: str | None = None
     # Master switch: inject current time + upcoming events into each turn.
     enable_calendar: bool = True

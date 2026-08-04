@@ -7,7 +7,7 @@ ledger and the subsystem stores run for real against tmp SQLite files.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -61,6 +61,37 @@ def test_not_due_before_review_day(settings, delivered, monkeypatch) -> None:
     result = weekly_review.run_weekly_review(settings)
     assert result == {"sent": False, "reason": "not due yet"}
     assert delivered == []
+
+
+def test_review_gate_and_iso_week_use_trip_local_time(settings, delivered, monkeypatch) -> None:
+    from assistant.calendar import context as calendar_context
+    from assistant.trips import store as trips_store
+
+    traveling = settings.model_copy(
+        update={
+            "timezone": "Europe/Oslo",
+            "enable_trips": True,
+            "weekly_review_day": "sunday",
+            "weekly_review_time": "17:00",
+        }
+    )
+    trips_store.create_trip(
+        traveling, "New York", start="2026-03-08", end="2026-03-08",
+        timezone="America/New_York",
+    )
+    # It is already Monday and a new ISO week at home, but still Sunday in New York.
+    instant = datetime(2026, 3, 9, 2, 0, tzinfo=UTC)
+    real_datetime = datetime
+
+    class FrozenDateTime(real_datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return instant.astimezone(tz) if tz is not None else instant.replace(tzinfo=None)
+
+    monkeypatch.setattr(calendar_context, "datetime", FrozenDateTime)
+    result = weekly_review.run_weekly_review(traveling)
+
+    assert result["sent"] and result["week"] == "2026-W10"
 
 
 def test_not_due_before_review_time(settings, delivered, monkeypatch) -> None:

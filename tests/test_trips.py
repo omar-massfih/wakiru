@@ -7,10 +7,12 @@ to the assistant's own "today" so the tests hold on any calendar day.
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 
+from assistant.calendar import context as calendar_context
 from assistant.calendar.context import now
 from assistant.config import Settings
 from assistant.tools import ToolContext, available_tools, tool_map
@@ -28,6 +30,18 @@ def settings(tmp_path) -> Settings:
 
 def _day(settings: Settings, offset: int) -> str:
     return (now(settings).date() + timedelta(days=offset)).isoformat()
+
+
+def _freeze_absolute(monkeypatch, instant: datetime) -> None:
+    """Freeze the central clock at an aware absolute instant."""
+    real_datetime = datetime
+
+    class FrozenDateTime(real_datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return instant.astimezone(tz) if tz is not None else instant.replace(tzinfo=None)
+
+    monkeypatch.setattr(calendar_context, "datetime", FrozenDateTime)
 
 
 # --- store CRUD ------------------------------------------------------------- #
@@ -52,6 +66,55 @@ def test_active_and_next_trip(settings) -> None:
     store.create_trip(settings, "Bergen", start=_day(settings, 10), end=_day(settings, 12))
     assert store.active_trip(settings).destination == "Lisbon"
     assert store.next_trip(settings).destination == "Bergen"
+
+
+@pytest.mark.parametrize(
+    ("instant", "expected_zone"),
+    [
+        ("2026-03-08T07:59:59+00:00", "Europe/Oslo"),
+        ("2026-03-08T08:00:00+00:00", "America/Los_Angeles"),
+        ("2026-03-10T06:59:59+00:00", "America/Los_Angeles"),
+        ("2026-03-10T07:00:00+00:00", "Europe/Oslo"),
+    ],
+)
+def test_trip_timezone_activates_on_destination_date_boundaries(
+    settings, monkeypatch, instant, expected_zone
+) -> None:
+    store.create_trip(
+        settings,
+        "Los Angeles",
+        start="2026-03-08",
+        end="2026-03-09",
+        timezone="America/Los_Angeles",
+    )
+    _freeze_absolute(monkeypatch, datetime.fromisoformat(instant))
+
+    assert getattr(calendar_context.resolve_tz(settings), "key", None) == expected_zone
+    assert getattr(calendar_context.now(settings).tzinfo, "key", None) == expected_zone
+
+
+def test_disabled_trips_never_override_clock(settings, monkeypatch) -> None:
+    store.create_trip(
+        settings, "New York", start="2026-03-08", end="2026-03-08",
+        timezone="America/New_York",
+    )
+    _freeze_absolute(monkeypatch, datetime(2026, 3, 8, 12, tzinfo=UTC))
+    disabled = settings.model_copy(update={"enable_trips": False})
+    assert calendar_context.resolve_tz(disabled) == ZoneInfo("Europe/Oslo")
+
+
+@pytest.mark.parametrize("trip_timezone", ["", "Not/A_Real_Zone"])
+def test_timezone_less_or_corrupt_trip_stays_active_in_home_time(
+    settings, monkeypatch, trip_timezone
+) -> None:
+    store.create_trip(
+        settings, "Bergen", start="2026-03-08", end="2026-03-08",
+        timezone=trip_timezone,
+    )
+    _freeze_absolute(monkeypatch, datetime(2026, 3, 8, 12, tzinfo=UTC))
+
+    assert calendar_context.resolve_tz(settings) == ZoneInfo("Europe/Oslo")
+    assert "Trip in progress" in trips_context(settings)
 
 
 def test_find_prefers_live_trips_over_past(settings) -> None:
@@ -80,6 +143,24 @@ def test_context_surfaces_imminent_departure(settings) -> None:
     assert "Upcoming trip" in block and "Lisbon" in block
     assert "departs in 4 day(s)" in block
     assert "TP753 out of OSL" in block
+
+
+def test_context_keeps_trip_upcoming_until_destination_midnight(
+    settings, monkeypatch
+) -> None:
+    store.create_trip(
+        settings,
+        "Los Angeles",
+        start="2026-03-08",
+        end="2026-03-10",
+        timezone="America/Los_Angeles",
+    )
+    # Oslo is already on March 8, but Los Angeles is still on March 7.
+    _freeze_absolute(monkeypatch, datetime(2026, 3, 7, 23, 30, tzinfo=UTC))
+
+    block = trips_context(settings)
+    assert "Upcoming trip" in block and "Los Angeles" in block
+    assert "departs in 1 day(s)" in block
 
 
 def test_context_surfaces_active_trip_with_local_time(settings) -> None:

@@ -49,7 +49,7 @@ from langchain_core.messages import (
 )
 
 from . import followups, goals, people, persona, threads, watches
-from .calendar.context import now
+from .calendar.context import next_timezone_boundary, now, resolve_tz
 from .calendar.store import parse_dt
 from .config import Settings, get_settings, postgres_backend
 from .context_providers import build_context
@@ -287,8 +287,18 @@ def next_wake_at(settings: Settings, current: datetime) -> datetime:
     from .memory.profile import in_quiet_hours
     from .mutes import all_muted
 
-    if in_quiet_hours(settings, current) or all_muted(settings, current):
-        return current + base
+    quiet = in_quiet_hours(settings, current)
+    muted = all_muted(settings, current)
+    boundary = next_timezone_boundary(settings, current)
+    if quiet or muted:
+        targets = [current + base]
+        if boundary is not None:
+            targets.append(boundary)
+        if quiet and not muted:
+            release = _quiet_hours_release(settings, current)
+            if release is not None:
+                targets.append(release)
+        return min(targets)
 
     anchor_raw = _state_get(settings, "last_wake_at")
     anchor = parse_dt(anchor_raw) if anchor_raw else None
@@ -336,10 +346,13 @@ def next_wake_at(settings: Settings, current: datetime) -> datetime:
     ):
         # Birthday/renewal windows are day-granular: they only change at the
         # next local midnight.
-        due.append(
-            (current + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        midnight = (current + timedelta(days=1)).replace(
+            hour=0, minute=0, second=0, microsecond=0
         )
+        due.append(_resolve_future_wall_time(settings, midnight))
     due += _scheduled_wakes(settings, current)
+    if boundary is not None:
+        due.append(boundary)
     try:
         from . import refreshes
 
@@ -350,7 +363,52 @@ def next_wake_at(settings: Settings, current: datetime) -> datetime:
         logger.exception("computing refresh wake times failed")
     if due:
         target = min(target, max(min(due), floor))
+    # Unlike ordinary deliberate work, a timezone boundary must not be pushed
+    # past the wake floor: crossing it changes how every later wall time is
+    # interpreted. It cannot busy-loop because the boundary is no longer
+    # future on the next scheduler pass.
+    if boundary is not None:
+        target = min(target, boundary)
     return target
+
+
+def _resolve_future_wall_time(settings: Settings, candidate: datetime) -> datetime:
+    """Interpret a future wall time in the zone effective at that instant.
+
+    A candidate initially inherits today's zone. If it falls after a trip
+    boundary, rebuild the same calendar date and clock time in the newly
+    effective zone; repeat because changing the offset also changes the
+    absolute instant used to select the active trip.
+    """
+    wall = candidate.replace(tzinfo=None)
+    resolved = candidate
+    for _ in range(4):
+        zone = resolve_tz(settings, resolved)
+        adjusted = wall.replace(tzinfo=zone)
+        same_offset = adjusted.utcoffset() == resolved.utcoffset()
+        if same_offset and str(zone) == str(resolved.tzinfo):
+            return adjusted
+        resolved = adjusted
+    return resolved
+
+
+def _quiet_hours_release(settings: Settings, current: datetime) -> datetime | None:
+    """The next quiet-window end, interpreted in its then-effective timezone."""
+    from .memory.profile import quiet_hours
+
+    window = quiet_hours(settings)
+    if window is None:
+        return None
+    _start, end = window
+    candidate = current.replace(
+        hour=end.hour, minute=end.minute, second=0, microsecond=0
+    )
+    if candidate <= current:
+        candidate += timedelta(days=1)
+    release = _resolve_future_wall_time(settings, candidate)
+    if release <= current:
+        release = _resolve_future_wall_time(settings, candidate + timedelta(days=1))
+    return release
 
 
 def _scheduled_wakes(settings: Settings, current: datetime) -> list[datetime]:
@@ -369,7 +427,11 @@ def _scheduled_wakes(settings: Settings, current: datetime) -> list[datetime]:
             second=0,
             microsecond=0,
         )
-        wakes.append(at if at > current else at + timedelta(days=1))
+        candidate = at if at > current else at + timedelta(days=1)
+        resolved = _resolve_future_wall_time(settings, candidate)
+        if resolved <= current:
+            resolved = _resolve_future_wall_time(settings, candidate + timedelta(days=1))
+        wakes.append(resolved)
     if settings.enable_weekly_review:
         from . import weekly_review
 
@@ -378,7 +440,11 @@ def _scheduled_wakes(settings: Settings, current: datetime) -> list[datetime]:
         at = (current + timedelta(days=days_ahead)).replace(
             hour=due_time.hour, minute=due_time.minute, second=0, microsecond=0
         )
-        wakes.append(at if at > current else at + timedelta(days=7))
+        candidate = at if at > current else at + timedelta(days=7)
+        resolved = _resolve_future_wall_time(settings, candidate)
+        if resolved <= current:
+            resolved = _resolve_future_wall_time(settings, candidate + timedelta(days=7))
+        wakes.append(resolved)
     return wakes
 
 

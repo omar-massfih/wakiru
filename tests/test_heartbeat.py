@@ -7,7 +7,7 @@ runs for real against tmp_path SQLite.
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from langchain_core.messages import AIMessage
@@ -84,6 +84,99 @@ def test_disabled_never_wakes(settings) -> None:
     _due_followup(off)
     assert heartbeat.gather_situation(off) is None
     assert followups.list_open(off)  # and nothing was claimed
+
+
+def test_scheduled_wakes_use_trip_wall_time_across_dst(settings, monkeypatch) -> None:
+    from assistant.calendar import context as calendar_context
+    from assistant.trips import store as trips_store
+
+    traveling = settings.model_copy(
+        update={
+            "enable_trips": True,
+            "enable_briefing": True,
+            "briefing_time": "07:30",
+        }
+    )
+    trips_store.create_trip(
+        traveling, "New York", start="2026-03-07", end="2026-03-09",
+        timezone="America/New_York",
+    )
+    instant = datetime(2026, 3, 8, 4, 0, tzinfo=UTC)  # 23:00 EST before spring-forward
+    real_datetime = datetime
+
+    class FrozenDateTime(real_datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return instant.astimezone(tz) if tz is not None else instant.replace(tzinfo=None)
+
+    monkeypatch.setattr(calendar_context, "datetime", FrozenDateTime)
+    current = calendar_context.now(traveling)
+    wakes = heartbeat._scheduled_wakes(traveling, current)
+
+    assert len(wakes) == 1
+    assert wakes[0].strftime("%Y-%m-%d %H:%M %Z") == "2026-03-08 07:30 EDT"
+    assert wakes[0].astimezone(UTC) == datetime(2026, 3, 8, 11, 30, tzinfo=UTC)
+
+
+@pytest.mark.parametrize(
+    ("instant", "expected"),
+    [
+        # Before destination midnight, the next briefing belongs to the trip.
+        (
+            datetime(2026, 7, 11, 3, 0, tzinfo=UTC),
+            datetime(2026, 7, 11, 11, 30, tzinfo=UTC),
+        ),
+        # Late on the final destination date, tomorrow's briefing is back home.
+        (
+            datetime(2026, 7, 12, 3, 0, tzinfo=UTC),
+            datetime(2026, 7, 12, 5, 30, tzinfo=UTC),
+        ),
+    ],
+)
+def test_briefing_wake_resolves_across_trip_boundaries(
+    settings, instant, expected
+) -> None:
+    from assistant.calendar.context import resolve_tz
+    from assistant.trips import store as trips_store
+
+    traveling = settings.model_copy(
+        update={
+            "enable_trips": True,
+            "enable_briefing": True,
+            "briefing_time": "07:30",
+        }
+    )
+    trips_store.create_trip(
+        traveling, "New York", start="2026-07-11", end="2026-07-11",
+        timezone="America/New_York",
+    )
+    current = instant.astimezone(resolve_tz(traveling, instant))
+
+    assert heartbeat._scheduled_wakes(traveling, current)[0].astimezone(UTC) == expected
+
+
+def test_weekly_review_wake_reverts_home_after_trip(settings) -> None:
+    from assistant.calendar.context import resolve_tz
+    from assistant.trips import store as trips_store
+
+    traveling = settings.model_copy(
+        update={
+            "enable_trips": True,
+            "enable_weekly_review": True,
+            "weekly_review_day": "sun",
+            "weekly_review_time": "17:00",
+        }
+    )
+    trips_store.create_trip(
+        traveling, "New York", start="2026-07-06", end="2026-07-11",
+        timezone="America/New_York",
+    )
+    instant = datetime(2026, 7, 12, 3, 0, tzinfo=UTC)  # Sat 23:00 in New York
+    current = instant.astimezone(resolve_tz(traveling, instant))
+
+    wake = heartbeat._scheduled_wakes(traveling, current)[0]
+    assert wake.strftime("%Y-%m-%d %H:%M %Z") == "2026-07-12 17:00 CEST"
+    assert wake.astimezone(UTC) == datetime(2026, 7, 12, 15, 0, tzinfo=UTC)
 
 
 def test_quiet_hours_hold_without_claiming(settings, monkeypatch) -> None:
@@ -512,6 +605,102 @@ def test_next_wake_ceiling_extends_when_max_is_set(paced) -> None:
         backoff, "next_wake_at", (t0 + timedelta(minutes=120)).isoformat(timespec="seconds")
     )
     assert heartbeat.next_wake_at(backoff, t0) == t0 + timedelta(minutes=120)
+
+
+@pytest.mark.parametrize(
+    "instant",
+    [
+        datetime(2026, 7, 11, 3, 0, tzinfo=UTC),  # one hour before activation
+        datetime(2026, 7, 12, 3, 0, tzinfo=UTC),  # one hour before reversion
+    ],
+)
+def test_next_wake_stops_at_trip_timezone_boundaries(settings, instant) -> None:
+    from assistant.calendar.context import resolve_tz
+    from assistant.trips import store as trips_store
+
+    traveling = settings.model_copy(
+        update={
+            "enable_trips": True,
+            "quiet_hours_default": "",
+            "heartbeat_minutes": 360,
+            "heartbeat_wake_max_minutes": 360,
+        }
+    )
+    trips_store.create_trip(
+        traveling, "New York", start="2026-07-11", end="2026-07-11",
+        timezone="America/New_York",
+    )
+    current = instant.astimezone(resolve_tz(traveling, instant))
+    heartbeat.state_set(
+        traveling, "last_wake_at", current.isoformat(timespec="seconds")
+    )
+
+    assert heartbeat.next_wake_at(traveling, current).astimezone(UTC) == datetime(
+        2026, 7, 11 if instant.day == 11 else 12, 4, 0, tzinfo=UTC
+    )
+
+
+def test_timezone_less_trip_end_can_reveal_overlapping_trip_zone(settings) -> None:
+    from zoneinfo import ZoneInfo
+
+    from assistant.calendar.context import next_timezone_boundary, resolve_tz
+    from assistant.trips import store as trips_store
+
+    traveling = settings.model_copy(
+        update={
+            "enable_trips": True,
+            "quiet_hours_default": "",
+            "heartbeat_minutes": 360,
+            "heartbeat_wake_max_minutes": 360,
+        }
+    )
+    # The earlier trip wins while both are active, despite having no timezone.
+    trips_store.create_trip(
+        traveling, "Bergen", start="2026-07-10", end="2026-07-11"
+    )
+    trips_store.create_trip(
+        traveling, "New York", start="2026-07-11", end="2026-07-13",
+        timezone="America/New_York",
+    )
+    instant = datetime(2026, 7, 11, 21, 0, tzinfo=UTC)
+
+    assert resolve_tz(traveling, instant) == ZoneInfo("Europe/Oslo")
+    boundary = next_timezone_boundary(traveling, instant)
+    assert boundary is not None
+    assert boundary.astimezone(UTC) == datetime(2026, 7, 11, 22, 0, tzinfo=UTC)
+    assert resolve_tz(traveling, boundary) == ZoneInfo("America/New_York")
+    heartbeat.state_set(traveling, "last_wake_at", instant.isoformat(timespec="seconds"))
+    assert heartbeat.next_wake_at(traveling, instant).astimezone(UTC) == boundary
+
+
+def test_quiet_release_recomputes_after_trip_end(settings) -> None:
+    from assistant.calendar.context import resolve_tz
+    from assistant.trips import store as trips_store
+
+    traveling = settings.model_copy(
+        update={
+            "enable_trips": True,
+            "quiet_hours_default": "22:00-07:30",
+            "heartbeat_minutes": 600,
+        }
+    )
+    trips_store.create_trip(
+        traveling, "New York", start="2026-07-06", end="2026-07-11",
+        timezone="America/New_York",
+    )
+    before_end = datetime(2026, 7, 12, 3, 0, tzinfo=UTC)
+    current = before_end.astimezone(resolve_tz(traveling, before_end))
+
+    # First stop at destination midnight so the scheduler can adopt home time.
+    assert heartbeat.next_wake_at(traveling, current).astimezone(UTC) == datetime(
+        2026, 7, 12, 4, 0, tzinfo=UTC
+    )
+
+    after_end = datetime(2026, 7, 12, 4, 0, tzinfo=UTC)
+    current = after_end.astimezone(resolve_tz(traveling, after_end))
+    release = heartbeat.next_wake_at(traveling, current)
+    assert release.strftime("%Y-%m-%d %H:%M %Z") == "2026-07-12 07:30 CEST"
+    assert release.astimezone(UTC) == datetime(2026, 7, 12, 5, 30, tzinfo=UTC)
 
 
 def test_open_followup_pulls_the_wake_earlier(paced) -> None:
