@@ -4,6 +4,21 @@ from __future__ import annotations
 from ._base import _ISO, _NO_MATCH, ToolContext, ToolSpec, _int_arg, _op_runner, _params
 
 
+def _attendee_params(props: dict[str, tuple[str, str]], required: list[str]) -> dict:
+    """Build a calendar mutation schema with the structured attendee list."""
+    schema = _params(props, required)
+    schema["properties"]["attendees"] = {
+        "type": "array",
+        "items": {"type": "string"},
+        "description": (
+            "Complete desired attendee list; each item is an email address or People "
+            "name. On reschedule, omit to preserve existing attendees or use [] to "
+            "remove all."
+        ),
+    }
+    return schema
+
+
 def _calendar_op(ctx: ToolContext, op: dict) -> str:
     from ..calendar import ops as calendar_ops
 
@@ -81,7 +96,7 @@ def _calendar_tools() -> list[ToolSpec]:
         ToolSpec(
             "create_event",
             "Schedule a new calendar event.",
-            _params(
+            _attendee_params(
                 {
                     "title": ("string", "Short event title"),
                     "start": ("string", _ISO),
@@ -97,7 +112,7 @@ def _calendar_tools() -> list[ToolSpec]:
         ToolSpec(
             "reschedule_event",
             "Change an existing event's time or details (whole series if recurring).",
-            _params(
+            _attendee_params(
                 {
                     "id": ("string", "Exact event id from Upcoming events"),
                     "start": ("string", _ISO),

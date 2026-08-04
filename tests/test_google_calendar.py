@@ -15,6 +15,7 @@ import pytest
 
 from assistant.calendar import google_calendar, ops, outbox, recurrence, remote, store, sync, undo
 from assistant.config import Settings
+from assistant.people import store as people_store
 
 
 @pytest.fixture
@@ -214,6 +215,69 @@ def test_create_posts_with_our_id(settings, gserver) -> None:
     assert payload["id"] == event.id            # our id becomes the Google id
     assert payload["colorId"] in {str(value) for value in range(1, 12)}
     assert event.caldav_href == event.id and event.caldav_etag == '"g-1"'
+
+
+def test_attendee_edits_push_clear_and_undo_google(settings, gserver) -> None:
+    people_store.create_person(settings, "Kari Nord", email="kari@example.com")
+    ops.apply_op(
+        settings,
+        {
+            "op": "create", "title": "Lunch", "start": "2026-12-05T12:00:00+01:00",
+            "attendees": ["Kari Nord", "guest@example.com"],
+        },
+        "t1", "create-batch",
+    )
+    event = store.find_event(settings, "Lunch")
+    assert json.loads(gserver.of("POST")[-1]["body"])["attendees"] == [
+        {"email": "guest@example.com"},
+        {"email": "kari@example.com", "displayName": "Kari Nord"},
+    ]
+
+    original = event.attendees
+    ops.apply_op(
+        settings, {"op": "reschedule", "id": event.id, "attendees": []},
+        "t1", "edit-batch",
+    )
+    assert json.loads(gserver.of("PUT")[-1]["body"])["attendees"] == []
+    assert store.get_event(settings, event.id).attendees == ""
+
+    result = undo.undo_latest(settings, "t1", window_minutes=60)
+    assert result.startswith("Undone:")
+    assert store.get_event(settings, event.id).attendees == original
+    restored = json.loads(gserver.of("PUT")[-1]["body"])["attendees"]
+    assert {item["email"] for item in restored} == {"kari@example.com", "guest@example.com"}
+
+
+def test_ambiguous_attendee_does_not_write_google(settings, gserver) -> None:
+    people_store.create_person(settings, "Alex One", email="one@example.com")
+    people_store.create_person(settings, "Alex Two", email="two@example.com")
+    result = ops.apply_op(
+        settings,
+        {
+            "op": "create", "title": "No write", "start": "2026-12-05T12:00:00+01:00",
+            "attendees": ["Alex"],
+        },
+    )
+    assert "Ambiguous attendee" in result
+    assert not gserver.of("POST") and not gserver.of("PUT")
+    assert outbox.pending(settings) == []
+
+
+@pytest.mark.parametrize("address", ["a..b@example.com", "foo,bar@example.com"])
+def test_malformed_attendee_does_not_write_google(settings, gserver, address) -> None:
+    result = ops.apply_op(
+        settings,
+        {
+            "op": "create", "title": "No write", "start": "2026-12-05T12:00:00+01:00",
+            "attendees": [address],
+        },
+        "thread", "malformed-batch",
+    )
+    assert "Invalid attendee email address" in result
+    assert store.list_events(settings) == []
+    assert undo.undo_latest(settings, "thread", 60) == "Nothing to undo."
+    assert outbox.pending(settings) == []
+    assert not gserver.of("POST") and not gserver.of("PUT")
 
 
 def test_create_recurring_event_includes_google_timezone(settings, gserver) -> None:

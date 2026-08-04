@@ -16,13 +16,97 @@ reverts the whole batch deterministically.
 from __future__ import annotations
 
 import logging
+import re
 
 from .. import write_ops
 from ..config import Settings
+from ..people import store as people_store
 from . import recurrence, store, sync, undo
 from .context import format_when, overlapping_events, resolve_tz
 
 logger = logging.getLogger(__name__)
+
+_EMAIL_LOCAL_RE = re.compile(
+    r"[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+"
+    r"(?:\.[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+)*"
+)
+_EMAIL_DOMAIN_LABEL_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?")
+
+
+def _is_valid_email(value: str) -> bool:
+    """Validate the practical dot-atom mailboxes accepted by calendar providers."""
+    if len(value) > 254 or value.count("@") != 1:
+        return False
+    local, domain = value.rsplit("@", 1)
+    if len(local) > 64 or len(domain) > 253 or not _EMAIL_LOCAL_RE.fullmatch(local):
+        return False
+    labels = domain.split(".")
+    return len(labels) > 1 and all(_EMAIL_DOMAIN_LABEL_RE.fullmatch(label) for label in labels)
+
+
+def _resolve_attendees(
+    settings: Settings,
+    value: object,
+    existing: list[dict] | None = None,
+) -> tuple[list[dict] | None, str | None]:
+    """Resolve a complete attendee list without performing any writes."""
+    if not isinstance(value, list):
+        return None, "Attendees must be a list of People names or email addresses."
+
+    retained = {
+        store.normalize_email(item.get("email")): item
+        for item in (existing or [])
+        if store.normalize_email(item.get("email"))
+    }
+    resolved: dict[str, dict] = {}
+    for raw in value:
+        if not isinstance(raw, str) or not raw.strip():
+            return None, "Every attendee must be a non-empty People name or email address."
+        text = raw.strip()
+        email = store.normalize_email(text)
+        person = None
+        if not _is_valid_email(email):
+            if "@" in text or text.lower().startswith("mailto:"):
+                return None, f"Invalid attendee email address: {text}."
+            matches = people_store.find_people(settings, text)
+            if not matches:
+                return None, (
+                    f'No Person matches attendee "{text}". Use a stored People name '
+                    "or a direct email address."
+                )
+            if len(matches) > 1:
+                candidates = ", ".join(
+                    f'{p.name} ({p.id}, {p.email or "no email"})' for p in matches[:5]
+                )
+                more = f", +{len(matches) - 5} more" if len(matches) > 5 else ""
+                return None, (
+                    f'Ambiguous attendee "{text}" — matches: {candidates}{more}. '
+                    "Use a more specific People name, exact Person id, or direct email."
+                )
+            person = matches[0]
+            email = store.normalize_email(person.email)
+            if not email:
+                return None, (
+                    f'Person "{person.name}" ({person.id}) has no email. '
+                    "Add one to the Person or use a direct email address."
+                )
+            if not _is_valid_email(email):
+                return None, (
+                    f'Person "{person.name}" ({person.id}) has an invalid email. '
+                    "Update the Person or use a direct email address."
+                )
+
+        participant = dict(retained.get(email, {}))
+        participant["email"] = email
+        if person is not None:
+            participant["name"] = person.name
+        if email not in resolved:
+            resolved[email] = participant
+        elif person is not None:
+            # Prefer the People display name when a duplicate address was also
+            # supplied directly, while retaining provider-owned response metadata.
+            resolved[email]["name"] = person.name
+    return list(resolved.values()), None
 
 
 def _refuse_ics_mirror(settings: Settings, op: dict, match: store.Event) -> bool:
@@ -166,6 +250,12 @@ def apply_op(
     found/nothing to do)."""
     kind = op["op"]
     if kind == "create" and op.get("title") and op.get("start"):
+        attendees: list[dict] = []
+        if "attendees" in op:
+            resolved, error = _resolve_attendees(settings, op["attendees"])
+            if error:
+                return error
+            attendees = resolved or []
         rrule = str(op.get("rrule", "") or "")
         if rrule and not recurrence.validate_rrule(rrule):
             rrule = ""  # keep the event, drop an unparseable rule
@@ -177,6 +267,7 @@ def apply_op(
             location=str(op.get("location", "") or ""),
             notes=str(op.get("notes", "") or ""),
             rrule=rrule,
+            attendees=store.dump_attendees(attendees),
         )
         suffix = f" ({recurrence.humanize_rrule(event.rrule)})" if event.rrule else ""
         summary = f"created: {event.title} @ {format_when(settings, event.start)}{suffix}"
@@ -193,6 +284,14 @@ def apply_op(
         if target is None:
             return None
         before = store.get_event(settings, target)
+        attendee_update: str | None = None
+        if "attendees" in op:
+            resolved, error = _resolve_attendees(
+                settings, op["attendees"], store.load_attendees(before) if before else []
+            )
+            if error:
+                return error
+            attendee_update = store.dump_attendees(resolved or [])
         revised = store.update_event(
             settings, target,
             start=op.get("start"),
@@ -200,6 +299,7 @@ def apply_op(
             title=op.get("title"),
             location=op.get("location"),
             notes=op.get("notes"),
+            attendees=attendee_update,
         )
         if revised is None:
             return None

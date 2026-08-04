@@ -186,19 +186,62 @@ def test_postgres_calendar_and_task_stores_delegate(monkeypatch: pytest.MonkeyPa
     event = calendar_store.Event(id="e1", title="Dentist", start="2026-07-09T12:00:00+02:00")
     task = task_store.Task(id="t1", title="Pay bill")
 
-    monkeypatch.setattr(storage_postgres, "create_event", lambda *args: event)
+    calendar_calls: list[tuple] = []
+    monkeypatch.setattr(
+        storage_postgres, "create_event",
+        lambda *args: calendar_calls.append(("create", *args[1:])) or event,
+    )
     monkeypatch.setattr(storage_postgres, "list_events", lambda _settings: [event])
-    monkeypatch.setattr(storage_postgres, "update_event", lambda _settings, event_id, fields: event)
+    monkeypatch.setattr(
+        storage_postgres, "update_event",
+        lambda _settings, event_id, fields: calendar_calls.append(("update", event_id, fields))
+        or event,
+    )
     monkeypatch.setattr(storage_postgres, "create_task", lambda *args: task)
     monkeypatch.setattr(storage_postgres, "list_tasks", lambda _settings: [task])
     monkeypatch.setattr(storage_postgres, "complete_task", lambda _settings, task_id: task)
 
-    assert calendar_store.create_event(settings, "Dentist", event.start) == event
+    attendees = calendar_store.dump_attendees([{"email": "guest@example.com"}])
+    assert calendar_store.create_event(
+        settings, "Dentist", event.start, attendees=attendees
+    ) == event
     assert calendar_store.list_events(settings) == [event]
-    assert calendar_store.update_event(settings, "e1", title="New") == event
+    assert calendar_store.update_event(settings, "e1", title="New", attendees="") == event
+    assert calendar_calls == [
+        ("create", "Dentist", event.start, "", "", "", "", attendees),
+        ("update", "e1", {"title": "New", "attendees": ""}),
+    ]
     assert task_store.create_task(settings, "Pay bill") == task
     assert task_store.list_tasks(settings) == [task]
     assert task_store.complete_task(settings, "t1") == task
+
+
+def test_postgres_calendar_create_sql_includes_attendees(monkeypatch: pytest.MonkeyPatch) -> None:
+    from contextlib import contextmanager
+
+    from assistant.storage_postgres import calendar as pg_calendar
+
+    captured: list[tuple[str, tuple]] = []
+
+    class FakeConn:
+        def execute(self, sql, params=()):
+            captured.append((sql, params))
+
+    @contextmanager
+    def fake_connect(_settings):
+        yield FakeConn()
+
+    monkeypatch.setattr(pg_calendar, "ensure_calendar_schema", lambda _settings: None)
+    monkeypatch.setattr(pg_calendar, "connect", fake_connect)
+    attendees = '[{"email":"guest@example.com"}]'
+    event = pg_calendar.create_event(
+        Settings(), "Lunch", "2026-12-01T12:00:00+00:00", attendees=attendees
+    )
+
+    sql, params = captured[0]
+    assert "rrule, attendees, created" in sql
+    assert params[7] == attendees
+    assert event.attendees == attendees
 
 
 def test_postgres_undo_ledgers_delegate(monkeypatch: pytest.MonkeyPatch) -> None:

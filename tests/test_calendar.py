@@ -14,9 +14,10 @@ from datetime import timedelta
 
 import pytest
 
-from assistant.calendar import context, ops, recurrence, store
+from assistant.calendar import context, ops, recurrence, store, undo
 from assistant.config import Settings
 from assistant.ops_parse import parse_ops
+from assistant.people import store as people_store
 
 
 @pytest.fixture
@@ -54,6 +55,15 @@ def test_event_roundtrip(settings) -> None:
     assert back.start == start
     assert back.location == "Clinic"
     assert back.created and back.updated
+
+
+def test_event_attendees_create_and_update_roundtrip(settings) -> None:
+    attendees = store.dump_attendees([{"email": "GUEST@example.com", "status": "accepted"}])
+    event = store.create_event(
+        settings, title="Lunch", start=_iso_in(settings, days=1), attendees=attendees
+    )
+    assert store.get_event(settings, event.id).attendees == attendees
+    assert store.update_event(settings, event.id, attendees="").attendees == ""
 
 
 def test_list_events_orders_and_bounds(settings) -> None:
@@ -177,6 +187,94 @@ def test_apply_op_create_reschedule_cancel(settings) -> None:
 
     ops.apply_op(settings, {"op": "cancel", "id": event_id})
     assert store.list_events(settings) == []
+
+
+def test_attendees_resolve_dedupe_replace_and_preserve_metadata(settings) -> None:
+    kari = people_store.create_person(settings, "Kari Nord", email="KARI@example.com")
+    ops.apply_op(
+        settings,
+        {
+            "op": "create", "title": "Lunch", "start": _iso_in(settings, days=2),
+            "attendees": ["MAILTO:KARI@example.com", kari.name, "guest@example.com"],
+        },
+    )
+    event = store.find_event(settings, "Lunch")
+    assert store.load_attendees(event) == [
+        {"email": "guest@example.com"},
+        {"email": "kari@example.com", "name": "Kari Nord"},
+    ]
+
+    imported = store.dump_attendees([
+        {
+            "email": "kari@example.com", "name": "Old name", "status": "accepted",
+            "role": "optional", "rsvp": True,
+        },
+        {"email": "remove@example.com"},
+    ])
+    store.update_event(settings, event.id, attendees=imported)
+    ops.apply_op(settings, {"op": "reschedule", "id": event.id, "attendees": [kari.name]})
+    assert store.load_attendees(store.get_event(settings, event.id)) == [{
+        "email": "kari@example.com", "name": "Kari Nord", "status": "accepted",
+        "role": "optional", "rsvp": True,
+    }]
+
+    # Omission preserves, while an explicit empty list clears.
+    ops.apply_op(settings, {"op": "reschedule", "id": event.id, "title": "Lunch 2"})
+    assert store.load_attendees(store.get_event(settings, event.id))
+    ops.apply_op(settings, {"op": "reschedule", "id": event.id, "attendees": []})
+    assert store.get_event(settings, event.id).attendees == ""
+
+
+def test_attendee_resolution_failures_are_atomic(settings) -> None:
+    a = people_store.create_person(settings, "Alex Smith", email="a@example.com")
+    b = people_store.create_person(settings, "Alex Jones", email="b@example.com")
+    no_email = people_store.create_person(settings, "No Email")
+
+    ambiguous = ops.apply_op(
+        settings,
+        {
+            "op": "create", "title": "Should not exist", "start": _iso_in(settings, days=1),
+            "attendees": ["Alex"],
+        },
+        "thread", "batch-create",
+    )
+    assert "Ambiguous attendee" in ambiguous and a.id in ambiguous and b.id in ambiguous
+    assert store.list_events(settings) == []
+    assert undo.undo_latest(settings, "thread", 15) == "Nothing to undo."
+
+    original = store.create_event(
+        settings, title="Original", start=_iso_in(settings, days=2),
+        attendees=store.dump_attendees([{"email": "old@example.com"}]),
+    )
+    before = store.get_event(settings, original.id)
+    result = ops.apply_op(
+        settings,
+        {
+            "op": "reschedule", "id": original.id, "title": "Changed",
+            "start": _iso_in(settings, days=3), "attendees": ["Alex"],
+        },
+        "thread", "batch-update",
+    )
+    assert "Ambiguous attendee" in result
+    assert store.get_event(settings, original.id) == before
+    assert undo.undo_latest(settings, "thread", 15) == "Nothing to undo."
+
+    assert "has no email" in ops.apply_op(
+        settings,
+        {"op": "reschedule", "id": original.id, "attendees": [no_email.name]},
+    )
+    for bad in (
+        "Unknown Person", "bad@", "a..b@example.com", "foo,bar@example.com",
+        ["ok@example.com", ""],
+    ):
+        value = bad if isinstance(bad, list) else [bad]
+        assert ops.apply_op(
+            settings, {"op": "reschedule", "id": original.id, "attendees": value}
+        )
+    assert "must be a list" in ops.apply_op(
+        settings, {"op": "reschedule", "id": original.id, "attendees": "x@example.com"}
+    )
+    assert store.get_event(settings, original.id) == before
 
 
 def test_apply_op_creates_recurring_series(settings) -> None:

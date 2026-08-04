@@ -117,7 +117,10 @@ def _event_from_row(row: dict):
     )
 
 
-def create_event(settings: Settings, title: str, start: str, end: str = "", location: str = "", notes: str = "", rrule: str = ""):
+def create_event(
+    settings: Settings, title: str, start: str, end: str = "", location: str = "",
+    notes: str = "", rrule: str = "", attendees: str = "",
+):
     import uuid
 
     from ..calendar import store as calendar_store
@@ -132,15 +135,19 @@ def create_event(settings: Settings, title: str, start: str, end: str = "", loca
         location=location.strip(),
         notes=notes.strip(),
         rrule=rrule.strip(),
+        attendees=attendees.strip(),
         created=now,
         updated=now,
     )
     with connect(settings) as conn:
         conn.execute(
             "INSERT INTO assistant_calendar_events "
-            "(id, title, start, \"end\", location, notes, rrule, created, updated) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
-            (event.id, event.title, event.start, event.end, event.location, event.notes, event.rrule, event.created, event.updated),
+            "(id, title, start, \"end\", location, notes, rrule, attendees, created, updated) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            (
+                event.id, event.title, event.start, event.end, event.location,
+                event.notes, event.rrule, event.attendees, event.created, event.updated,
+            ),
         )
     return event
 

@@ -188,8 +188,8 @@ def _to_body(settings: Settings, event: store.Event) -> dict:
         if participant.get("role") == "optional":
             attendee["optional"] = True
         attendees.append(attendee)
-    if attendees:
-        body["attendees"] = attendees
+    # An explicit empty list is required to remove all attendees on update.
+    body["attendees"] = attendees
     recurrence: list[str] = []
     if event.rrule:
         recurrence.append("RRULE:" + event.rrule)

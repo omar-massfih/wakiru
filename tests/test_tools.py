@@ -17,6 +17,7 @@ import pytest
 from assistant.calendar import context
 from assistant.calendar import store as calendar_store
 from assistant.config import Settings
+from assistant.people import store as people_store
 from assistant.tasks import store as tasks_store
 from assistant.tools import ToolContext, available_tools, execute_tool, tool_map
 from assistant.undo import undo_latest
@@ -242,6 +243,33 @@ def test_create_event_writes_store_and_undo_ledger(settings) -> None:
     undone = undo_latest(settings, THREAD, settings.write_undo_window_minutes)
     assert undone.startswith("Undone:")
     assert calendar_store.list_events(settings) == []
+
+
+def test_calendar_tools_expose_and_dispatch_attendees(settings) -> None:
+    tools = tool_map(settings)
+    for name in ("create_event", "reschedule_event"):
+        attendee_schema = tools[name].parameters["properties"]["attendees"]
+        assert attendee_schema["type"] == "array"
+        assert attendee_schema["items"] == {"type": "string"}
+
+    person = people_store.create_person(settings, "Kari Nord", email="KARI@example.com")
+    result = execute_tool(
+        tools["create_event"], _ctx(settings),
+        {
+            "title": "Lunch", "start": _iso_in(settings, days=2),
+            "attendees": ["MAILTO:GUEST@Example.com", person.name],
+        },
+    )
+    assert result.startswith("created: Lunch")
+    event = calendar_store.find_event(settings, "Lunch")
+    assert calendar_store.load_attendees(event) == [
+        {"email": "guest@example.com"},
+        {"email": "kari@example.com", "name": "Kari Nord"},
+    ]
+
+    # The shared dispatcher must retain [], since it means replace with nobody.
+    execute_tool(tools["reschedule_event"], _ctx(settings), {"id": event.id, "attendees": []})
+    assert calendar_store.load_attendees(calendar_store.get_event(settings, event.id)) == []
 
 
 def test_task_roundtrip_and_ambiguous_target(settings) -> None:
